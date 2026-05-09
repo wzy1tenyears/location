@@ -1953,6 +1953,17 @@ function findDisplayIpProbeResult(webrtcSource, ipSource) {
         return null;
     }
 
+    const ipv6Variant = variants.find((item) => (
+        item
+        && item.label === 'IPv6'
+        && item.ip
+        && webrtcIps.has(String(item.ip).trim())
+        && (item.city || inferCityFromText(item.address || ''))
+    ));
+    if (ipv6Variant) {
+        return ipv6Variant;
+    }
+
     const displayVariant = typeof chooseDisplayProbeEntry === 'function'
         ? chooseDisplayProbeEntry(variants)
         : null;
@@ -1960,13 +1971,7 @@ function findDisplayIpProbeResult(webrtcSource, ipSource) {
         return displayVariant;
     }
 
-    return variants.find((item) => (
-        item
-        && item.label === 'IPv6'
-        && item.ip
-        && webrtcIps.has(String(item.ip).trim())
-        && (item.city || inferCityFromText(item.address || ''))
-    )) || null;
+    return null;
 }
 
 function sourceIpValues(source) {
@@ -1982,8 +1987,16 @@ function sourceIpValues(source) {
     if (Array.isArray(source.candidates)) {
         source.candidates.forEach((candidate) => add(candidate.ip));
     }
+    extractIpValues(source.address).forEach(add);
 
     return values;
+}
+
+function extractIpValues(text) {
+    const value = String(text || '');
+    const ipv4Matches = value.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
+    const ipv6Matches = value.match(/\b[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,}\b/gi) || [];
+    return [...ipv4Matches, ...ipv6Matches];
 }
 
 function withTimeout(promise, timeoutMs, fallback) {

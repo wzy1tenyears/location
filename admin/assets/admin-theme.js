@@ -238,16 +238,19 @@
 
     document.querySelectorAll('form[data-confirm]').forEach(bindConfirmForm);
 
-    document.querySelectorAll('details.row-more > summary').forEach((summary) => {
-        summary.addEventListener('click', (event) => {
-            const details = summary.parentElement;
-            if (!details || details.classList.contains('installed-apps-details')) {
-                return;
-            }
+    document.addEventListener('click', (event) => {
+        const summary = event.target.closest('details.row-more > summary');
+        if (!summary) {
+            return;
+        }
 
-            event.preventDefault();
-            details.open = false;
-            openDetailsModal(details);
-        });
+        const details = summary.parentElement;
+        if (!details || details.classList.contains('installed-apps-details')) {
+            return;
+        }
+
+        event.preventDefault();
+        details.open = false;
+        openDetailsModal(details);
     });
 })();

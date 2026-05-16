@@ -224,8 +224,7 @@ try {
                 throw new RuntimeException('家庭组名称不能为空。');
             }
 
-            ensure_family_group_available($pdo, $groupName);
-            ensure_family_group_record($pdo, $groupName);
+            create_family_group_record($pdo, $groupName);
             $message = '家庭组已添加。';
         }
 
@@ -254,7 +253,7 @@ try {
         }
 
         if ($action === 'add_invite_code') {
-            $code = post_string('code', 64);
+            $code = post_string('code', 255);
             $note = post_string('note', 120);
             $inviteType = post_string('invite_type', 32);
             $maxUses = max(1, (int) ($_POST['max_uses'] ?? 1));
@@ -312,55 +311,8 @@ try {
                 throw new RuntimeException('家庭组不存在。');
             }
 
-            $oldGroupName = (string) $group['group_name'];
-            if (!hash_equals($oldGroupName, $groupName)) {
-                ensure_family_group_available($pdo, $groupName, $groupId);
-
-                $stmt = $pdo->prepare('
-                    SELECT COUNT(*)
-                    FROM user_groups old_group
-                    INNER JOIN user_groups new_group
-                        ON new_group.user_id = old_group.user_id
-                       AND new_group.group_name = ?
-                    WHERE old_group.group_name = ?
-                ');
-                $stmt->execute([$groupName, $oldGroupName]);
-
-                if ((int) $stmt->fetchColumn() > 0) {
-                    throw new RuntimeException('有账号同时属于这两个家庭组，不能直接改成同名。');
-                }
-            }
-
-            $pdo->beginTransaction();
-
-            $stmt = $pdo->prepare('UPDATE family_groups SET group_name = ? WHERE id = ?');
+            $stmt = $pdo->prepare('UPDATE family_groups SET display_name = ? WHERE id = ?');
             $stmt->execute([$groupName, $groupId]);
-
-            if (!hash_equals($oldGroupName, $groupName)) {
-                $stmt = $pdo->prepare('
-                    DELETE target_latest
-                    FROM latest_group_locations target_latest
-                    INNER JOIN user_groups old_group
-                        ON old_group.user_id = target_latest.user_id
-                       AND old_group.group_name = ?
-                    WHERE target_latest.group_name = ?
-                ');
-                $stmt->execute([$oldGroupName, $groupName]);
-
-                $stmt = $pdo->prepare('UPDATE user_groups SET group_name = ? WHERE group_name = ?');
-                $stmt->execute([$groupName, $oldGroupName]);
-
-                $stmt = $pdo->prepare('UPDATE users SET group_name = ? WHERE group_name = ?');
-                $stmt->execute([$groupName, $oldGroupName]);
-
-                $stmt = $pdo->prepare('UPDATE latest_group_locations SET group_name = ? WHERE group_name = ?');
-                $stmt->execute([$groupName, $oldGroupName]);
-
-                $stmt = $pdo->prepare('UPDATE locations SET group_name = ? WHERE group_name = ?');
-                $stmt->execute([$groupName, $oldGroupName]);
-            }
-
-            $pdo->commit();
             $message = '家庭组已更新。';
         }
 
@@ -688,6 +640,7 @@ try {
         SELECT
             fg.id,
             fg.group_name,
+            fg.display_name,
             fg.group_code,
             fg.owner_user_id,
             fg.created_at,
@@ -695,8 +648,8 @@ try {
             COUNT(ug.id) AS member_count
         FROM family_groups fg
         LEFT JOIN user_groups ug ON ug.group_name = fg.group_name
-        GROUP BY fg.id, fg.group_name, fg.group_code, fg.owner_user_id, fg.created_at, fg.updated_at
-        ORDER BY fg.group_name ASC
+        GROUP BY fg.id, fg.group_name, fg.display_name, fg.group_code, fg.owner_user_id, fg.created_at, fg.updated_at
+        ORDER BY fg.display_name ASC, fg.group_name ASC
     ');
     $familyGroups = $familyGroupsStmt->fetchAll();
 
@@ -841,7 +794,7 @@ try {
             }
         })();
     </script>
-    <link rel="stylesheet" href="assets/admin.css">
+    <link rel="stylesheet" href="/<?= e(admin_url_path()) ?>assets/admin.css?v=<?= (int) filemtime(__DIR__ . '/assets/admin.css') ?>">
 </head>
 <body>
     <header class="topbar">
@@ -991,7 +944,7 @@ try {
                     <?php foreach ($familyGroups as $group): ?>
                         <div class="group-row">
                             <div class="group-summary">
-                                <strong><?= e((string) $group['group_name']) ?></strong>
+                                <strong><?= e((string) ($group['display_name'] ?: $group['group_name'])) ?></strong>
                                 <span class="muted">组号：<?= e((string) ($group['group_code'] ?? '')) ?></span>
                                 <span class="muted">成员：<?= (int) $group['member_count'] ?></span>
                             </div>
@@ -1003,7 +956,7 @@ try {
                                     <input type="hidden" name="group_id" value="<?= (int) $group['id'] ?>">
                                     <label>
                                         <span>家庭组</span>
-                                        <input name="group_name" value="<?= e((string) $group['group_name']) ?>" required>
+                                        <input name="group_name" value="<?= e((string) ($group['display_name'] ?: $group['group_name'])) ?>" required>
                                     </label>
                                     <button class="small" type="submit">保存</button>
                                 </form>
@@ -1415,7 +1368,7 @@ try {
             </div>
         </section>
     </main>
-    <script src="assets/admin-theme.js" defer></script>
+    <script src="/<?= e(admin_url_path()) ?>assets/admin-theme.js?v=<?= (int) filemtime(__DIR__ . '/assets/admin-theme.js') ?>" defer></script>
     <script src="/assets/popup-select.js" defer></script>
 </body>
 </html>

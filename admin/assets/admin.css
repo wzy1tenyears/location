@@ -1090,6 +1090,16 @@ th {
 
     .history-record-head {
         gap: 8px;
+        grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .history-card-delete-form {
+        justify-self: end;
+        width: auto;
+    }
+
+    .history-card-delete-form button {
+        width: auto;
     }
 
     .history-group-pill {

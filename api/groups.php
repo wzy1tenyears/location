@@ -58,25 +58,10 @@ try {
         }
 
         $oldGroupName = (string) $group['group_name'];
-        if (!hash_equals($oldGroupName, $groupName)) {
-            $stmt = $pdo->prepare('SELECT id FROM family_groups WHERE group_name = ? AND id <> ? LIMIT 1');
-            $stmt->execute([$groupName, $groupId]);
-            if ($stmt->fetch()) {
-                json_response(['ok' => false, 'message' => '家庭组名称已存在。'], 409);
-            }
-        }
 
         $pdo->beginTransaction();
-        $stmt = $pdo->prepare('UPDATE family_groups SET group_name = ? WHERE id = ?');
+        $stmt = $pdo->prepare('UPDATE family_groups SET display_name = ? WHERE id = ?');
         $stmt->execute([$groupName, $groupId]);
-        $stmt = $pdo->prepare('UPDATE user_groups SET group_name = ? WHERE group_name = ?');
-        $stmt->execute([$groupName, $oldGroupName]);
-        $stmt = $pdo->prepare('UPDATE users SET group_name = ? WHERE group_name = ?');
-        $stmt->execute([$groupName, $oldGroupName]);
-        $stmt = $pdo->prepare('UPDATE latest_group_locations SET group_name = ? WHERE group_name = ?');
-        $stmt->execute([$groupName, $oldGroupName]);
-        $stmt = $pdo->prepare('UPDATE locations SET group_name = ? WHERE group_name = ?');
-        $stmt->execute([$groupName, $oldGroupName]);
         $pdo->commit();
         latest_locations_cache_forget_all();
 

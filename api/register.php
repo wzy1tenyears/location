@@ -14,6 +14,7 @@ try {
     $data = request_data();
     $username = input_string('username', 64);
     $password = input_string('password', 255);
+    $passwordConfirm = input_string('password_confirm', 255);
     $displayName = input_string('display_name', 100);
     $inviteCode = trim((string) ($data['invite_code'] ?? ''));
     $groupName = trim((string) ($data['group_name'] ?? ''));
@@ -30,8 +31,14 @@ try {
     if (strlen($password) < 6) {
         json_response(['ok' => false, 'message' => '密码至少 6 位。'], 422);
     }
+    if (!hash_equals($password, $passwordConfirm)) {
+        json_response(['ok' => false, 'message' => '两次输入的密码不一致。'], 422);
+    }
     if ($inviteCode === '') {
         json_response(['ok' => false, 'message' => '请输入邀请码。'], 422);
+    }
+    if (!preg_match('/^[0-9a-zA-Z]{1,255}$/', $inviteCode)) {
+        json_response(['ok' => false, 'message' => '邀请码格式不正确。'], 422);
     }
     if (!$termsAccepted || !$crossBorderAccepted) {
         json_response(['ok' => false, 'message' => '请先同意全部协议。'], 403);
@@ -63,12 +70,8 @@ try {
             if ($groupName === '') {
                 json_response(['ok' => false, 'message' => '请填写要创建的家庭组名称。'], 422);
             }
-            $assignedGroupName = $groupName;
-            $stmt = $pdo->prepare('SELECT id FROM family_groups WHERE group_name = ? LIMIT 1');
-            $stmt->execute([$assignedGroupName]);
-            if ($stmt->fetch()) {
-                json_response(['ok' => false, 'message' => '家庭组名称已存在，请更换。'], 409);
-            }
+            $createdGroup = create_family_group_record($pdo, $groupName);
+            $assignedGroupName = (string) $createdGroup['group_name'];
         }
         ensure_family_group_record($pdo, $assignedGroupName);
     } else {
@@ -100,7 +103,8 @@ try {
     $userId = (int) $pdo->lastInsertId();
 
     if ((string) $invite['invite_type'] === 'group_create' && trim((string) ($invite['assigned_group_name'] ?? '')) === '') {
-        ensure_family_group_record($pdo, $assignedGroupName, $userId);
+        $stmt = $pdo->prepare('UPDATE family_groups SET owner_user_id = ? WHERE group_name = ? AND owner_user_id IS NULL');
+        $stmt->execute([$userId, $assignedGroupName]);
         $stmt = $pdo->prepare('UPDATE invite_codes SET assigned_group_name = ? WHERE id = ?');
         $stmt->execute([$assignedGroupName, (int) $invite['id']]);
     }

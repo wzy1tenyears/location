@@ -10,7 +10,7 @@ try {
     $data = request_data();
     $code = trim((string) ($_GET['code'] ?? ($data['code'] ?? '')));
 
-    if (!preg_match('/^[0-9a-zA-Z]{6,64}$/', $code)) {
+    if (!preg_match('/^[0-9a-zA-Z]{1,255}$/', $code)) {
         json_response(['ok' => false, 'message' => '邀请码格式不正确。'], 422);
     }
 

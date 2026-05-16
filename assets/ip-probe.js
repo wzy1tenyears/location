@@ -24,6 +24,32 @@ const IP_PROVIDERS = {
     },
     geolocation: [
         {
+            name: 'Cloudflare Visitor',
+            lookup: async (ip) => {
+                const data = await getCloudflareLocationProbe();
+                if (!data || !data.available) {
+                    return null;
+                }
+
+                const cloudflareIps = [data.ip, data.ipv6]
+                    .map((value) => String(value || '').trim())
+                    .filter((value) => value && isIpAddress(value));
+                if (!cloudflareIps.length || !cloudflareIps.includes(ip)) {
+                    return null;
+                }
+
+                return normalizeIpGeo({
+                    ip,
+                    country: data.country || data.country_code || '',
+                    region: data.region || data.region_code || '',
+                    city: data.city || '',
+                    latitude: data.latitude,
+                    longitude: data.longitude,
+                    provider: 'Cloudflare',
+                });
+            },
+        },
+        {
             name: 'IPinfo Lite',
             lookup: async (ip) => {
                 const data = await api('ipinfo_lite', {
@@ -173,6 +199,7 @@ const IP_PROVIDERS = {
 
 const IP_GEO_FAST_WAIT_MS = 900;
 const IP_GEO_MIN_EARLY_RESULTS = 3;
+let cloudflareLocationProbePromise = null;
 
 async function probeIpAddress(onUpdate = null) {
     const result = {
@@ -184,11 +211,15 @@ async function probeIpAddress(onUpdate = null) {
 
     let serverIp = '';
 
-    try {
-        const serverProbe = await api('ip_probe');
-        serverIp = serverProbe.ip || '';
-    } catch (error) {
-        // Keep fallback text and try the public probe below.
+    const [serverProbeResult, cloudflareProbeResult] = await Promise.allSettled([
+        api('ip_probe'),
+        getCloudflareLocationProbe(),
+    ]);
+    if (serverProbeResult.status === 'fulfilled') {
+        serverIp = serverProbeResult.value.ip || '';
+    }
+    if (!serverIp && cloudflareProbeResult.status === 'fulfilled' && cloudflareProbeResult.value) {
+        serverIp = cloudflareProbeResult.value.ip || cloudflareProbeResult.value.ipv6 || '';
     }
 
     const [ipv4Candidates, ipv6Candidates, autoCandidates] = await Promise.all([
@@ -289,6 +320,14 @@ function rememberIpProbeResult(result) {
     if (result && typeof window !== 'undefined') {
         window.__latestIpProbeResult = result;
     }
+}
+
+function getCloudflareLocationProbe() {
+    if (!cloudflareLocationProbePromise) {
+        cloudflareLocationProbePromise = api('cloudflare_location').catch(() => null);
+    }
+
+    return cloudflareLocationProbePromise;
 }
 
 function firstUsefulGeocodedVariant(promises) {

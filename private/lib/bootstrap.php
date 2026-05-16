@@ -301,6 +301,7 @@ function ensure_schema(PDO $pdo): void
         CREATE TABLE IF NOT EXISTS family_groups (
             id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
             group_name VARCHAR(100) NOT NULL UNIQUE,
+            display_name VARCHAR(100) NOT NULL DEFAULT '',
             group_code VARCHAR(6) NULL UNIQUE,
             owner_user_id INT UNSIGNED NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -376,8 +377,13 @@ function ensure_schema(PDO $pdo): void
     add_column_if_missing($pdo, 'users', 'privacy_policy_accepted_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'cross_border_transfer_accepted_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'report_interval_seconds', 'INT UNSIGNED NOT NULL DEFAULT ' . DEFAULT_REPORT_INTERVAL_SECONDS);
+    add_column_if_missing($pdo, 'family_groups', 'display_name', "VARCHAR(100) NOT NULL DEFAULT ''");
     add_column_if_missing($pdo, 'family_groups', 'group_code', 'VARCHAR(6) NULL UNIQUE');
     add_column_if_missing($pdo, 'family_groups', 'owner_user_id', 'INT UNSIGNED NULL');
+    $pdo->exec("UPDATE family_groups SET display_name = group_name WHERE display_name = ''");
+    if (table_exists($pdo, 'invite_codes') && column_exists($pdo, 'invite_codes', 'code') && strtolower(column_type($pdo, 'invite_codes', 'code')) !== 'varchar(255)') {
+        $pdo->exec('ALTER TABLE invite_codes MODIFY code VARCHAR(255) NOT NULL');
+    }
     add_column_if_missing($pdo, 'locations', 'altitude', 'FLOAT NULL');
     add_column_if_missing($pdo, 'locations', 'location_meta', 'LONGTEXT NULL');
     add_column_if_missing($pdo, 'locations', 'address_diagnostics', 'LONGTEXT NULL');
@@ -453,7 +459,7 @@ function ensure_schema(PDO $pdo): void
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS invite_codes (
             id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            code VARCHAR(64) NOT NULL UNIQUE,
+            code VARCHAR(255) NOT NULL UNIQUE,
             note VARCHAR(120) NOT NULL DEFAULT '',
             invite_type ENUM('invite', 'group_create') NOT NULL DEFAULT 'invite',
             max_uses INT UNSIGNED NOT NULL DEFAULT 1,
@@ -470,6 +476,47 @@ function ensure_schema(PDO $pdo): void
     $done = true;
 }
 
+function create_family_group_record(PDO $pdo, string $displayName, ?int $ownerUserId = null): array
+{
+    $displayName = trim($displayName);
+    if ($displayName === '') {
+        throw new RuntimeException('家庭组名称不能为空。');
+    }
+
+    $code = generate_group_code($pdo);
+    $groupName = family_group_internal_name($pdo, $displayName, $code);
+    $stmt = $pdo->prepare('INSERT INTO family_groups (group_name, display_name, group_code, owner_user_id) VALUES (?, ?, ?, ?)');
+    $stmt->execute([$groupName, $displayName, $code, $ownerUserId]);
+
+    $stmt = $pdo->prepare('SELECT * FROM family_groups WHERE group_name = ? LIMIT 1');
+    $stmt->execute([$groupName]);
+    $group = $stmt->fetch();
+    if (!$group) {
+        throw new RuntimeException('家庭组创建失败。');
+    }
+
+    return $group;
+}
+
+function family_group_internal_name(PDO $pdo, string $displayName, string $code): string
+{
+    $base = $displayName;
+    if (function_exists('mb_strlen') && mb_strlen($base, 'UTF-8') > 93) {
+        $base = mb_substr($base, 0, 93, 'UTF-8');
+    } elseif (!function_exists('mb_strlen') && strlen($base) > 93) {
+        $base = substr($base, 0, 93);
+    }
+
+    $candidate = $base;
+    $stmt = $pdo->prepare('SELECT id FROM family_groups WHERE group_name = ? LIMIT 1');
+    $stmt->execute([$candidate]);
+    if (!$stmt->fetch()) {
+        return $candidate;
+    }
+
+    return $base . '#' . $code;
+}
+
 function ensure_family_group_record(PDO $pdo, string $groupName, ?int $ownerUserId = null): array
 {
     $groupName = trim($groupName);
@@ -477,8 +524,8 @@ function ensure_family_group_record(PDO $pdo, string $groupName, ?int $ownerUser
         throw new RuntimeException('家庭组名称不能为空。');
     }
 
-    $stmt = $pdo->prepare('INSERT IGNORE INTO family_groups (group_name, group_code, owner_user_id) VALUES (?, ?, ?)');
-    $stmt->execute([$groupName, generate_group_code($pdo), $ownerUserId]);
+    $stmt = $pdo->prepare('INSERT IGNORE INTO family_groups (group_name, display_name, group_code, owner_user_id) VALUES (?, ?, ?, ?)');
+    $stmt->execute([$groupName, $groupName, generate_group_code($pdo), $ownerUserId]);
 
     $stmt = $pdo->prepare('SELECT * FROM family_groups WHERE group_name = ? LIMIT 1');
     $stmt->execute([$groupName]);
@@ -492,6 +539,12 @@ function ensure_family_group_record(PDO $pdo, string $groupName, ?int $ownerUser
         $update = $pdo->prepare('UPDATE family_groups SET group_code = ? WHERE id = ?');
         $update->execute([$code, (int) $group['id']]);
         $group['group_code'] = $code;
+    }
+
+    if (empty($group['display_name'])) {
+        $update = $pdo->prepare('UPDATE family_groups SET display_name = ? WHERE id = ?');
+        $update->execute([$groupName, (int) $group['id']]);
+        $group['display_name'] = $groupName;
     }
 
     if ($ownerUserId !== null && empty($group['owner_user_id'])) {
@@ -892,6 +945,7 @@ function group_payload(array $group): array
     return [
         'id' => (int) ($group['id'] ?? 0),
         'group_name' => $group['group_name'],
+        'display_name' => $group['group_display_name'] ?? ($group['display_name'] ?? $group['group_name']),
         'group_code' => $group['group_code'] ?? '',
         'owner_user_id' => isset($group['owner_user_id']) ? (int) $group['owner_user_id'] : 0,
         'role' => normalize_role((string) $group['role']),
@@ -986,6 +1040,7 @@ function user_groups_for_user(int $userId): array
             ug.group_name,
             ug.role,
             fg.group_code,
+            fg.display_name AS group_display_name,
             fg.owner_user_id
         FROM user_groups ug
         LEFT JOIN family_groups fg ON fg.group_name = ug.group_name

@@ -1091,6 +1091,9 @@ try {
                         <?php endif; ?>
                         <?php foreach ($users as $user): ?>
                             <?php $userMemberships = $membershipsByUser[(int) $user['id']] ?? []; ?>
+                            <?php $userAgreementAcceptedAt = (string) ($user['user_agreement_accepted_at'] ?? ($user['terms_accepted_at'] ?? '')); ?>
+                            <?php $privacyPolicyAcceptedAt = (string) ($user['privacy_policy_accepted_at'] ?? ($user['terms_accepted_at'] ?? '')); ?>
+                            <?php $crossBorderAcceptedAt = (string) ($user['cross_border_transfer_accepted_at'] ?? ''); ?>
                             <tr>
                                 <td><?= e((string) $user['username']) ?></td>
                                 <td><?= e((string) $user['display_name']) ?></td>
@@ -1202,6 +1205,35 @@ try {
                                             <input type="hidden" name="user_id" value="<?= (int) $user['id'] ?>">
                                             <button class="small danger" type="submit">删除账号</button>
                                         </form>
+                                        <div class="environment-box">
+                                            <div class="environment-status">
+                                                <span>用户协议：</span>
+                                                <?php if ($userAgreementAcceptedAt !== ''): ?>
+                                                    <strong>已同意</strong>
+                                                    <span class="muted"><?= e(format_datetime($userAgreementAcceptedAt)) ?></span>
+                                                <?php else: ?>
+                                                    <strong>未同意</strong>
+                                                <?php endif; ?>
+                                            </div>
+                                            <div class="environment-status">
+                                                <span>隐私条约：</span>
+                                                <?php if ($privacyPolicyAcceptedAt !== ''): ?>
+                                                    <strong>已同意</strong>
+                                                    <span class="muted"><?= e(format_datetime($privacyPolicyAcceptedAt)) ?></span>
+                                                <?php else: ?>
+                                                    <strong>未同意</strong>
+                                                <?php endif; ?>
+                                            </div>
+                                            <div class="environment-status">
+                                                <span>跨境传输协议：</span>
+                                                <?php if ($crossBorderAcceptedAt !== ''): ?>
+                                                    <strong>已同意</strong>
+                                                    <span class="muted"><?= e(format_datetime($crossBorderAcceptedAt)) ?></span>
+                                                <?php else: ?>
+                                                    <strong>未同意</strong>
+                                                <?php endif; ?>
+                                            </div>
+                                        </div>
                                         </div>
                                     </details>
                                 </td>

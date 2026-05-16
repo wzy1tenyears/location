@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS users (
     failed_login_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
     login_locked_at DATETIME NULL,
     terms_accepted_at DATETIME NULL,
+    user_agreement_accepted_at DATETIME NULL,
+    privacy_policy_accepted_at DATETIME NULL,
     cross_border_transfer_accepted_at DATETIME NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

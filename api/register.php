@@ -86,9 +86,9 @@ try {
 
     $stmt = $pdo->prepare("
         INSERT INTO users
-            (username, password_hash, display_name, group_name, role, terms_accepted_at, cross_border_transfer_accepted_at)
+            (username, password_hash, display_name, group_name, role, terms_accepted_at, user_agreement_accepted_at, privacy_policy_accepted_at, cross_border_transfer_accepted_at)
         VALUES
-            (?, ?, ?, ?, ?, NOW(), NOW())
+            (?, ?, ?, ?, ?, NOW(), NOW(), NOW(), NOW())
     ");
     $stmt->execute([
         $username,

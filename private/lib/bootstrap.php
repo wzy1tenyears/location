@@ -288,6 +288,8 @@ function ensure_schema(PDO $pdo): void
             failed_login_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
             login_locked_at DATETIME NULL,
             terms_accepted_at DATETIME NULL,
+            user_agreement_accepted_at DATETIME NULL,
+            privacy_policy_accepted_at DATETIME NULL,
             cross_border_transfer_accepted_at DATETIME NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -370,6 +372,8 @@ function ensure_schema(PDO $pdo): void
     add_column_if_missing($pdo, 'users', 'failed_login_count', 'TINYINT UNSIGNED NOT NULL DEFAULT 0');
     add_column_if_missing($pdo, 'users', 'login_locked_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'terms_accepted_at', 'DATETIME NULL');
+    add_column_if_missing($pdo, 'users', 'user_agreement_accepted_at', 'DATETIME NULL');
+    add_column_if_missing($pdo, 'users', 'privacy_policy_accepted_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'cross_border_transfer_accepted_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'report_interval_seconds', 'INT UNSIGNED NOT NULL DEFAULT ' . DEFAULT_REPORT_INTERVAL_SECONDS);
     add_column_if_missing($pdo, 'family_groups', 'group_code', 'VARCHAR(6) NULL UNIQUE');
@@ -383,6 +387,13 @@ function ensure_schema(PDO $pdo): void
     add_column_if_missing($pdo, 'latest_group_locations', 'location_meta', 'LONGTEXT NULL');
     add_column_if_missing($pdo, 'latest_group_locations', 'address_diagnostics', 'LONGTEXT NULL');
     add_column_if_missing($pdo, 'latest_group_locations', 'address_mismatch', 'TINYINT(1) NOT NULL DEFAULT 0');
+    $pdo->exec('
+        UPDATE users
+        SET
+            user_agreement_accepted_at = COALESCE(user_agreement_accepted_at, terms_accepted_at),
+            privacy_policy_accepted_at = COALESCE(privacy_policy_accepted_at, terms_accepted_at)
+        WHERE terms_accepted_at IS NOT NULL
+    ');
     migrate_role_columns($pdo);
 
     $pdo->exec("
@@ -718,7 +729,17 @@ function require_terms_accepted(array $user): void
 
 function user_terms_accepted(array $user): bool
 {
-    return !empty($user['terms_accepted_at']);
+    return user_agreement_accepted($user) && user_privacy_policy_accepted($user);
+}
+
+function user_agreement_accepted(array $user): bool
+{
+    return !empty($user['user_agreement_accepted_at']) || !empty($user['terms_accepted_at']);
+}
+
+function user_privacy_policy_accepted(array $user): bool
+{
+    return !empty($user['privacy_policy_accepted_at']) || !empty($user['terms_accepted_at']);
 }
 
 function user_cross_border_transfer_accepted(array $user): bool

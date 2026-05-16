@@ -70,16 +70,21 @@ try {
     session_regenerate_id(true);
     $_SESSION['user_id'] = (int) $user['id'];
     clear_failed_login($pdo, (int) $user['id']);
-    if (!user_terms_accepted($user)) {
-        $stmt = $pdo->prepare('UPDATE users SET terms_accepted_at = NOW() WHERE id = ?');
-        $stmt->execute([(int) $user['id']]);
-        $user['terms_accepted_at'] = date('Y-m-d H:i:s');
-    }
-    if (!user_cross_border_transfer_accepted($user)) {
-        $stmt = $pdo->prepare('UPDATE users SET cross_border_transfer_accepted_at = NOW() WHERE id = ?');
-        $stmt->execute([(int) $user['id']]);
-        $user['cross_border_transfer_accepted_at'] = date('Y-m-d H:i:s');
-    }
+    $acceptedAt = date('Y-m-d H:i:s');
+    $stmt = $pdo->prepare('
+        UPDATE users
+        SET
+            terms_accepted_at = ?,
+            user_agreement_accepted_at = ?,
+            privacy_policy_accepted_at = ?,
+            cross_border_transfer_accepted_at = ?
+        WHERE id = ?
+    ');
+    $stmt->execute([$acceptedAt, $acceptedAt, $acceptedAt, $acceptedAt, (int) $user['id']]);
+    $user['terms_accepted_at'] = $acceptedAt;
+    $user['user_agreement_accepted_at'] = $acceptedAt;
+    $user['privacy_policy_accepted_at'] = $acceptedAt;
+    $user['cross_border_transfer_accepted_at'] = $acceptedAt;
 
     json_response([
         'ok' => true,

@@ -241,7 +241,7 @@
     document.querySelectorAll('details.row-more > summary').forEach((summary) => {
         summary.addEventListener('click', (event) => {
             const details = summary.parentElement;
-            if (!details || details.classList.contains('installed-apps-details') || details.classList.contains('history-more')) {
+            if (!details || details.classList.contains('installed-apps-details')) {
                 return;
             }
 

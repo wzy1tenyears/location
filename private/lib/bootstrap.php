@@ -332,6 +332,7 @@ function ensure_schema(PDO $pdo): void
             accuracy FLOAT NULL,
             heading FLOAT NULL,
             speed FLOAT NULL,
+            location_meta LONGTEXT NULL,
             address_diagnostics LONGTEXT NULL,
             address_mismatch TINYINT(1) NOT NULL DEFAULT 0,
             user_agent VARCHAR(255) NOT NULL DEFAULT '',
@@ -353,6 +354,7 @@ function ensure_schema(PDO $pdo): void
             accuracy FLOAT NULL,
             heading FLOAT NULL,
             speed FLOAT NULL,
+            location_meta LONGTEXT NULL,
             latest_location_id BIGINT UNSIGNED NULL,
             address_diagnostics LONGTEXT NULL,
             address_mismatch TINYINT(1) NOT NULL DEFAULT 0,
@@ -373,10 +375,12 @@ function ensure_schema(PDO $pdo): void
     add_column_if_missing($pdo, 'family_groups', 'group_code', 'VARCHAR(6) NULL UNIQUE');
     add_column_if_missing($pdo, 'family_groups', 'owner_user_id', 'INT UNSIGNED NULL');
     add_column_if_missing($pdo, 'locations', 'altitude', 'FLOAT NULL');
+    add_column_if_missing($pdo, 'locations', 'location_meta', 'LONGTEXT NULL');
     add_column_if_missing($pdo, 'locations', 'address_diagnostics', 'LONGTEXT NULL');
     add_column_if_missing($pdo, 'locations', 'address_mismatch', 'TINYINT(1) NOT NULL DEFAULT 0');
     add_column_if_missing($pdo, 'latest_group_locations', 'latest_location_id', 'BIGINT UNSIGNED NULL');
     add_column_if_missing($pdo, 'latest_group_locations', 'altitude', 'FLOAT NULL');
+    add_column_if_missing($pdo, 'latest_group_locations', 'location_meta', 'LONGTEXT NULL');
     add_column_if_missing($pdo, 'latest_group_locations', 'address_diagnostics', 'LONGTEXT NULL');
     add_column_if_missing($pdo, 'latest_group_locations', 'address_mismatch', 'TINYINT(1) NOT NULL DEFAULT 0');
     migrate_role_columns($pdo);
@@ -899,6 +903,7 @@ function location_payload(?array $row): ?array
         'accuracy' => $row['accuracy'] === null ? null : (float) $row['accuracy'],
         'heading' => $row['heading'] === null ? null : (float) $row['heading'],
         'speed' => $row['speed'] === null ? null : (float) $row['speed'],
+        'location_meta' => !empty($row['location_meta']) ? json_decode((string) $row['location_meta'], true) : null,
         'address_mismatch' => (int) ($row['address_mismatch'] ?? 0) === 1,
         'address_diagnostics' => $diagnostics,
         'updated_at' => format_datetime($row['updated_at']),
@@ -1086,6 +1091,7 @@ function latest_locations_for_group(string $groupName): array
             ll.accuracy,
             ll.heading,
             ll.speed,
+            ll.location_meta,
             ll.address_diagnostics,
             ll.address_mismatch,
             ll.updated_at,

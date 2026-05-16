@@ -161,9 +161,9 @@ function refresh_latest_location(PDO $pdo, int $userId, string $groupName): void
 
     $stmt = $pdo->prepare('
         INSERT INTO latest_group_locations
-            (user_id, group_name, role, latitude, longitude, altitude, accuracy, heading, speed, latest_location_id, address_diagnostics, address_mismatch, updated_at)
+            (user_id, group_name, role, latitude, longitude, altitude, accuracy, heading, speed, location_meta, latest_location_id, address_diagnostics, address_mismatch, updated_at)
         VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
             role = VALUES(role),
             latitude = VALUES(latitude),
@@ -172,6 +172,7 @@ function refresh_latest_location(PDO $pdo, int $userId, string $groupName): void
             accuracy = VALUES(accuracy),
             heading = VALUES(heading),
             speed = VALUES(speed),
+            location_meta = VALUES(location_meta),
             latest_location_id = VALUES(latest_location_id),
             address_diagnostics = VALUES(address_diagnostics),
             address_mismatch = VALUES(address_mismatch),
@@ -187,6 +188,7 @@ function refresh_latest_location(PDO $pdo, int $userId, string $groupName): void
         $row['accuracy'],
         $row['heading'],
         $row['speed'],
+        $row['location_meta'],
         (int) $row['id'],
         $row['address_diagnostics'],
         (int) $row['address_mismatch'],
@@ -1272,6 +1274,8 @@ try {
                     $headingText = $location['heading'] === null ? '' : (string) round((float) $location['heading']) . '°';
                     $speedText = $location['speed'] === null ? '' : number_format((float) $location['speed'], 2) . ' m/s';
                     $statusText = ((int) $location['address_mismatch'] === 1) ? '位置信息不一致' : '正常';
+                    $locationMeta = !empty($location['location_meta']) ? json_decode((string) $location['location_meta'], true) : [];
+                    $locationMeta = is_array($locationMeta) ? $locationMeta : [];
                     ?>
                     <article class="history-record-card">
                         <div class="history-record-head">
@@ -1324,6 +1328,30 @@ try {
                                         <strong><?= e($speedText) ?></strong>
                                     </div>
                                     <?php endif; ?>
+                                    <?php if (!empty($locationMeta['provider'])): ?>
+                                    <div class="history-detail-item">
+                                        <span>定位来源</span>
+                                        <strong><?= e((string) $locationMeta['provider']) ?></strong>
+                                    </div>
+                                    <?php endif; ?>
+                                    <?php if (!empty($locationMeta['location_time'])): ?>
+                                    <div class="history-detail-item">
+                                        <span>定位时间戳</span>
+                                        <strong><?= e((string) $locationMeta['location_time']) ?></strong>
+                                    </div>
+                                    <?php endif; ?>
+                                    <?php foreach ([
+                                        'vertical_accuracy' => '垂直精度',
+                                        'bearing_accuracy' => '方向精度',
+                                        'speed_accuracy' => '速度精度',
+                                    ] as $metaKey => $metaLabel): ?>
+                                        <?php if (isset($locationMeta[$metaKey]) && is_numeric($locationMeta[$metaKey])): ?>
+                                        <div class="history-detail-item">
+                                            <span><?= e($metaLabel) ?></span>
+                                            <strong><?= e((string) round((float) $locationMeta[$metaKey], 2)) ?></strong>
+                                        </div>
+                                        <?php endif; ?>
+                                    <?php endforeach; ?>
                                     <div class="history-detail-item full">
                                         <span>地址</span>
                                         <strong><?= $addressSummary === '' ? '暂无' : e($addressSummary) ?></strong>
@@ -1335,13 +1363,13 @@ try {
                                     </div>
                                     <?php endforeach; ?>
                                 </div>
+                                <form class="inline-form history-delete-form" method="post" data-confirm="确认删除这条历史定位记录？">
+                                    <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+                                    <input type="hidden" name="action" value="delete_location">
+                                    <input type="hidden" name="location_id" value="<?= (int) $location['id'] ?>">
+                                    <button class="small danger compact-danger" type="submit">删除</button>
+                                </form>
                             </details>
-                            <form class="inline-form history-delete-form" method="post" data-confirm="确认删除这条历史定位记录？">
-                                <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
-                                <input type="hidden" name="action" value="delete_location">
-                                <input type="hidden" name="location_id" value="<?= (int) $location['id'] ?>">
-                                <button class="small danger" type="submit">删除</button>
-                            </form>
                         </div>
                     </article>
                 <?php endforeach; ?>

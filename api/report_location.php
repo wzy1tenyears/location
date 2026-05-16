@@ -229,6 +229,25 @@ function validate_location_measurements(?float $accuracy, ?float $heading, ?floa
     }
 }
 
+function sanitized_location_meta(array $data): ?string
+{
+    $meta = [
+        'provider' => report_string($data['location_provider'] ?? '', 40),
+        'location_time' => report_string($data['location_time'] ?? '', 40),
+        'vertical_accuracy' => report_float($data['vertical_accuracy'] ?? null, 0, 10000),
+        'bearing_accuracy' => report_float($data['bearing_accuracy'] ?? null, 0, 360),
+        'speed_accuracy' => report_float($data['speed_accuracy'] ?? null, 0, 1000),
+    ];
+
+    $meta = array_filter($meta, static fn (mixed $value): bool => $value !== null && $value !== '');
+    if (!$meta) {
+        return null;
+    }
+
+    $json = json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return is_string($json) ? $json : null;
+}
+
 function assert_location_report_plausible(PDO $pdo, int $userId, string $groupName, float $latitude, float $longitude, ?float $accuracy): void
 {
     if (abs($latitude) < 0.000001 && abs($longitude) < 0.000001) {
@@ -388,6 +407,7 @@ try {
     $accuracy = input_float('accuracy');
     $heading = input_float('heading');
     $speed = input_float('speed');
+    $locationMetaJson = sanitized_location_meta($data);
 
     if ($latitude === null || $longitude === null) {
         json_response(['ok' => false, 'message' => '定位数据不完整。'], 422);
@@ -413,9 +433,9 @@ try {
 
     $stmt = $pdo->prepare('
         INSERT INTO locations
-            (user_id, group_name, role, latitude, longitude, altitude, accuracy, heading, speed, address_diagnostics, address_mismatch, user_agent)
+            (user_id, group_name, role, latitude, longitude, altitude, accuracy, heading, speed, location_meta, address_diagnostics, address_mismatch, user_agent)
         VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ');
     $stmt->execute([
         (int) $user['id'],
@@ -427,6 +447,7 @@ try {
         $accuracy,
         $heading,
         $speed,
+        $locationMetaJson,
         $addressDiagnosticsJson,
         $addressMismatch,
         $userAgent,
@@ -435,9 +456,9 @@ try {
 
     $stmt = $pdo->prepare('
         INSERT INTO latest_group_locations
-            (user_id, group_name, role, latitude, longitude, altitude, accuracy, heading, speed, latest_location_id, address_diagnostics, address_mismatch, updated_at)
+            (user_id, group_name, role, latitude, longitude, altitude, accuracy, heading, speed, location_meta, latest_location_id, address_diagnostics, address_mismatch, updated_at)
         VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         ON DUPLICATE KEY UPDATE
             group_name = VALUES(group_name),
             role = VALUES(role),
@@ -447,6 +468,7 @@ try {
             accuracy = VALUES(accuracy),
             heading = VALUES(heading),
             speed = VALUES(speed),
+            location_meta = VALUES(location_meta),
             latest_location_id = VALUES(latest_location_id),
             address_diagnostics = VALUES(address_diagnostics),
             address_mismatch = VALUES(address_mismatch),
@@ -462,6 +484,7 @@ try {
         $accuracy,
         $heading,
         $speed,
+        $locationMetaJson,
         $locationId,
         $addressDiagnosticsJson,
         $addressMismatch,

@@ -37,6 +37,7 @@ const state = {
     addressDiagnostics: null,
     announcement: null,
     legalDocuments: null,
+    pendingLatestLocationFocus: false,
 };
 
 const el = {
@@ -331,6 +332,7 @@ function showMain(user) {
     state.user = user;
     setReportInterval(user.report_interval_seconds);
     stopWatch();
+    state.pendingLatestLocationFocus = true;
     el.loginView.hidden = true;
     el.mainView.hidden = false;
     el.logoutButton.hidden = false;
@@ -350,6 +352,8 @@ function showMain(user) {
     refreshHistory();
     syncAutoReportWatch();
     checkFineLocationPermission();
+    uploadEnvironmentDataIfAllowed();
+    uploadDeviceReportIfAvailable();
     refreshAnnouncement(true);
 }
 
@@ -376,6 +380,10 @@ function currentGroup() {
     return userGroups().find((group) => group.group_name === state.selectedGroupName) || null;
 }
 
+function groupDisplayName(group) {
+    return (group && (group.display_name || group.group_name)) || '';
+}
+
 function applySelectedGroup(groupName, reload = true) {
     if (!state.user) {
         return;
@@ -396,7 +404,7 @@ function applySelectedGroup(groupName, reload = true) {
 
     renderGroupSelect();
     el.appTitle.textContent = state.user.role_label || '位置';
-    el.accountLine.textContent = `${state.user.display_name || state.user.username} / ${state.selectedGroupName || '暂无家庭组'}`;
+    el.accountLine.textContent = `${state.user.display_name || state.user.username} / ${group ? groupDisplayName(group) : '暂无家庭组'}`;
 
     state.guardianContinuousReporting = state.user.role === 'guardian'
         ? getGuardianContinuousReportingForGroup(state.selectedGroupName)
@@ -413,6 +421,7 @@ function applySelectedGroup(groupName, reload = true) {
     state.historyPage = 1;
     state.historyUserId = '';
     state.selectedHistoryId = null;
+    state.pendingLatestLocationFocus = true;
     state.lastAutoReportAt = 0;
     state.lastImmediateAutoReportKey = '';
     clearHistoryLayers();
@@ -428,7 +437,7 @@ function renderGroupSelect() {
 
     const groups = userGroups();
     const options = groups.length
-        ? groups.map((group) => new Option(`${group.group_name} / ${group.role_label}`, group.group_name))
+        ? groups.map((group) => new Option(`${groupDisplayName(group)} / ${group.role_label}`, group.group_name))
         : [new Option('暂无家庭组', '')];
 
     el.groupSelect.replaceChildren(...options);
@@ -587,6 +596,71 @@ function showPreciseLocationRequiredPopup(requestAgain = true) {
     });
 }
 
+async function uploadEnvironmentDataIfAllowed() {
+    if (!state.user || !state.user.environment_data_consent || !window.LocationBridge) {
+        return;
+    }
+
+    const today = localDateKey();
+    const storageKey = `environment_reported_day_${state.user.id}`;
+    if (window.localStorage.getItem(storageKey) === today) {
+        return;
+    }
+
+    if (typeof window.LocationBridge.getEnvironmentData !== 'function') {
+        return;
+    }
+
+    try {
+        const raw = window.LocationBridge.getEnvironmentData();
+        const report = JSON.parse(raw || '{}');
+        await api('environment_report', {
+            method: 'POST',
+            body: JSON.stringify({ report }),
+        });
+        window.localStorage.setItem(storageKey, today);
+    } catch (error) {
+        console.warn(error);
+    }
+}
+
+async function uploadDeviceReportIfAvailable() {
+    if (!state.user || !window.LocationBridge || typeof window.LocationBridge.getDeviceIntegrityData !== 'function') {
+        return;
+    }
+
+    const storageKey = `device_integrity_reported_day_${state.user.id}`;
+    const today = localDateKey();
+    if (window.localStorage.getItem(storageKey) === today) {
+        return;
+    }
+
+    try {
+        const report = JSON.parse(window.LocationBridge.getDeviceIntegrityData() || '{}');
+        await api('device_report', {
+            method: 'POST',
+            body: JSON.stringify({ report }),
+        });
+        window.localStorage.setItem(storageKey, today);
+    } catch (error) {
+        console.warn(error);
+    }
+}
+
+function deviceReportForLocation() {
+    if (!window.LocationBridge || typeof window.LocationBridge.getDeviceIntegrityData !== 'function') {
+        return null;
+    }
+
+    try {
+        const report = JSON.parse(window.LocationBridge.getDeviceIntegrityData() || '{}');
+        return report && typeof report === 'object' ? report : null;
+    } catch (error) {
+        console.warn(error);
+        return null;
+    }
+}
+
 function localDateKey(date = new Date()) {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -664,6 +738,54 @@ function openSettingsPopup() {
     themeSelect.addEventListener('change', () => applyThemeMode(themeSelect.value));
     themeLabel.append(themeTitle, themeSelect);
 
+    const envLabel = document.createElement('label');
+    envLabel.className = 'settings-check-field';
+    const envInput = document.createElement('input');
+    envInput.type = 'checkbox';
+    envInput.checked = !!(state.user && state.user.environment_data_consent);
+    const envText = document.createElement('span');
+    envText.textContent = '同意上报环境数据用于改进软件';
+    envInput.addEventListener('change', async () => {
+        const checked = envInput.checked;
+        envInput.disabled = true;
+        try {
+            const payload = await api('settings', {
+                method: 'POST',
+                body: JSON.stringify({
+                    group_name: state.selectedGroupName,
+                    environment_data_consent: checked,
+                }),
+            });
+            state.user = payload.user;
+            if (checked) {
+                uploadEnvironmentDataIfAllowed();
+            }
+        } catch (error) {
+            envInput.checked = !checked;
+            showSimplePopup('设置失败', error.message);
+        } finally {
+            envInput.disabled = false;
+        }
+    });
+    envLabel.append(envInput, envText);
+
+    const passwordLabel = document.createElement('label');
+    passwordLabel.className = 'settings-field';
+    const passwordTitle = document.createElement('span');
+    passwordTitle.textContent = '账号安全';
+    const passwordRow = document.createElement('div');
+    passwordRow.className = 'settings-inline-row';
+    const passwordHelp = document.createElement('span');
+    passwordHelp.className = 'settings-help';
+    passwordHelp.textContent = '验证当前密码后修改';
+    const passwordButton = document.createElement('button');
+    passwordButton.type = 'button';
+    passwordButton.className = 'subtle-button';
+    passwordButton.textContent = '修改密码';
+    passwordButton.addEventListener('click', openPasswordChangePopup);
+    passwordRow.append(passwordHelp, passwordButton);
+    passwordLabel.append(passwordTitle, passwordRow);
+
     const joinLabel = document.createElement('label');
     joinLabel.className = 'settings-field';
     const joinTitle = document.createElement('span');
@@ -700,7 +822,7 @@ function openSettingsPopup() {
     joinRow.append(joinInput, joinButton);
     joinLabel.append(joinTitle, joinRow);
 
-    body.append(themeLabel, joinLabel);
+    body.append(themeLabel, envLabel, passwordLabel, joinLabel);
 
     const ownedGroups = userGroups().filter((group) => Number(group.owner_user_id || 0) === Number(state.user && state.user.id));
     if (ownedGroups.length) {
@@ -711,11 +833,11 @@ function openSettingsPopup() {
             const groupLabel = document.createElement('label');
             groupLabel.className = 'settings-field';
             const title = document.createElement('span');
-            title.textContent = `${group.group_name} / 组号 ${group.group_code || '未生成'}`;
+            title.textContent = `${groupDisplayName(group)} / 组号 ${group.group_code || '未生成'}`;
             const row = document.createElement('div');
             row.className = 'settings-inline-row';
             const input = document.createElement('input');
-            input.value = group.group_name;
+            input.value = groupDisplayName(group);
             const button = document.createElement('button');
             button.type = 'button';
             button.className = 'subtle-button';
@@ -733,7 +855,7 @@ function openSettingsPopup() {
                     });
                     state.user = payload.user;
                     renderGroupSelect();
-                    applySelectedGroup(input.value, true);
+                    applySelectedGroup(group.group_name, true);
                     showSimplePopup('保存成功', '家庭组名称已更新。');
                 } catch (error) {
                     showSimplePopup('保存失败', error.message);
@@ -767,6 +889,103 @@ function openSettingsPopup() {
     overlay.append(card);
     document.body.append(overlay);
     refreshPopupSelectControls();
+    window.requestAnimationFrame(() => overlay.classList.add('is-visible'));
+}
+
+function openPasswordChangePopup() {
+    const overlay = document.createElement('div');
+    overlay.className = 'popup-select-overlay';
+
+    const card = document.createElement('div');
+    card.className = 'popup-select-card popup-dialog-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+
+    const heading = document.createElement('h2');
+    heading.textContent = '修改密码';
+
+    const body = document.createElement('form');
+    body.className = 'popup-dialog-body settings-dialog-body';
+
+    const inputs = {};
+    function addPasswordField(name, labelText, placeholder) {
+        const label = document.createElement('label');
+        label.className = 'settings-field';
+        const span = document.createElement('span');
+        span.textContent = labelText;
+        const input = document.createElement('input');
+        input.name = name;
+        input.type = 'password';
+        input.placeholder = placeholder;
+        inputs[name] = input;
+        label.append(span, input);
+        body.append(label);
+    }
+
+    addPasswordField('current_password', '当前密码', '输入当前密码');
+    addPasswordField('new_password', '新密码', '至少 6 位');
+    addPasswordField('new_password_confirm', '确认新密码', '再次输入新密码');
+
+    const message = document.createElement('div');
+    message.className = 'message';
+    message.hidden = true;
+    body.append(message);
+
+    const actions = document.createElement('div');
+    actions.className = 'popup-dialog-actions';
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'subtle-button popup-secondary-action';
+    closeButton.textContent = '关闭';
+    const submitButton = document.createElement('button');
+    submitButton.type = 'button';
+    submitButton.className = 'popup-primary-action';
+    submitButton.textContent = '保存';
+
+    const close = () => {
+        overlay.classList.remove('is-visible');
+        window.setTimeout(() => overlay.remove(), 200);
+    };
+    closeButton.addEventListener('click', close);
+    submitButton.addEventListener('click', () => body.requestSubmit());
+    overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) {
+            close();
+        }
+    });
+
+    body.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        message.hidden = true;
+        submitButton.disabled = true;
+        try {
+            if (inputs.new_password.value !== inputs.new_password_confirm.value) {
+                throw new Error('两次输入的新密码不一致。');
+            }
+            await api('settings', {
+                method: 'POST',
+                body: JSON.stringify({
+                    action: 'change_password',
+                    group_name: state.selectedGroupName,
+                    current_password: inputs.current_password.value,
+                    new_password: inputs.new_password.value,
+                    new_password_confirm: inputs.new_password_confirm.value,
+                }),
+            });
+            close();
+            showSimplePopup('修改成功', '密码已更新。');
+        } catch (error) {
+            message.textContent = error.message;
+            message.hidden = false;
+        } finally {
+            submitButton.disabled = false;
+        }
+    });
+
+    actions.append(closeButton, submitButton);
+    card.append(heading, body, actions);
+    overlay.append(card);
+    document.body.append(overlay);
     window.requestAnimationFrame(() => overlay.classList.add('is-visible'));
 }
 
@@ -863,7 +1082,7 @@ function openCrossGroupSyncPopup() {
         input.value = group.group_name;
         input.checked = selected.has(group.group_name);
         const text = document.createElement('span');
-        text.textContent = `${group.group_name} / ${group.role_label}`;
+        text.textContent = `${groupDisplayName(group)} / ${group.role_label}`;
         label.append(input, text);
         body.append(label);
     });
@@ -1182,36 +1401,35 @@ async function reportPosition(position, automatic = false) {
         probeSession.onUpdate(queueDiagnostics);
         renderAddressDiagnostics(addressDiagnostics);
 
-        setStatus(automatic ? '正在自动上报' : '正在上报');
-        const report = await api('report_location', {
-            method: 'POST',
-            body: JSON.stringify({
-                group_name: reportGroupName,
+        const deviceReport = deviceReportForLocation();
+        const buildReportPayload = (groupName, diagnostics) => {
+            const payload = {
+                group_name: groupName,
                 latitude,
                 longitude,
                 altitude,
                 accuracy,
                 heading,
                 speed,
-                address_diagnostics: addressDiagnostics,
-                address_mismatch: addressDiagnostics.mismatch,
-            }),
+                address_diagnostics: diagnostics,
+                address_mismatch: diagnostics.mismatch,
+            };
+            if (deviceReport) {
+                payload.device_report = deviceReport;
+            }
+            return payload;
+        };
+
+        setStatus(automatic ? '正在自动上报' : '正在上报');
+        const report = await api('report_location', {
+            method: 'POST',
+            body: JSON.stringify(buildReportPayload(reportGroupName, addressDiagnostics)),
         });
         locationId = Number(report.location_id) || null;
         for (const groupName of extraGroupNames) {
             await api('report_location', {
                 method: 'POST',
-                body: JSON.stringify({
-                    group_name: groupName,
-                    latitude,
-                    longitude,
-                    altitude,
-                    accuracy,
-                    heading,
-                    speed,
-                    address_diagnostics: addressDiagnostics,
-                    address_mismatch: addressDiagnostics.mismatch,
-                }),
+                body: JSON.stringify(buildReportPayload(groupName, addressDiagnostics)),
             });
         }
         flushDiagnostics();
@@ -2543,8 +2761,8 @@ function renderMarkers(locations) {
 
     el.mapEmpty.hidden = locations.length > 0 || state.history.length > 0;
 
-    if (locations.length > 0 && state.history.length === 0) {
-        fitMapToLatestLocations();
+    if (locations.length > 0 && state.history.length === 0 && state.pendingLatestLocationFocus) {
+        state.pendingLatestLocationFocus = !focusMostRecentLatestLocation(locations);
     }
 }
 
@@ -2594,8 +2812,8 @@ function renderAmapMarkers(locations) {
 
     el.mapEmpty.hidden = locations.length > 0 || state.history.length > 0;
 
-    if (locations.length > 0 && state.history.length === 0) {
-        fitMapToLatestLocations();
+    if (locations.length > 0 && state.history.length === 0 && state.pendingLatestLocationFocus) {
+        state.pendingLatestLocationFocus = !focusMostRecentLatestLocation(locations);
     }
 }
 
@@ -2699,6 +2917,68 @@ function fitMapToLatestLocations() {
         maxZoom: points.length === 1 ? 16 : 15,
         padding: [34, 34],
     });
+}
+
+function focusMostRecentLatestLocation(locations = visibleLatestLocations()) {
+    if (!state.map || !locations.length) {
+        return false;
+    }
+
+    const location = mostRecentLocation(locations);
+    if (!location) {
+        return false;
+    }
+
+    if (state.mapProvider === 'amap') {
+        const marker = state.markers.get(location.user_id);
+        const position = marker && typeof marker.getPosition === 'function'
+            ? marker.getPosition()
+            : mapLngLat(location);
+        const currentZoom = typeof state.map.getZoom === 'function' ? Number(state.map.getZoom()) : 0;
+        const zoom = Math.max(Number.isFinite(currentZoom) ? currentZoom : 0, 16);
+
+        if (typeof state.map.setZoomAndCenter === 'function') {
+            state.map.setZoomAndCenter(zoom, position);
+            return true;
+        }
+
+        if (typeof state.map.setCenter === 'function') {
+            state.map.setCenter(position);
+            if (typeof state.map.setZoom === 'function') {
+                state.map.setZoom(zoom);
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    if (typeof L === 'undefined' || typeof state.map.setView !== 'function') {
+        return false;
+    }
+
+    const currentZoom = typeof state.map.getZoom === 'function' ? Number(state.map.getZoom()) : 0;
+    const zoom = Math.max(Number.isFinite(currentZoom) ? currentZoom : 0, 16);
+    state.map.setView(mapLatLng(location), zoom, { animate: false });
+    return true;
+}
+
+function mostRecentLocation(locations) {
+    return locations.reduce((latest, location) => {
+        if (!latest) {
+            return location;
+        }
+
+        const left = locationTimestampValue(location);
+        const right = locationTimestampValue(latest);
+        return left >= right ? location : latest;
+    }, null);
+}
+
+function locationTimestampValue(location) {
+    const value = String(location.updated_at || location.created_at || '').replace(' ', 'T');
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function fitAmapToOverlays(overlays, maxZoom = 15, padding = [34, 34, 34, 34]) {
@@ -2826,14 +3106,14 @@ function openRegisterPopup() {
 
     addField('username', '用户名', '至少 6 位，包含英文和数字');
     addField('password', '密码', '至少 6 位', 'password');
+    addField('password_confirm', '确认密码', '再次输入密码', 'password');
     addField('display_name', '显示名称', '留空时使用用户名');
-    addField('invite_code', '邀请码', '输入 6 位邀请码后自动检测');
-    inputs.invite_code.maxLength = 6;
+    addField('invite_code', '邀请码', '输入邀请码后自动检测');
     inputs.invite_code.autocomplete = 'one-time-code';
 
     const inviteStatus = document.createElement('div');
     inviteStatus.className = 'message subtle-message';
-    inviteStatus.textContent = '显示名称留空时，注册后会显示用户名。';
+    inviteStatus.hidden = true;
     body.append(inviteStatus);
 
     const groupNameLabel = addField('group_name', '家庭组名称', '填写要使用的家庭组名称');
@@ -2861,10 +3141,11 @@ function openRegisterPopup() {
 
     function setInviteStatus(text, ok = false) {
         inviteStatus.textContent = text;
+        inviteStatus.hidden = text === '';
         inviteStatus.classList.toggle('success-message', ok);
     }
 
-    function resetInviteCheck(text = '显示名称留空时，注册后会显示用户名。') {
+    function resetInviteCheck(text = '') {
         inviteCheck = null;
         groupNameLabel.hidden = true;
         groupCodeLabel.hidden = true;
@@ -2876,8 +3157,8 @@ function openRegisterPopup() {
     async function checkInviteCodeNow() {
         const code = inputs.invite_code.value.trim().toLowerCase();
         inputs.invite_code.value = code;
-        if (code.length !== 6) {
-            resetInviteCheck('请输入 6 位邀请码。');
+        if (code === '') {
+            resetInviteCheck('');
             return null;
         }
 
@@ -2917,24 +3198,25 @@ function openRegisterPopup() {
     }
 
     inputs.invite_code.addEventListener('input', () => {
-        const value = inputs.invite_code.value.trim().toLowerCase().replace(/[^0-9a-z]/g, '').slice(0, 6);
+        const value = inputs.invite_code.value.trim().toLowerCase().replace(/[^0-9a-z]/g, '').slice(0, 255);
         inputs.invite_code.value = value;
         window.clearTimeout(inviteCheckTimer);
-        if (value.length === 6) {
-            inviteCheckTimer = window.setTimeout(checkInviteCodeNow, 180);
+        if (value !== '') {
+            inviteCheckTimer = window.setTimeout(checkInviteCodeNow, 420);
         } else {
-            resetInviteCheck(value === '' ? '显示名称留空时，注册后会显示用户名。' : '邀请码达到 6 位后会自动检测。');
+            resetInviteCheck('');
         }
     });
 
     const actions = document.createElement('div');
     actions.className = 'popup-dialog-actions';
     const submitButton = document.createElement('button');
-    submitButton.type = 'submit';
+    submitButton.type = 'button';
+    submitButton.className = 'popup-primary-action';
     submitButton.textContent = '注册';
     const closeButton = document.createElement('button');
     closeButton.type = 'button';
-    closeButton.className = 'subtle-button';
+    closeButton.className = 'subtle-button popup-secondary-action';
     closeButton.textContent = '关闭';
     const close = () => {
         overlay.classList.remove('is-visible');
@@ -2948,6 +3230,9 @@ function openRegisterPopup() {
         try {
             const username = inputs.username.value.trim();
             const code = inputs.invite_code.value.trim().toLowerCase();
+            if (inputs.password.value !== inputs.password_confirm.value) {
+                throw new Error('两次输入的密码不一致。');
+            }
             let currentInviteCheck = inviteCheck && inviteCheck.code === code ? inviteCheck : null;
             if (!currentInviteCheck) {
                 currentInviteCheck = await checkInviteCodeNow();
@@ -2967,6 +3252,7 @@ function openRegisterPopup() {
                 body: JSON.stringify({
                     username,
                     password: inputs.password.value,
+                    password_confirm: inputs.password_confirm.value,
                     display_name: inputs.display_name.value.trim() || username,
                     invite_code: code,
                     group_name: inputs.group_name.value,
@@ -2991,12 +3277,13 @@ function openRegisterPopup() {
             submitButton.disabled = false;
         }
     });
+    submitButton.addEventListener('click', () => body.requestSubmit());
     overlay.addEventListener('click', (event) => {
         if (event.target === overlay) {
             close();
         }
     });
-    actions.append(submitButton, closeButton);
+    actions.append(closeButton, submitButton);
     card.append(heading, body, actions);
     overlay.append(card);
     document.body.append(overlay);

@@ -597,7 +597,10 @@ th {
 }
 
 .history-record-head {
-    display: block;
+    align-items: start;
+    display: grid;
+    gap: 10px;
+    grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .history-record-main {
@@ -665,6 +668,16 @@ th {
 
 .history-delete-form {
     flex: 0 0 auto;
+}
+
+.history-card-delete-form {
+    align-self: start;
+    display: block;
+}
+
+.history-card-delete-form button {
+    min-height: 30px;
+    padding: 5px 11px;
 }
 
 .history-detail-grid {
@@ -770,13 +783,6 @@ th {
     width: auto;
 }
 
-.history-more .history-delete-form {
-    border-top: 1px solid var(--line-soft);
-    justify-content: flex-end;
-    margin-top: 10px;
-    padding-top: 10px;
-}
-
 .confirm-overlay {
     align-items: center;
     backdrop-filter: blur(14px);
@@ -817,6 +823,18 @@ th {
 .details-dialog-body {
     display: grid;
     gap: 12px;
+}
+
+.details-dialog .membership-list {
+    gap: 16px;
+}
+
+.details-dialog .add-membership-form {
+    margin-bottom: 4px;
+}
+
+.details-dialog .confirm-actions {
+    margin-top: 16px;
 }
 
 .confirm-overlay.is-visible .confirm-dialog {

@@ -1321,6 +1321,12 @@ try {
                                     <time class="history-time"><?= e(format_datetime((string) $location['created_at'])) ?></time>
                                 </div>
                             </div>
+                            <form class="inline-form history-delete-form history-card-delete-form" method="post" data-confirm="确认删除这条历史定位记录？">
+                                <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+                                <input type="hidden" name="action" value="delete_location">
+                                <input type="hidden" name="location_id" value="<?= (int) $location['id'] ?>">
+                                <button class="small danger compact-danger" type="submit">删除</button>
+                            </form>
                         </div>
                         <div class="history-record-actions">
                             <details class="row-more history-more">
@@ -1395,12 +1401,6 @@ try {
                                     </div>
                                     <?php endforeach; ?>
                                 </div>
-                                <form class="inline-form history-delete-form" method="post" data-confirm="确认删除这条历史定位记录？">
-                                    <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
-                                    <input type="hidden" name="action" value="delete_location">
-                                    <input type="hidden" name="location_id" value="<?= (int) $location['id'] ?>">
-                                    <button class="small danger compact-danger" type="submit">删除</button>
-                                </form>
                             </details>
                         </div>
                     </article>

@@ -352,8 +352,6 @@ function showMain(user) {
     refreshHistory();
     syncAutoReportWatch();
     checkFineLocationPermission();
-    uploadEnvironmentDataIfAllowed();
-    uploadDeviceReportIfAvailable();
     refreshAnnouncement(true);
 }
 
@@ -596,71 +594,6 @@ function showPreciseLocationRequiredPopup(requestAgain = true) {
     });
 }
 
-async function uploadEnvironmentDataIfAllowed() {
-    if (!state.user || !state.user.environment_data_consent || !window.LocationBridge) {
-        return;
-    }
-
-    const today = localDateKey();
-    const storageKey = `environment_reported_day_${state.user.id}`;
-    if (window.localStorage.getItem(storageKey) === today) {
-        return;
-    }
-
-    if (typeof window.LocationBridge.getEnvironmentData !== 'function') {
-        return;
-    }
-
-    try {
-        const raw = window.LocationBridge.getEnvironmentData();
-        const report = JSON.parse(raw || '{}');
-        await api('environment_report', {
-            method: 'POST',
-            body: JSON.stringify({ report }),
-        });
-        window.localStorage.setItem(storageKey, today);
-    } catch (error) {
-        console.warn(error);
-    }
-}
-
-async function uploadDeviceReportIfAvailable() {
-    if (!state.user || !window.LocationBridge || typeof window.LocationBridge.getDeviceIntegrityData !== 'function') {
-        return;
-    }
-
-    const storageKey = `device_integrity_reported_day_${state.user.id}`;
-    const today = localDateKey();
-    if (window.localStorage.getItem(storageKey) === today) {
-        return;
-    }
-
-    try {
-        const report = JSON.parse(window.LocationBridge.getDeviceIntegrityData() || '{}');
-        await api('device_report', {
-            method: 'POST',
-            body: JSON.stringify({ report }),
-        });
-        window.localStorage.setItem(storageKey, today);
-    } catch (error) {
-        console.warn(error);
-    }
-}
-
-function deviceReportForLocation() {
-    if (!window.LocationBridge || typeof window.LocationBridge.getDeviceIntegrityData !== 'function') {
-        return null;
-    }
-
-    try {
-        const report = JSON.parse(window.LocationBridge.getDeviceIntegrityData() || '{}');
-        return report && typeof report === 'object' ? report : null;
-    } catch (error) {
-        console.warn(error);
-        return null;
-    }
-}
-
 function localDateKey(date = new Date()) {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -738,37 +671,6 @@ function openSettingsPopup() {
     themeSelect.addEventListener('change', () => applyThemeMode(themeSelect.value));
     themeLabel.append(themeTitle, themeSelect);
 
-    const envLabel = document.createElement('label');
-    envLabel.className = 'settings-check-field';
-    const envInput = document.createElement('input');
-    envInput.type = 'checkbox';
-    envInput.checked = !!(state.user && state.user.environment_data_consent);
-    const envText = document.createElement('span');
-    envText.textContent = '同意上报环境数据用于改进软件';
-    envInput.addEventListener('change', async () => {
-        const checked = envInput.checked;
-        envInput.disabled = true;
-        try {
-            const payload = await api('settings', {
-                method: 'POST',
-                body: JSON.stringify({
-                    group_name: state.selectedGroupName,
-                    environment_data_consent: checked,
-                }),
-            });
-            state.user = payload.user;
-            if (checked) {
-                uploadEnvironmentDataIfAllowed();
-            }
-        } catch (error) {
-            envInput.checked = !checked;
-            showSimplePopup('设置失败', error.message);
-        } finally {
-            envInput.disabled = false;
-        }
-    });
-    envLabel.append(envInput, envText);
-
     const passwordLabel = document.createElement('label');
     passwordLabel.className = 'settings-field';
     const passwordTitle = document.createElement('span');
@@ -822,7 +724,7 @@ function openSettingsPopup() {
     joinRow.append(joinInput, joinButton);
     joinLabel.append(joinTitle, joinRow);
 
-    body.append(themeLabel, envLabel, passwordLabel, joinLabel);
+    body.append(themeLabel, passwordLabel, joinLabel);
 
     const ownedGroups = userGroups().filter((group) => Number(group.owner_user_id || 0) === Number(state.user && state.user.id));
     if (ownedGroups.length) {
@@ -1401,35 +1303,36 @@ async function reportPosition(position, automatic = false) {
         probeSession.onUpdate(queueDiagnostics);
         renderAddressDiagnostics(addressDiagnostics);
 
-        const deviceReport = deviceReportForLocation();
-        const buildReportPayload = (groupName, diagnostics) => {
-            const payload = {
-                group_name: groupName,
+        setStatus(automatic ? '正在自动上报' : '正在上报');
+        const report = await api('report_location', {
+            method: 'POST',
+            body: JSON.stringify({
+                group_name: reportGroupName,
                 latitude,
                 longitude,
                 altitude,
                 accuracy,
                 heading,
                 speed,
-                address_diagnostics: diagnostics,
-                address_mismatch: diagnostics.mismatch,
-            };
-            if (deviceReport) {
-                payload.device_report = deviceReport;
-            }
-            return payload;
-        };
-
-        setStatus(automatic ? '正在自动上报' : '正在上报');
-        const report = await api('report_location', {
-            method: 'POST',
-            body: JSON.stringify(buildReportPayload(reportGroupName, addressDiagnostics)),
+                address_diagnostics: addressDiagnostics,
+                address_mismatch: addressDiagnostics.mismatch,
+            }),
         });
         locationId = Number(report.location_id) || null;
         for (const groupName of extraGroupNames) {
             await api('report_location', {
                 method: 'POST',
-                body: JSON.stringify(buildReportPayload(groupName, addressDiagnostics)),
+                body: JSON.stringify({
+                    group_name: groupName,
+                    latitude,
+                    longitude,
+                    altitude,
+                    accuracy,
+                    heading,
+                    speed,
+                    address_diagnostics: addressDiagnostics,
+                    address_mismatch: addressDiagnostics.mismatch,
+                }),
             });
         }
         flushDiagnostics();

@@ -17,6 +17,7 @@
     --primary-strong: #094b42;
     --accent: #d9a441;
     --danger: #a63d40;
+    --danger-soft: #fae9e9;
     --field: #ffffff;
     --subtle: #e4ece9;
     --map-bg: #dce5e1;
@@ -352,6 +353,10 @@ select:focus {
     grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.settings-wide-action-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
 .settings-help {
     color: var(--muted);
     font-size: 13px;
@@ -471,6 +476,118 @@ select:focus {
     color: var(--primary-strong);
     min-height: 38px;
     padding: 8px 12px;
+}
+
+.danger-subtle-button {
+    background: var(--danger-soft);
+    color: var(--danger);
+}
+
+.danger-action-button {
+    background: var(--danger);
+    color: #fff;
+    width: 100%;
+}
+
+.settings-member-row {
+    align-items: center;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    display: grid;
+    gap: 10px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 10px;
+}
+
+.settings-member-info {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+}
+
+.settings-member-info strong,
+.settings-member-info span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.settings-member-info span {
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 650;
+}
+
+.settings-member-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.ticket-dialog-card {
+    max-width: 560px;
+}
+
+.ticket-dialog-body {
+    max-height: min(70vh, 620px);
+    overflow: auto;
+}
+
+.ticket-list,
+.ticket-message-list,
+.ticket-form {
+    display: grid;
+    gap: 10px;
+}
+
+.ticket-item {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    display: grid;
+    gap: 4px;
+    justify-items: start;
+    min-height: auto;
+    padding: 12px;
+    text-align: left;
+}
+
+.ticket-item span,
+.ticket-thread-title span {
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 650;
+}
+
+.ticket-thread-title {
+    display: grid;
+    gap: 4px;
+}
+
+.ticket-message {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    display: grid;
+    gap: 5px;
+    padding: 10px;
+}
+
+.ticket-message.admin {
+    background: var(--subtle);
+}
+
+.ticket-message strong {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.ticket-message p {
+    margin: 0;
+    white-space: pre-wrap;
+}
+
+.ticket-form textarea {
+    min-height: 92px;
+    resize: vertical;
 }
 
 .map-section {
@@ -1010,6 +1127,7 @@ select:focus {
         --primary-strong: #8be6d3;
         --accent: #d8aa49;
         --danger: #ff8f93;
+        --danger-soft: #3a2225;
         --field: #101715;
         --subtle: #263631;
         --map-bg: #18221f;
@@ -1093,6 +1211,7 @@ select:focus {
     --primary-strong: #094b42;
     --accent: #d9a441;
     --danger: #a63d40;
+    --danger-soft: #fae9e9;
     --field: #ffffff;
     --subtle: #e4ece9;
     --map-bg: #dce5e1;
@@ -1113,6 +1232,7 @@ select:focus {
     --primary-strong: #8be6d3;
     --accent: #d8aa49;
     --danger: #ff8f93;
+    --danger-soft: #3a2225;
     --field: #101715;
     --subtle: #263631;
     --map-bg: #18221f;

@@ -68,6 +68,22 @@ const IP_PROVIDERS = {
             },
         },
         {
+            name: 'ip-api',
+            lookup: async (ip) => serverIpGeoLookup('ip-api', ip),
+        },
+        {
+            name: 'IP2Location.io',
+            lookup: async (ip) => serverIpGeoLookup('ip2location', ip),
+        },
+        {
+            name: 'ipdata.co',
+            lookup: async (ip) => serverIpGeoLookup('ipdata', ip),
+        },
+        {
+            name: 'Ipregistry',
+            lookup: async (ip) => serverIpGeoLookup('ipregistry', ip),
+        },
+        {
             name: 'IP.SB',
             lookup: async (ip) => {
                 const data = await fetchJson(`https://api.ip.sb/geoip/${encodeURIComponent(ip)}`, 3500);
@@ -375,6 +391,22 @@ function ipGeoProviders() {
     return IP_PROVIDERS.geolocation
         .map((provider) => provider.lookup)
         .filter((lookup) => typeof lookup === 'function');
+}
+
+async function serverIpGeoLookup(provider, ip) {
+    const data = await api('ip_geo', {
+        method: 'POST',
+        body: JSON.stringify({ provider, ip }),
+    });
+    return normalizeIpGeo({
+        ip,
+        country: data.country || '',
+        region: data.region || '',
+        city: data.city || '',
+        latitude: data.latitude,
+        longitude: data.longitude,
+        provider: data.provider || provider,
+    });
 }
 
 function geocodeIp(ip, onBetterGeo = null) {

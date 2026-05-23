@@ -16,6 +16,7 @@ try {
     $termsAccepted = input_bool('terms_accepted');
     $crossBorderAccepted = input_bool('cross_border_transfer_accepted');
     $turnstileToken = input_string('turnstile_token', 4096);
+    $browserFingerprint = input_browser_fingerprint();
 
     if ($username === '' || $password === '') {
         json_response(['ok' => false, 'message' => '请输入账号和密码。'], 422);
@@ -31,11 +32,12 @@ try {
         session_regenerate_id(true);
         unset($_SESSION['user_id']);
         $_SESSION['admin_logged_in'] = true;
+        record_user_log(null, '', 'admin_login', '管理员登录');
         json_response(['ok' => true, 'redirect' => admin_url_path()]);
     }
 
     $pdo = db();
-    $stmt = $pdo->prepare('SELECT * FROM users WHERE username = ? AND is_active = 1');
+    $stmt = $pdo->prepare('SELECT * FROM users WHERE username = ?');
     $stmt->execute([$username]);
     $user = $stmt->fetch();
 
@@ -60,12 +62,23 @@ try {
         json_response(['ok' => false, 'message' => '账号或密码错误。'], 401);
     }
 
+    if ((int) ($user['is_active'] ?? 1) !== 1) {
+        $reason = trim((string) ($user['disabled_reason'] ?? ''));
+        json_response([
+            'ok' => false,
+            'message' => $reason === '' ? '账号已停用，请联系管理员。' : '账号已停用：' . $reason,
+        ], 403);
+    }
+
     if (!$termsAccepted) {
         json_response(['ok' => false, 'message' => '请先同意用户协议和隐私条约。'], 403);
     }
     if (!$crossBorderAccepted) {
         json_response(['ok' => false, 'message' => '请先同意用户数据跨境加密传输协议。'], 403);
     }
+
+    $deviceFingerprint = request_device_fingerprint();
+    bind_user_device($pdo, $user, $deviceFingerprint, $browserFingerprint);
 
     session_regenerate_id(true);
     $_SESSION['user_id'] = (int) $user['id'];
@@ -85,6 +98,8 @@ try {
     $user['user_agreement_accepted_at'] = $acceptedAt;
     $user['privacy_policy_accepted_at'] = $acceptedAt;
     $user['cross_border_transfer_accepted_at'] = $acceptedAt;
+    touch_user_presence((int) $user['id'], (string) ($user['group_name'] ?? ''));
+    record_user_log((int) $user['id'], (string) ($user['group_name'] ?? ''), 'login', '用户登录');
 
     json_response([
         'ok' => true,

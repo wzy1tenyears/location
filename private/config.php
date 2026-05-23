@@ -3,11 +3,14 @@
 declare(strict_types=1);
 
 const APP_NAME = '位置';
-const ANDROID_VERSION_CODE = 24;
-const ANDROID_VERSION_NAME = '1.1.9';
+const ANDROID_VERSION_CODE = 25;
+const ANDROID_VERSION_NAME = '1.2.0';
 const ANDROID_APK_FILENAME = 'location-release.apk';
 const ANDROID_FORCE_UPDATE = true;
 const IPINFO_LITE_TOKEN = ''; // https://ipinfo.io/
+const IP2LOCATION_IO_KEY = ''; // https://www.ip2location.io/
+const IPDATA_API_KEY = ''; // https://ipdata.co/
+const IPREGISTRY_API_KEY = ''; // https://ipregistry.co/
 const AMAP_JS_API_KEY = ''; // https://lbs.amap.com/
 const AMAP_SECURITY_JS_CODE = '';
 const AMAP_REVERSE_GEOCODE_KEY = AMAP_JS_API_KEY;

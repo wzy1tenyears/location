@@ -140,7 +140,6 @@ function location_diagnostics_sources(?string $json): array
 
     return $items;
 }
-
 function refresh_latest_location(PDO $pdo, int $userId, string $groupName): void
 {
     $stmt = $pdo->prepare('
@@ -204,12 +203,20 @@ try {
     $historyPerPage = (int) ($_GET['history_per_page'] ?? 20);
     $historyGroup = trim((string) ($_GET['history_group'] ?? ''));
     $historyUserId = (int) ($_GET['history_user_id'] ?? 0);
+    $logGroup = trim((string) ($_GET['log_group'] ?? ''));
+    $logUserId = (int) ($_GET['log_user_id'] ?? 0);
+    $logType = trim((string) ($_GET['log_type'] ?? ''));
+    $logPage = max(1, (int) ($_GET['log_page'] ?? 1));
+    $logPerPage = (int) ($_GET['log_per_page'] ?? 20);
 
     if (!in_array($userPerPage, [10, 20, 50], true)) {
         $userPerPage = 20;
     }
     if (!in_array($historyPerPage, [20, 50, 100], true)) {
         $historyPerPage = 20;
+    }
+    if (!in_array($logPerPage, [20, 50, 100], true)) {
+        $logPerPage = 20;
     }
 
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -256,6 +263,7 @@ try {
             $code = post_string('code', 255);
             $note = post_string('note', 120);
             $inviteType = post_string('invite_type', 32);
+            $allowGroupOwner = isset($_POST['allow_group_owner']) ? 1 : 0;
             $maxUses = max(1, (int) ($_POST['max_uses'] ?? 1));
             if ($code === '') {
                 $alphabet = '0123456789abcdefghijklmnopqrstuvwxyz';
@@ -267,8 +275,8 @@ try {
             if (!in_array($inviteType, ['invite', 'group_create'], true)) {
                 throw new RuntimeException('邀请码类型不正确。');
             }
-            $stmt = $pdo->prepare('INSERT INTO invite_codes (code, note, invite_type, max_uses) VALUES (?, ?, ?, ?)');
-            $stmt->execute([$code, $note, $inviteType, $maxUses]);
+            $stmt = $pdo->prepare('INSERT INTO invite_codes (code, note, invite_type, allow_group_owner, max_uses) VALUES (?, ?, ?, ?, ?)');
+            $stmt->execute([$code, $note, $inviteType, $allowGroupOwner, $maxUses]);
             $message = '邀请码已添加。';
         }
 
@@ -314,6 +322,31 @@ try {
             $stmt = $pdo->prepare('UPDATE family_groups SET display_name = ? WHERE id = ?');
             $stmt->execute([$groupName, $groupId]);
             $message = '家庭组已更新。';
+        }
+
+        if ($action === 'update_group_owner') {
+            $groupId = (int) ($_POST['group_id'] ?? 0);
+            $ownerUserId = (int) ($_POST['owner_user_id'] ?? 0);
+
+            $stmt = $pdo->prepare('SELECT * FROM family_groups WHERE id = ? LIMIT 1');
+            $stmt->execute([$groupId]);
+            $group = $stmt->fetch();
+            if (!$group) {
+                throw new RuntimeException('家庭组不存在。');
+            }
+
+            if ($ownerUserId > 0) {
+                $stmt = $pdo->prepare('SELECT id FROM user_groups WHERE user_id = ? AND group_name = ? LIMIT 1');
+                $stmt->execute([$ownerUserId, (string) $group['group_name']]);
+                if (!$stmt->fetch()) {
+                    throw new RuntimeException('只能设置组内成员为管理员。');
+                }
+            }
+
+            $stmt = $pdo->prepare('UPDATE family_groups SET owner_user_id = ? WHERE id = ?');
+            $stmt->execute([$ownerUserId > 0 ? $ownerUserId : null, $groupId]);
+            record_user_log($ownerUserId > 0 ? $ownerUserId : null, (string) $group['group_name'], 'group_owner_update', '后台更改家庭组管理员');
+            $message = '家庭组管理员已更新。';
         }
 
         if ($action === 'delete_family_group') {
@@ -422,6 +455,7 @@ try {
             $displayName = post_string('display_name', 100);
             $reportIntervalMinutes = (int) ($_POST['report_interval_minutes'] ?? 5);
             $reportIntervalSeconds = normalize_report_interval_seconds($reportIntervalMinutes * 60);
+            $debugMode = isset($_POST['debug_mode']) ? 1 : 0;
 
             if ($userId <= 0) {
                 throw new RuntimeException('账号不存在。');
@@ -437,10 +471,11 @@ try {
                 UPDATE users
                 SET username = ?,
                     display_name = ?,
-                    report_interval_seconds = ?
+                    report_interval_seconds = ?,
+                    debug_mode = ?
                 WHERE id = ?
             ');
-            $stmt->execute([$username, $displayName, $reportIntervalSeconds, $userId]);
+            $stmt->execute([$username, $displayName, $reportIntervalSeconds, $debugMode, $userId]);
             $message = '账号信息已更新。';
         }
 
@@ -582,8 +617,10 @@ try {
         if ($action === 'toggle_user') {
             $userId = (int) ($_POST['user_id'] ?? 0);
             $next = (int) ($_POST['next'] ?? 0);
-            $stmt = $pdo->prepare('UPDATE users SET is_active = ? WHERE id = ?');
-            $stmt->execute([$next === 1 ? 1 : 0, $userId]);
+            $disabledReason = $next === 1 ? '' : post_string('disabled_reason', 255);
+            $stmt = $pdo->prepare('UPDATE users SET is_active = ?, disabled_reason = ? WHERE id = ?');
+            $stmt->execute([$next === 1 ? 1 : 0, $disabledReason, $userId]);
+            record_user_log($userId, '', $next === 1 ? 'user_enable' : 'user_disable', $disabledReason);
             $message = $next === 1 ? '账号已启用。' : '账号已停用。';
         }
 
@@ -592,6 +629,44 @@ try {
             $stmt = $pdo->prepare('DELETE FROM users WHERE id = ?');
             $stmt->execute([$userId]);
             $message = '账号已删除。';
+        }
+
+        if ($action === 'delete_user_device') {
+            $deviceId = (int) ($_POST['device_id'] ?? 0);
+            if ($deviceId <= 0) {
+                throw new RuntimeException('设备绑定不存在。');
+            }
+
+            $stmt = $pdo->prepare('DELETE FROM user_devices WHERE id = ?');
+            $stmt->execute([$deviceId]);
+            $message = '设备绑定已删除。';
+        }
+
+        if ($action === 'reply_ticket') {
+            $ticketId = (int) ($_POST['ticket_id'] ?? 0);
+            $reply = post_string('reply', 2000);
+            if ($ticketId <= 0 || $reply === '') {
+                throw new RuntimeException('工单回复不能为空。');
+            }
+
+            $pdo->beginTransaction();
+            $stmt = $pdo->prepare("INSERT INTO support_ticket_messages (ticket_id, sender_type, message) VALUES (?, 'admin', ?)");
+            $stmt->execute([$ticketId, $reply]);
+            $stmt = $pdo->prepare("UPDATE support_tickets SET status = 'open', updated_at = NOW() WHERE id = ?");
+            $stmt->execute([$ticketId]);
+            $pdo->commit();
+            $message = '工单已回复。';
+        }
+
+        if ($action === 'update_ticket_status') {
+            $ticketId = (int) ($_POST['ticket_id'] ?? 0);
+            $status = post_string('status', 16);
+            if (!in_array($status, ['open', 'closed'], true)) {
+                throw new RuntimeException('工单状态不正确。');
+            }
+            $stmt = $pdo->prepare('UPDATE support_tickets SET status = ?, updated_at = NOW() WHERE id = ?');
+            $stmt->execute([$status, $ticketId]);
+            $message = $status === 'closed' ? '工单已关闭。' : '工单已重新打开。';
         }
 
         if ($action === 'reset_password') {
@@ -653,6 +728,116 @@ try {
     ');
     $familyGroups = $familyGroupsStmt->fetchAll();
 
+    $groupMembersByGroup = [];
+    $groupMembersStmt = $pdo->query('
+        SELECT
+            ug.group_name,
+            u.id,
+            u.username,
+            u.display_name
+        FROM user_groups ug
+        INNER JOIN users u ON u.id = ug.user_id
+        ORDER BY ug.group_name ASC, u.username ASC
+    ');
+    foreach ($groupMembersStmt->fetchAll() as $member) {
+        $groupMembersByGroup[(string) $member['group_name']][] = $member;
+    }
+
+    $onlineCutoff = date('Y-m-d H:i:s', time() - 90);
+    $onlineUsersStmt = $pdo->prepare('
+        SELECT
+            up.*,
+            u.username,
+            u.display_name
+        FROM user_presence up
+        INNER JOIN users u ON u.id = up.user_id
+        WHERE up.last_seen_at >= ?
+        ORDER BY up.last_seen_at DESC
+        LIMIT 50
+    ');
+    $onlineUsersStmt->execute([$onlineCutoff]);
+    $onlineUsers = $onlineUsersStmt->fetchAll();
+    $onlineUserCount = count($onlineUsers);
+
+    $logWhere = [];
+    $logParams = [];
+    if ($logGroup !== '') {
+        $logWhere[] = 'ul.group_name = ?';
+        $logParams[] = $logGroup;
+    }
+    if ($logUserId > 0) {
+        $logWhere[] = 'ul.user_id = ?';
+        $logParams[] = $logUserId;
+    }
+    if ($logType !== '') {
+        if ($logType === 'session') {
+            $logWhere[] = "ul.event_type IN ('login', 'logout', 'online')";
+        } else {
+            $logWhere[] = 'ul.event_type = ?';
+            $logParams[] = $logType;
+        }
+    }
+    $logWhereSql = $logWhere ? ('WHERE ' . implode(' AND ', $logWhere)) : '';
+    $logCountStmt = $pdo->prepare("
+        SELECT COUNT(*)
+        FROM user_logs ul
+        LEFT JOIN users u ON u.id = ul.user_id
+        {$logWhereSql}
+    ");
+    $logCountStmt->execute($logParams);
+    $logTotal = (int) $logCountStmt->fetchColumn();
+    $logTotalPages = max(1, (int) ceil($logTotal / $logPerPage));
+    if ($logPage > $logTotalPages) {
+        $logPage = $logTotalPages;
+    }
+    $logOffset = ($logPage - 1) * $logPerPage;
+    $recentUserLogsStmt = $pdo->prepare("
+        SELECT
+            ul.*,
+            u.username,
+            u.display_name
+        FROM user_logs ul
+        LEFT JOIN users u ON u.id = ul.user_id
+        {$logWhereSql}
+        ORDER BY ul.created_at DESC, ul.id DESC
+        LIMIT ? OFFSET ?
+    ");
+    foreach ($logParams as $index => $param) {
+        $recentUserLogsStmt->bindValue($index + 1, $param, is_int($param) ? PDO::PARAM_INT : PDO::PARAM_STR);
+    }
+    $recentUserLogsStmt->bindValue(count($logParams) + 1, $logPerPage, PDO::PARAM_INT);
+    $recentUserLogsStmt->bindValue(count($logParams) + 2, $logOffset, PDO::PARAM_INT);
+    $recentUserLogsStmt->execute();
+    $recentUserLogs = $recentUserLogsStmt->fetchAll();
+
+    $logTypesStmt = $pdo->query('SELECT DISTINCT event_type FROM user_logs ORDER BY event_type ASC');
+    $logTypes = array_map('strval', $logTypesStmt->fetchAll(PDO::FETCH_COLUMN));
+
+    $supportTicketsStmt = $pdo->query('
+        SELECT
+            t.*,
+            u.username,
+            u.display_name
+        FROM support_tickets t
+        INNER JOIN users u ON u.id = t.user_id
+        ORDER BY t.status ASC, t.updated_at DESC, t.id DESC
+        LIMIT 80
+    ');
+    $supportTickets = $supportTicketsStmt->fetchAll();
+    $ticketMessagesByTicket = [];
+    if ($supportTickets) {
+        $ticketIds = array_map(static fn (array $ticket): int => (int) $ticket['id'], $supportTickets);
+        $placeholders = implode(',', array_fill(0, count($ticketIds), '?'));
+        $ticketMessagesStmt = $pdo->prepare("SELECT * FROM support_ticket_messages WHERE ticket_id IN ({$placeholders}) ORDER BY created_at ASC, id ASC");
+        foreach ($ticketIds as $index => $ticketId) {
+            $ticketMessagesStmt->bindValue($index + 1, $ticketId, PDO::PARAM_INT);
+        }
+        $ticketMessagesStmt->execute();
+        foreach ($ticketMessagesStmt->fetchAll() as $ticketMessage) {
+            $ticketMessagesByTicket[(int) $ticketMessage['ticket_id']][] = $ticketMessage;
+        }
+    }
+
     $announcementStmt = $pdo->query('SELECT * FROM announcements ORDER BY id DESC LIMIT 1');
     $announcement = $announcementStmt->fetch() ?: null;
 
@@ -696,6 +881,12 @@ try {
     $membershipsByUser = [];
     foreach ($membershipsStmt->fetchAll() as $membership) {
         $membershipsByUser[(int) $membership['user_id']][] = $membership;
+    }
+
+    $devicesByUser = [];
+    $devicesStmt = $pdo->query('SELECT * FROM user_devices ORDER BY last_seen_at DESC, id DESC');
+    foreach ($devicesStmt->fetchAll() as $device) {
+        $devicesByUser[(int) $device['user_id']][] = $device;
     }
 
     $allUsersStmt = $pdo->query('
@@ -757,11 +948,25 @@ try {
     }
 
     $familyGroups = $familyGroups ?? [];
+    $groupMembersByGroup = $groupMembersByGroup ?? [];
+    $onlineUsers = $onlineUsers ?? [];
+    $onlineUserCount = $onlineUserCount ?? 0;
+    $recentUserLogs = $recentUserLogs ?? [];
+    $logTypes = $logTypes ?? [];
+    $supportTickets = $supportTickets ?? [];
+    $ticketMessagesByTicket = $ticketMessagesByTicket ?? [];
+    $logGroup = $logGroup ?? '';
+    $logUserId = $logUserId ?? 0;
+    $logType = $logType ?? '';
+    $logPage = $logPage ?? 1;
+    $logPerPage = $logPerPage ?? 20;
+    $logTotal = $logTotal ?? 0;
+    $logTotalPages = $logTotalPages ?? 1;
     $announcement = $announcement ?? null;
     $inviteCodes = $inviteCodes ?? [];
     $users = $users ?? [];
     $membershipsByUser = $membershipsByUser ?? [];
-    $environmentReportsByUser = $environmentReportsByUser ?? [];
+    $devicesByUser = $devicesByUser ?? [];
     $userPage = $userPage ?? 1;
     $userPerPage = $userPerPage ?? 20;
     $userTotal = $userTotal ?? 0;
@@ -821,6 +1026,27 @@ try {
             <div class="alert error"><?= e($error) ?></div>
         <?php endif; ?>
 
+        <section class="panel presence-panel">
+            <div class="section-heading">
+                <h2>在线用户</h2>
+                <span class="badge"><?= (int) $onlineUserCount ?> 人在线</span>
+            </div>
+            <?php if (!$onlineUsers): ?>
+                <div class="muted">暂无在线用户，客户端会每分钟发送一次心跳。</div>
+            <?php else: ?>
+                <div class="compact-list">
+                    <?php foreach ($onlineUsers as $presence): ?>
+                        <div class="compact-row">
+                            <strong><?= e((string) ($presence['display_name'] ?: $presence['username'])) ?></strong>
+                            <span class="muted"><?= e((string) $presence['username']) ?></span>
+                            <span class="muted"><?= e((string) $presence['last_group_name']) ?></span>
+                            <span class="muted"><?= e(format_datetime((string) $presence['last_seen_at'])) ?></span>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+        </section>
+
         <datalist id="familyGroupOptions">
             <?php foreach ($familyGroups as $group): ?>
                 <option value="<?= e((string) $group['group_name']) ?>"></option>
@@ -873,6 +1099,10 @@ try {
                         <label for="invite_max_uses">可使用次数</label>
                         <input id="invite_max_uses" name="max_uses" type="number" min="1" value="1">
                     </div>
+                    <label class="check-line">
+                        <input name="allow_group_owner" type="checkbox" value="1">
+                        <span>组创建邀请码允许注册人成为家庭组管理员</span>
+                    </label>
                     <button type="submit">添加邀请码</button>
                 </form>
                 <div class="group-list">
@@ -885,6 +1115,9 @@ try {
                                 <strong><?= e((string) $invite['code']) ?></strong>
                                 <span class="muted">
                                     <?= ((string) $invite['invite_type'] === 'group_create') ? '组创建' : '纯邀请' ?>
+                                    <?php if ((int) ($invite['allow_group_owner'] ?? 0) === 1): ?>
+                                        · 可设为组管理员
+                                    <?php endif; ?>
                                     · <?= (int) $invite['used_count'] ?>/<?= (int) $invite['max_uses'] ?>
                                     · <?= ((int) $invite['is_active'] === 1) ? '启用' : '停用' ?>
                                 </span>
@@ -942,11 +1175,24 @@ try {
                         <div class="muted">还没有家庭组。</div>
                     <?php endif; ?>
                     <?php foreach ($familyGroups as $group): ?>
+                        <?php
+                        $groupMembers = $groupMembersByGroup[(string) $group['group_name']] ?? [];
+                        $ownerName = '无';
+                        foreach ($groupMembers as $groupMember) {
+                            if ((int) $groupMember['id'] === (int) ($group['owner_user_id'] ?? 0)) {
+                                $ownerName = trim((string) $groupMember['display_name']) !== ''
+                                    ? (string) $groupMember['display_name']
+                                    : (string) $groupMember['username'];
+                                break;
+                            }
+                        }
+                        ?>
                         <div class="group-row">
                             <div class="group-summary">
                                 <strong><?= e((string) ($group['display_name'] ?: $group['group_name'])) ?></strong>
                                 <span class="muted">组号：<?= e((string) ($group['group_code'] ?? '')) ?></span>
                                 <span class="muted">成员：<?= (int) $group['member_count'] ?></span>
+                                <span class="muted">管理员：<?= e($ownerName) ?></span>
                             </div>
                             <details class="row-more">
                                 <summary>更多操作</summary>
@@ -959,6 +1205,24 @@ try {
                                         <input name="group_name" value="<?= e((string) ($group['display_name'] ?: $group['group_name'])) ?>" required>
                                     </label>
                                     <button class="small" type="submit">保存</button>
+                                </form>
+                                <form class="group-form" method="post">
+                                    <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+                                    <input type="hidden" name="action" value="update_group_owner">
+                                    <input type="hidden" name="group_id" value="<?= (int) $group['id'] ?>">
+                                    <label>
+                                        <span>家庭组管理员</span>
+                                        <select name="owner_user_id">
+                                            <option value="0">无</option>
+                                            <?php foreach ($groupMembers as $groupMember): ?>
+                                                <?php $memberLabel = trim((string) $groupMember['display_name']) !== '' ? (string) $groupMember['display_name'] : (string) $groupMember['username']; ?>
+                                                <option value="<?= (int) $groupMember['id'] ?>" <?= (int) $groupMember['id'] === (int) ($group['owner_user_id'] ?? 0) ? 'selected' : '' ?>>
+                                                    <?= e($memberLabel) ?> / <?= e((string) $groupMember['username']) ?>
+                                                </option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </label>
+                                    <button class="small secondary" type="submit">保存管理员</button>
                                 </form>
                                 <form class="inline-form" method="post" data-confirm="确认删除这个家庭组？组内身份和定位记录会一并清除。">
                                     <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
@@ -1044,6 +1308,7 @@ try {
                         <?php endif; ?>
                         <?php foreach ($users as $user): ?>
                             <?php $userMemberships = $membershipsByUser[(int) $user['id']] ?? []; ?>
+                            <?php $userDevices = $devicesByUser[(int) $user['id']] ?? []; ?>
                             <?php $userAgreementAcceptedAt = (string) ($user['user_agreement_accepted_at'] ?? ($user['terms_accepted_at'] ?? '')); ?>
                             <?php $privacyPolicyAcceptedAt = (string) ($user['privacy_policy_accepted_at'] ?? ($user['terms_accepted_at'] ?? '')); ?>
                             <?php $crossBorderAcceptedAt = (string) ($user['cross_border_transfer_accepted_at'] ?? ''); ?>
@@ -1051,7 +1316,12 @@ try {
                                 <td><?= e((string) $user['username']) ?></td>
                                 <td><?= e((string) $user['display_name']) ?></td>
                                 <td><?= membership_minutes($user) ?> 分钟</td>
-                                <td><?= ((int) $user['is_active'] === 1) ? '启用' : '停用' ?></td>
+                                <td>
+                                    <?= ((int) $user['is_active'] === 1) ? '启用' : '停用' ?>
+                                    <?php if (!empty($user['debug_mode'])): ?>
+                                        <span class="badge">调试</span>
+                                    <?php endif; ?>
+                                </td>
                                 <td>
                                     <div class="membership-summary">
                                         <?php foreach ($userMemberships as $membership): ?>
@@ -1134,6 +1404,10 @@ try {
                                                 <span>上报间隔（分钟）</span>
                                                 <input name="report_interval_minutes" type="number" min="1" max="1440" value="<?= membership_minutes($user) ?>" required>
                                             </label>
+                                            <label class="check-line compact-check">
+                                                <input name="debug_mode" type="checkbox" value="1" <?= !empty($user['debug_mode']) ? 'checked' : '' ?>>
+                                                <span>调试模式</span>
+                                            </label>
                                             <button class="small" type="submit">保存账号</button>
                                         </form>
                                         <form class="inline-form" method="post">
@@ -1141,6 +1415,11 @@ try {
                                             <input type="hidden" name="action" value="toggle_user">
                                             <input type="hidden" name="user_id" value="<?= (int) $user['id'] ?>">
                                             <input type="hidden" name="next" value="<?= ((int) $user['is_active'] === 1) ? 0 : 1 ?>">
+                                            <?php if ((int) $user['is_active'] === 1): ?>
+                                                <input name="disabled_reason" placeholder="停用原因（可选）">
+                                            <?php elseif (!empty($user['disabled_reason'])): ?>
+                                                <span class="muted">停用原因：<?= e((string) $user['disabled_reason']) ?></span>
+                                            <?php endif; ?>
                                             <button class="small secondary" type="submit">
                                                 <?= ((int) $user['is_active'] === 1) ? '停用' : '启用' ?>
                                             </button>
@@ -1158,8 +1437,8 @@ try {
                                             <input type="hidden" name="user_id" value="<?= (int) $user['id'] ?>">
                                             <button class="small danger" type="submit">删除账号</button>
                                         </form>
-                                        <div class="environment-box">
-                                            <div class="environment-status">
+                                        <div class="legal-consent-box">
+                                            <div class="legal-consent-status">
                                                 <span>用户协议：</span>
                                                 <?php if ($userAgreementAcceptedAt !== ''): ?>
                                                     <strong>已同意</strong>
@@ -1168,7 +1447,7 @@ try {
                                                     <strong>未同意</strong>
                                                 <?php endif; ?>
                                             </div>
-                                            <div class="environment-status">
+                                            <div class="legal-consent-status">
                                                 <span>隐私条约：</span>
                                                 <?php if ($privacyPolicyAcceptedAt !== ''): ?>
                                                     <strong>已同意</strong>
@@ -1177,7 +1456,7 @@ try {
                                                     <strong>未同意</strong>
                                                 <?php endif; ?>
                                             </div>
-                                            <div class="environment-status">
+                                            <div class="legal-consent-status">
                                                 <span>跨境传输协议：</span>
                                                 <?php if ($crossBorderAcceptedAt !== ''): ?>
                                                     <strong>已同意</strong>
@@ -1186,6 +1465,32 @@ try {
                                                     <strong>未同意</strong>
                                                 <?php endif; ?>
                                             </div>
+                                            <details class="row-more device-bind-details">
+                                                <summary>设备指纹绑定（<?= count($userDevices) ?>）</summary>
+                                                <?php if (!$userDevices): ?>
+                                                    <div class="muted">暂无绑定设备。</div>
+                                                <?php else: ?>
+                                                    <div class="device-bind-list">
+                                                        <?php foreach ($userDevices as $device): ?>
+                                                            <div class="device-bind-card">
+                                                                <strong><?= e(substr((string) $device['device_fingerprint'], 0, 16)) ?>...</strong>
+                                                                <span>浏览器：<?= e((string) ($device['browser_fingerprint'] ?: '未记录')) ?></span>
+                                                                <span class="muted">首次：<?= e(format_datetime((string) $device['first_seen_at'])) ?></span>
+                                                                <span class="muted">最近：<?= e(format_datetime((string) $device['last_seen_at'])) ?></span>
+                                                                <?php if (!empty($device['user_agent'])): ?>
+                                                                    <span class="muted"><?= e((string) $device['user_agent']) ?></span>
+                                                                <?php endif; ?>
+                                                                <form class="inline-form" method="post" data-confirm="确认删除这个设备绑定？删除后该设备可重新绑定账号。">
+                                                                    <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+                                                                    <input type="hidden" name="action" value="delete_user_device">
+                                                                    <input type="hidden" name="device_id" value="<?= (int) $device['id'] ?>">
+                                                                    <button class="small danger" type="submit">删除绑定</button>
+                                                                </form>
+                                                            </div>
+                                                        <?php endforeach; ?>
+                                                    </div>
+                                                <?php endif; ?>
+                                            </details>
                                         </div>
                                         </div>
                                     </details>
@@ -1201,6 +1506,135 @@ try {
                 <a class="button secondary <?= $userPage <= 1 ? 'disabled-link' : '' ?>" href="?user_page=<?= $prevPage ?>&user_per_page=<?= (int) $userPerPage ?>">上一页</a>
                 <a class="button secondary <?= $userPage >= $userTotalPages ? 'disabled-link' : '' ?>" href="?user_page=<?= $nextPage ?>&user_per_page=<?= (int) $userPerPage ?>">下一页</a>
             </div>
+        </section>
+
+        <section class="panel account-panel">
+            <div class="section-heading">
+                <h2>用户日志</h2>
+                <span class="muted">第 <?= (int) $logPage ?> / <?= (int) $logTotalPages ?> 页，共 <?= (int) $logTotal ?> 条</span>
+            </div>
+            <form class="pager-form history-filter-form" method="get">
+                <input type="hidden" name="user_page" value="<?= (int) $userPage ?>">
+                <input type="hidden" name="user_per_page" value="<?= (int) $userPerPage ?>">
+                <input type="hidden" name="log_page" value="1">
+                <label>
+                    <span>家庭组</span>
+                    <select name="log_group">
+                        <option value="">全部家庭组</option>
+                        <?php foreach ($familyGroups as $group): ?>
+                            <option value="<?= e((string) $group['group_name']) ?>" <?= hash_equals((string) $group['group_name'], $logGroup) ? 'selected' : '' ?>>
+                                <?= e((string) ($group['display_name'] ?: $group['group_name'])) ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <label>
+                    <span>用户</span>
+                    <select name="log_user_id">
+                        <option value="0">全部用户</option>
+                        <?php foreach ($allUsersForFilter as $filterUser): ?>
+                            <?php $filterLabel = trim((string) $filterUser['display_name']) !== '' ? (string) $filterUser['display_name'] : (string) $filterUser['username']; ?>
+                            <option value="<?= (int) $filterUser['id'] ?>" <?= (int) $filterUser['id'] === (int) $logUserId ? 'selected' : '' ?>>
+                                <?= e($filterLabel) ?> / <?= e((string) $filterUser['username']) ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <label>
+                    <span>类型</span>
+                    <select name="log_type">
+                        <option value="">全部类型</option>
+                        <option value="session" <?= $logType === 'session' ? 'selected' : '' ?>>上线/下线</option>
+                        <?php foreach ($logTypes as $type): ?>
+                            <option value="<?= e($type) ?>" <?= hash_equals($type, $logType) ? 'selected' : '' ?>><?= e($type) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <label>
+                    <span>每页数量</span>
+                    <select name="log_per_page">
+                        <option value="20" <?= $logPerPage === 20 ? 'selected' : '' ?>>20 条</option>
+                        <option value="50" <?= $logPerPage === 50 ? 'selected' : '' ?>>50 条</option>
+                        <option value="100" <?= $logPerPage === 100 ? 'selected' : '' ?>>100 条</option>
+                    </select>
+                </label>
+                <button class="secondary" type="submit">筛选</button>
+                <a class="button secondary" href="<?= e(admin_query(['log_group' => null, 'log_user_id' => null, 'log_type' => null, 'log_page' => null])) ?>">刷新</a>
+            </form>
+            <?php if (!$recentUserLogs): ?>
+                <div class="muted">暂无用户日志。</div>
+            <?php else: ?>
+                <div class="compact-list log-list">
+                    <?php foreach ($recentUserLogs as $log): ?>
+                        <?php $logName = trim((string) ($log['display_name'] ?? '')) !== '' ? (string) $log['display_name'] : (string) ($log['username'] ?? '系统'); ?>
+                        <div class="compact-row">
+                            <strong><?= e($logName) ?></strong>
+                            <span class="badge"><?= e((string) $log['event_type']) ?></span>
+                            <span class="muted"><?= e((string) $log['group_name']) ?></span>
+                            <span class="muted"><?= e((string) $log['message']) ?></span>
+                            <time class="muted"><?= e(format_datetime((string) $log['created_at'])) ?></time>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+            <div class="pager-actions">
+                <?php $logPrevPage = max(1, (int) $logPage - 1); ?>
+                <?php $logNextPage = min((int) $logTotalPages, (int) $logPage + 1); ?>
+                <a class="button secondary <?= $logPage <= 1 ? 'disabled-link' : '' ?>" href="<?= e(admin_query(['log_page' => $logPrevPage, 'log_per_page' => $logPerPage])) ?>">上一页</a>
+                <a class="button secondary <?= $logPage >= $logTotalPages ? 'disabled-link' : '' ?>" href="<?= e(admin_query(['log_page' => $logNextPage, 'log_per_page' => $logPerPage])) ?>">下一页</a>
+            </div>
+        </section>
+
+        <section class="panel account-panel">
+            <div class="section-heading">
+                <h2>工单管理</h2>
+                <span class="muted">最近 80 个会话</span>
+            </div>
+            <?php if (!$supportTickets): ?>
+                <div class="muted">暂无工单。</div>
+            <?php else: ?>
+                <div class="ticket-admin-list">
+                    <?php foreach ($supportTickets as $ticket): ?>
+                        <?php
+                        $ticketName = trim((string) $ticket['display_name']) !== '' ? (string) $ticket['display_name'] : (string) $ticket['username'];
+                        $ticketMessages = $ticketMessagesByTicket[(int) $ticket['id']] ?? [];
+                        ?>
+                        <article class="ticket-admin-row">
+                            <div class="ticket-admin-summary">
+                                <strong><?= e((string) $ticket['subject']) ?></strong>
+                                <span class="badge"><?= (string) $ticket['status'] === 'closed' ? '已关闭' : '处理中' ?></span>
+                                <span class="muted"><?= e($ticketName) ?> / <?= e((string) $ticket['group_name']) ?></span>
+                                <span class="muted"><?= e(format_datetime((string) $ticket['updated_at'])) ?></span>
+                            </div>
+                            <details class="row-more">
+                                <summary>打开会话</summary>
+                                <div class="ticket-admin-thread">
+                                    <?php foreach ($ticketMessages as $ticketMessage): ?>
+                                        <div class="ticket-admin-message <?= e((string) $ticketMessage['sender_type']) ?>">
+                                            <strong><?= (string) $ticketMessage['sender_type'] === 'admin' ? '后台' : e($ticketName) ?> · <?= e(format_datetime((string) $ticketMessage['created_at'])) ?></strong>
+                                            <p><?= nl2br(e((string) $ticketMessage['message'])) ?></p>
+                                        </div>
+                                    <?php endforeach; ?>
+                                </div>
+                                <form class="ticket-admin-reply" method="post">
+                                    <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+                                    <input type="hidden" name="action" value="reply_ticket">
+                                    <input type="hidden" name="ticket_id" value="<?= (int) $ticket['id'] ?>">
+                                    <textarea name="reply" rows="4" placeholder="回复内容" required></textarea>
+                                    <button class="small" type="submit">发送回复</button>
+                                </form>
+                                <form class="inline-form" method="post">
+                                    <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+                                    <input type="hidden" name="action" value="update_ticket_status">
+                                    <input type="hidden" name="ticket_id" value="<?= (int) $ticket['id'] ?>">
+                                    <input type="hidden" name="status" value="<?= (string) $ticket['status'] === 'closed' ? 'open' : 'closed' ?>">
+                                    <button class="small secondary" type="submit"><?= (string) $ticket['status'] === 'closed' ? '重新打开' : '关闭工单' ?></button>
+                                </form>
+                            </details>
+                        </article>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
         </section>
 
         <section class="panel account-panel">

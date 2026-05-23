@@ -285,12 +285,14 @@ function ensure_schema(PDO $pdo): void
             role ENUM('monitor', 'guardian') NOT NULL,
             report_interval_seconds INT UNSIGNED NOT NULL DEFAULT 300,
             is_active TINYINT(1) NOT NULL DEFAULT 1,
+            disabled_reason VARCHAR(255) NOT NULL DEFAULT '',
             failed_login_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
             login_locked_at DATETIME NULL,
             terms_accepted_at DATETIME NULL,
             user_agreement_accepted_at DATETIME NULL,
             privacy_policy_accepted_at DATETIME NULL,
             cross_border_transfer_accepted_at DATETIME NULL,
+            debug_mode TINYINT(1) NOT NULL DEFAULT 0,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             INDEX idx_users_group_role (group_name, role)
@@ -304,6 +306,9 @@ function ensure_schema(PDO $pdo): void
             display_name VARCHAR(100) NOT NULL DEFAULT '',
             group_code VARCHAR(6) NULL UNIQUE,
             owner_user_id INT UNSIGNED NULL,
+            p2p_enabled_at DATETIME NULL,
+            p2p_enabled_by INT UNSIGNED NULL,
+            p2p_key_version INT UNSIGNED NOT NULL DEFAULT 0,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -338,6 +343,9 @@ function ensure_schema(PDO $pdo): void
             location_meta LONGTEXT NULL,
             address_diagnostics LONGTEXT NULL,
             address_mismatch TINYINT(1) NOT NULL DEFAULT 0,
+            encryption_mode VARCHAR(20) NOT NULL DEFAULT '',
+            encrypted_payload LONGTEXT NULL,
+            p2p_key_version INT UNSIGNED NOT NULL DEFAULT 0,
             user_agent VARCHAR(255) NOT NULL DEFAULT '',
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             INDEX idx_locations_group_created (group_name, created_at),
@@ -361,6 +369,9 @@ function ensure_schema(PDO $pdo): void
             latest_location_id BIGINT UNSIGNED NULL,
             address_diagnostics LONGTEXT NULL,
             address_mismatch TINYINT(1) NOT NULL DEFAULT 0,
+            encryption_mode VARCHAR(20) NOT NULL DEFAULT '',
+            encrypted_payload LONGTEXT NULL,
+            p2p_key_version INT UNSIGNED NOT NULL DEFAULT 0,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, group_name),
             CONSTRAINT fk_latest_group_locations_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -371,15 +382,20 @@ function ensure_schema(PDO $pdo): void
     ");
 
     add_column_if_missing($pdo, 'users', 'failed_login_count', 'TINYINT UNSIGNED NOT NULL DEFAULT 0');
+    add_column_if_missing($pdo, 'users', 'disabled_reason', "VARCHAR(255) NOT NULL DEFAULT ''");
     add_column_if_missing($pdo, 'users', 'login_locked_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'terms_accepted_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'user_agreement_accepted_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'privacy_policy_accepted_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'cross_border_transfer_accepted_at', 'DATETIME NULL');
+    add_column_if_missing($pdo, 'users', 'debug_mode', 'TINYINT(1) NOT NULL DEFAULT 0');
     add_column_if_missing($pdo, 'users', 'report_interval_seconds', 'INT UNSIGNED NOT NULL DEFAULT ' . DEFAULT_REPORT_INTERVAL_SECONDS);
     add_column_if_missing($pdo, 'family_groups', 'display_name', "VARCHAR(100) NOT NULL DEFAULT ''");
     add_column_if_missing($pdo, 'family_groups', 'group_code', 'VARCHAR(6) NULL UNIQUE');
     add_column_if_missing($pdo, 'family_groups', 'owner_user_id', 'INT UNSIGNED NULL');
+    add_column_if_missing($pdo, 'family_groups', 'p2p_enabled_at', 'DATETIME NULL');
+    add_column_if_missing($pdo, 'family_groups', 'p2p_enabled_by', 'INT UNSIGNED NULL');
+    add_column_if_missing($pdo, 'family_groups', 'p2p_key_version', 'INT UNSIGNED NOT NULL DEFAULT 0');
     $pdo->exec("UPDATE family_groups SET display_name = group_name WHERE display_name = ''");
     if (table_exists($pdo, 'invite_codes') && column_exists($pdo, 'invite_codes', 'code') && strtolower(column_type($pdo, 'invite_codes', 'code')) !== 'varchar(255)') {
         $pdo->exec('ALTER TABLE invite_codes MODIFY code VARCHAR(255) NOT NULL');
@@ -388,11 +404,17 @@ function ensure_schema(PDO $pdo): void
     add_column_if_missing($pdo, 'locations', 'location_meta', 'LONGTEXT NULL');
     add_column_if_missing($pdo, 'locations', 'address_diagnostics', 'LONGTEXT NULL');
     add_column_if_missing($pdo, 'locations', 'address_mismatch', 'TINYINT(1) NOT NULL DEFAULT 0');
+    add_column_if_missing($pdo, 'locations', 'encryption_mode', "VARCHAR(20) NOT NULL DEFAULT ''");
+    add_column_if_missing($pdo, 'locations', 'encrypted_payload', 'LONGTEXT NULL');
+    add_column_if_missing($pdo, 'locations', 'p2p_key_version', 'INT UNSIGNED NOT NULL DEFAULT 0');
     add_column_if_missing($pdo, 'latest_group_locations', 'latest_location_id', 'BIGINT UNSIGNED NULL');
     add_column_if_missing($pdo, 'latest_group_locations', 'altitude', 'FLOAT NULL');
     add_column_if_missing($pdo, 'latest_group_locations', 'location_meta', 'LONGTEXT NULL');
     add_column_if_missing($pdo, 'latest_group_locations', 'address_diagnostics', 'LONGTEXT NULL');
     add_column_if_missing($pdo, 'latest_group_locations', 'address_mismatch', 'TINYINT(1) NOT NULL DEFAULT 0');
+    add_column_if_missing($pdo, 'latest_group_locations', 'encryption_mode', "VARCHAR(20) NOT NULL DEFAULT ''");
+    add_column_if_missing($pdo, 'latest_group_locations', 'encrypted_payload', 'LONGTEXT NULL');
+    add_column_if_missing($pdo, 'latest_group_locations', 'p2p_key_version', 'INT UNSIGNED NOT NULL DEFAULT 0');
     $pdo->exec('
         UPDATE users
         SET
@@ -443,6 +465,74 @@ function ensure_schema(PDO $pdo): void
         ");
     }
 
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS p2p_user_keys (
+            user_id INT UNSIGNED NOT NULL PRIMARY KEY,
+            public_key_jwk LONGTEXT NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            CONSTRAINT fk_p2p_user_keys_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS p2p_group_members (
+            group_name VARCHAR(100) NOT NULL,
+            user_id INT UNSIGNED NOT NULL,
+            consent_at DATETIME NULL,
+            wrapped_group_key LONGTEXT NULL,
+            key_version INT UNSIGNED NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (group_name, user_id),
+            INDEX idx_p2p_group_members_user (user_id),
+            CONSTRAINT fk_p2p_group_members_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS user_devices (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            user_id INT UNSIGNED NOT NULL,
+            device_fingerprint CHAR(64) NOT NULL,
+            browser_fingerprint VARCHAR(128) NOT NULL DEFAULT '',
+            user_agent VARCHAR(255) NOT NULL DEFAULT '',
+            first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_device_fingerprint (device_fingerprint),
+            INDEX idx_user_devices_user_seen (user_id, last_seen_at),
+            CONSTRAINT fk_user_devices_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS support_tickets (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            user_id INT UNSIGNED NOT NULL,
+            group_name VARCHAR(100) NOT NULL DEFAULT '',
+            subject VARCHAR(120) NOT NULL DEFAULT '',
+            status ENUM('open', 'closed') NOT NULL DEFAULT 'open',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_support_tickets_user_updated (user_id, updated_at),
+            INDEX idx_support_tickets_status_updated (status, updated_at),
+            CONSTRAINT fk_support_tickets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS support_ticket_messages (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            ticket_id BIGINT UNSIGNED NOT NULL,
+            sender_type ENUM('user', 'admin') NOT NULL,
+            message TEXT NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_ticket_messages_ticket_created (ticket_id, created_at),
+            CONSTRAINT fk_ticket_messages_ticket FOREIGN KEY (ticket_id) REFERENCES support_tickets(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS announcements (
             id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -462,6 +552,7 @@ function ensure_schema(PDO $pdo): void
             code VARCHAR(255) NOT NULL UNIQUE,
             note VARCHAR(120) NOT NULL DEFAULT '',
             invite_type ENUM('invite', 'group_create') NOT NULL DEFAULT 'invite',
+            allow_group_owner TINYINT(1) NOT NULL DEFAULT 0,
             max_uses INT UNSIGNED NOT NULL DEFAULT 1,
             used_count INT UNSIGNED NOT NULL DEFAULT 0,
             assigned_group_name VARCHAR(100) NULL,
@@ -472,6 +563,39 @@ function ensure_schema(PDO $pdo): void
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
     add_column_if_missing($pdo, 'invite_codes', 'note', "VARCHAR(120) NOT NULL DEFAULT ''");
+    add_column_if_missing($pdo, 'invite_codes', 'allow_group_owner', 'TINYINT(1) NOT NULL DEFAULT 0');
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS user_presence (
+            user_id INT UNSIGNED NOT NULL PRIMARY KEY,
+            last_seen_at DATETIME NOT NULL,
+            last_group_name VARCHAR(100) NOT NULL DEFAULT '',
+            last_user_agent VARCHAR(255) NOT NULL DEFAULT '',
+            last_ip VARCHAR(45) NOT NULL DEFAULT '',
+            CONSTRAINT fk_user_presence_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            INDEX idx_user_presence_last_seen (last_seen_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS user_logs (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            user_id INT UNSIGNED NULL,
+            group_name VARCHAR(100) NOT NULL DEFAULT '',
+            event_type VARCHAR(40) NOT NULL,
+            message VARCHAR(255) NOT NULL DEFAULT '',
+            meta_json LONGTEXT NULL,
+            ip VARCHAR(45) NOT NULL DEFAULT '',
+            user_agent VARCHAR(255) NOT NULL DEFAULT '',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_user_logs_created (created_at),
+            INDEX idx_user_logs_user_created (user_id, created_at),
+            INDEX idx_user_logs_group_created (group_name, created_at),
+            INDEX idx_user_logs_type_created (event_type, created_at),
+            CONSTRAINT fk_user_logs_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
 
     $done = true;
 }
@@ -650,7 +774,6 @@ function assert_safe_identifier(string $identifier): void
         throw new RuntimeException('Unsafe SQL identifier.');
     }
 }
-
 function e(string $value): string
 {
     return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
@@ -831,6 +954,75 @@ function require_report_device_cookie(): string
     return strtolower($deviceCookie);
 }
 
+function request_device_fingerprint(): string
+{
+    $cookieName = defined('APP_DEVICE_COOKIE_NAME') ? APP_DEVICE_COOKIE_NAME : 'loc_device';
+    $deviceCookie = (string) ($_COOKIE[$cookieName] ?? '');
+    if (!preg_match('/^[a-f0-9]{64}$/i', $deviceCookie)) {
+        json_response(['ok' => false, 'message' => '请使用新版 App 登录。'], 403);
+    }
+
+    return strtolower($deviceCookie);
+}
+
+function input_browser_fingerprint(): string
+{
+    $value = input_string('browser_fingerprint', 128);
+    return preg_match('/^[a-zA-Z0-9:_-]{1,128}$/', $value) ? $value : '';
+}
+
+function bind_user_device(PDO $pdo, array $user, string $deviceFingerprint, string $browserFingerprint = ''): void
+{
+    if ($deviceFingerprint === '') {
+        return;
+    }
+
+    $userId = (int) $user['id'];
+    $debugMode = !empty($user['debug_mode']);
+    $userAgent = substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255);
+
+    $stmt = $pdo->prepare('SELECT * FROM user_devices WHERE device_fingerprint = ? LIMIT 1');
+    $stmt->execute([$deviceFingerprint]);
+    $existing = $stmt->fetch();
+
+    if ($existing && (int) $existing['user_id'] !== $userId) {
+        if ($debugMode) {
+            record_user_log($userId, '', 'device_bind_skipped_debug', '调试模式跳过设备指纹冲突', [
+                'device_fingerprint' => $deviceFingerprint,
+                'bound_user_id' => (int) $existing['user_id'],
+            ]);
+            return;
+        }
+
+        json_response(['ok' => false, 'message' => '该设备已绑定其他账号。'], 403);
+    }
+
+    if (!$existing) {
+        $stmt = $pdo->prepare('SELECT COUNT(*) FROM user_devices WHERE user_id = ?');
+        $stmt->execute([$userId]);
+        if (!$debugMode && (int) $stmt->fetchColumn() >= 3) {
+            json_response(['ok' => false, 'message' => '该账号绑定设备已达 3 台，请联系后台删除旧设备。'], 403);
+        }
+
+        $stmt = $pdo->prepare('
+            INSERT INTO user_devices (user_id, device_fingerprint, browser_fingerprint, user_agent, last_seen_at)
+            VALUES (?, ?, ?, ?, NOW())
+        ');
+        $stmt->execute([$userId, $deviceFingerprint, $browserFingerprint, $userAgent]);
+        record_user_log($userId, '', 'device_bind', '绑定新设备指纹');
+        return;
+    }
+
+    $stmt = $pdo->prepare('
+        UPDATE user_devices
+        SET browser_fingerprint = ?,
+            user_agent = ?,
+            last_seen_at = NOW()
+        WHERE id = ?
+    ');
+    $stmt->execute([$browserFingerprint, $userAgent, (int) $existing['id']]);
+}
+
 function json_response(array $data, int $status = 200): never
 {
     http_response_code($status);
@@ -950,6 +1142,8 @@ function group_payload(array $group): array
         'owner_user_id' => isset($group['owner_user_id']) ? (int) $group['owner_user_id'] : 0,
         'role' => normalize_role((string) $group['role']),
         'role_label' => role_label((string) $group['role']),
+        'p2p_enabled' => !empty($group['p2p_enabled_at']),
+        'p2p_key_version' => (int) ($group['p2p_key_version'] ?? 0),
     ];
 }
 
@@ -981,6 +1175,9 @@ function location_payload(?array $row): ?array
         'location_meta' => !empty($row['location_meta']) ? json_decode((string) $row['location_meta'], true) : null,
         'address_mismatch' => (int) ($row['address_mismatch'] ?? 0) === 1,
         'address_diagnostics' => $diagnostics,
+        'encryption_mode' => (string) ($row['encryption_mode'] ?? ''),
+        'encrypted_payload' => (string) ($row['encrypted_payload'] ?? ''),
+        'p2p_key_version' => (int) ($row['p2p_key_version'] ?? 0),
         'updated_at' => format_datetime($row['updated_at']),
         'is_stale' => strtotime((string) $row['updated_at']) < time() - LOCATION_STALE_SECONDS,
     ];
@@ -996,6 +1193,14 @@ function public_user_payload(array $user): array
 {
     $groups = user_groups_for_user((int) $user['id']);
     $membership = $groups[0] ?? null;
+    $payloadGroups = [];
+    foreach ($groups as $group) {
+        $groupPayload = group_payload($group);
+        if ((int) ($group['owner_user_id'] ?? 0) === (int) $user['id']) {
+            $groupPayload['members'] = group_members_payload((string) $group['group_name']);
+        }
+        $payloadGroups[] = $groupPayload;
+    }
 
     return [
         'id' => (int) $user['id'],
@@ -1006,7 +1211,7 @@ function public_user_payload(array $user): array
         'role_label' => $membership ? role_label((string) $membership['role']) : '',
         'terms_accepted' => user_terms_accepted($user),
         'cross_border_transfer_accepted' => user_cross_border_transfer_accepted($user),
-        'groups' => array_map('group_payload', $groups),
+        'groups' => $payloadGroups,
         'report_interval_seconds' => user_report_interval_seconds($user),
     ];
 }
@@ -1041,7 +1246,9 @@ function user_groups_for_user(int $userId): array
             ug.role,
             fg.group_code,
             fg.display_name AS group_display_name,
-            fg.owner_user_id
+            fg.owner_user_id,
+            fg.p2p_enabled_at,
+            fg.p2p_key_version
         FROM user_groups ug
         LEFT JOIN family_groups fg ON fg.group_name = ug.group_name
         WHERE ug.user_id = ?
@@ -1083,6 +1290,46 @@ function user_membership_for_group(array $user, string $groupName = ''): ?array
     }
 
     return null;
+}
+
+function group_members_payload(string $groupName): array
+{
+    $stmt = db()->prepare('
+        SELECT
+            u.id AS user_id,
+            u.username,
+            u.display_name,
+            ug.role
+        FROM user_groups ug
+        INNER JOIN users u ON u.id = ug.user_id
+        WHERE ug.group_name = ?
+        ORDER BY ug.role ASC, u.username ASC
+    ');
+    $stmt->execute([$groupName]);
+
+    return array_map(static function (array $member): array {
+        return [
+            'user_id' => (int) $member['user_id'],
+            'username' => (string) $member['username'],
+            'display_name' => (string) $member['display_name'],
+            'role' => normalize_role((string) $member['role']),
+            'role_label' => role_label((string) $member['role']),
+        ];
+    }, $stmt->fetchAll());
+}
+
+function require_group_owner(array $user, string $groupName): array
+{
+    $membership = require_user_membership($user, $groupName);
+    $stmt = db()->prepare('SELECT * FROM family_groups WHERE group_name = ? LIMIT 1');
+    $stmt->execute([(string) $membership['group_name']]);
+    $group = $stmt->fetch();
+
+    if (!$group || (int) ($group['owner_user_id'] ?? 0) !== (int) $user['id']) {
+        json_response(['ok' => false, 'message' => '只有家庭组管理员可以操作。'], 403);
+    }
+
+    return $group;
 }
 
 function require_user_membership(array $user, string $groupName = ''): array
@@ -1149,6 +1396,76 @@ function clear_failed_login(PDO $pdo, int $userId): void
     $stmt->execute([$userId]);
 }
 
+function client_ip_address(): string
+{
+    $candidates = [
+        $_SERVER['HTTP_CF_CONNECTING_IP'] ?? '',
+        $_SERVER['HTTP_X_FORWARDED_FOR'] ?? '',
+        $_SERVER['REMOTE_ADDR'] ?? '',
+    ];
+
+    foreach ($candidates as $candidate) {
+        $ip = trim(explode(',', (string) $candidate)[0]);
+        if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP)) {
+            return substr($ip, 0, 45);
+        }
+    }
+
+    return '';
+}
+
+function text_limit(string $value, int $maxLength): string
+{
+    if (function_exists('mb_substr')) {
+        return mb_substr($value, 0, $maxLength, 'UTF-8');
+    }
+
+    return strlen($value) > $maxLength * 4 ? substr($value, 0, $maxLength * 4) : $value;
+}
+
+function record_user_log(?int $userId, string $groupName, string $eventType, string $message = '', array $meta = []): void
+{
+    try {
+        $metaJson = $meta
+            ? json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+            : null;
+        $stmt = db()->prepare('
+            INSERT INTO user_logs (user_id, group_name, event_type, message, meta_json, ip, user_agent)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ');
+        $stmt->execute([
+            $userId,
+            text_limit($groupName, 100),
+            substr($eventType, 0, 40),
+            text_limit($message, 255),
+            $metaJson,
+            client_ip_address(),
+            substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255),
+        ]);
+    } catch (Throwable $error) {
+        error_log('[family-location] user log failed: ' . $error->getMessage());
+    }
+}
+
+function touch_user_presence(int $userId, string $groupName = ''): void
+{
+    $stmt = db()->prepare('
+        INSERT INTO user_presence (user_id, last_seen_at, last_group_name, last_user_agent, last_ip)
+        VALUES (?, NOW(), ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+            last_seen_at = NOW(),
+            last_group_name = VALUES(last_group_name),
+            last_user_agent = VALUES(last_user_agent),
+            last_ip = VALUES(last_ip)
+    ');
+    $stmt->execute([
+        $userId,
+        text_limit($groupName, 100),
+        substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255),
+        client_ip_address(),
+    ]);
+}
+
 function latest_locations_for_group(string $groupName): array
 {
     $cached = latest_locations_cache_get($groupName);
@@ -1170,6 +1487,9 @@ function latest_locations_for_group(string $groupName): array
             ll.location_meta,
             ll.address_diagnostics,
             ll.address_mismatch,
+            ll.encryption_mode,
+            ll.encrypted_payload,
+            ll.p2p_key_version,
             ll.updated_at,
             u.username,
             u.display_name

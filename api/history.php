@@ -89,8 +89,12 @@ try {
             l.accuracy,
             l.heading,
             l.speed,
+            l.location_meta,
             l.address_diagnostics,
             l.address_mismatch,
+            l.encryption_mode,
+            l.encrypted_payload,
+            l.p2p_key_version,
             l.created_at,
             u.username,
             u.display_name
@@ -125,8 +129,12 @@ try {
             l.accuracy,
             l.heading,
             l.speed,
+            l.location_meta,
             l.address_diagnostics,
             l.address_mismatch,
+            l.encryption_mode,
+            l.encrypted_payload,
+            l.p2p_key_version,
             l.created_at,
             u.username,
             u.display_name
@@ -189,8 +197,12 @@ try {
             'accuracy' => $row['accuracy'] === null ? null : (float) $row['accuracy'],
             'heading' => $row['heading'] === null ? null : (float) $row['heading'],
             'speed' => $row['speed'] === null ? null : (float) $row['speed'],
+            'location_meta' => !empty($row['location_meta']) ? json_decode((string) $row['location_meta'], true) : null,
             'address_mismatch' => (int) ($row['address_mismatch'] ?? 0) === 1,
             'address_diagnostics' => $diagnostics,
+            'encryption_mode' => (string) ($row['encryption_mode'] ?? ''),
+            'encrypted_payload' => (string) ($row['encrypted_payload'] ?? ''),
+            'p2p_key_version' => (int) ($row['p2p_key_version'] ?? 0),
             'created_at' => format_datetime((string) $row['created_at']),
         ];
     };

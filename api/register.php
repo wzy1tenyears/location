@@ -22,6 +22,7 @@ try {
     $termsAccepted = input_bool('terms_accepted');
     $crossBorderAccepted = input_bool('cross_border_transfer_accepted');
     $turnstileToken = input_string('turnstile_token', 4096);
+    $browserFingerprint = input_browser_fingerprint();
 
     verify_register_turnstile_token($turnstileToken);
 
@@ -48,6 +49,13 @@ try {
     }
 
     $pdo = db();
+    $deviceFingerprint = request_device_fingerprint();
+    $stmt = $pdo->prepare('SELECT user_id FROM user_devices WHERE device_fingerprint = ? LIMIT 1');
+    $stmt->execute([$deviceFingerprint]);
+    if ($stmt->fetch()) {
+        json_response(['ok' => false, 'message' => '该设备已绑定其他账号。'], 403);
+    }
+
     $stmt = $pdo->prepare('SELECT id FROM users WHERE username = ? LIMIT 1');
     $stmt->execute([$username]);
     if ($stmt->fetch()) {
@@ -78,11 +86,14 @@ try {
         if (!preg_match('/^[0-9a-z]{6}$/', $groupCode)) {
             json_response(['ok' => false, 'message' => '请填写 6 位家庭组号。'], 422);
         }
-        $stmt = $pdo->prepare('SELECT group_name FROM family_groups WHERE group_code = ? LIMIT 1');
+        $stmt = $pdo->prepare('SELECT group_name, p2p_enabled_at FROM family_groups WHERE group_code = ? LIMIT 1');
         $stmt->execute([$groupCode]);
         $group = $stmt->fetch();
         if (!$group) {
             json_response(['ok' => false, 'message' => '家庭组号不存在。'], 404);
+        }
+        if (!empty($group['p2p_enabled_at'])) {
+            json_response(['ok' => false, 'message' => '该家庭组已开启端到端加密，暂不允许新成员直接加入。'], 409);
         }
         $assignedGroupName = (string) $group['group_name'];
     }
@@ -102,9 +113,16 @@ try {
     ]);
     $userId = (int) $pdo->lastInsertId();
 
-    if ((string) $invite['invite_type'] === 'group_create' && trim((string) ($invite['assigned_group_name'] ?? '')) === '') {
+    if (
+        (string) $invite['invite_type'] === 'group_create'
+        && (int) ($invite['allow_group_owner'] ?? 0) === 1
+        && trim((string) ($invite['assigned_group_name'] ?? '')) === ''
+    ) {
         $stmt = $pdo->prepare('UPDATE family_groups SET owner_user_id = ? WHERE group_name = ? AND owner_user_id IS NULL');
         $stmt->execute([$userId, $assignedGroupName]);
+    }
+
+    if ((string) $invite['invite_type'] === 'group_create' && trim((string) ($invite['assigned_group_name'] ?? '')) === '') {
         $stmt = $pdo->prepare('UPDATE invite_codes SET assigned_group_name = ? WHERE id = ?');
         $stmt->execute([$assignedGroupName, (int) $invite['id']]);
     }
@@ -123,6 +141,9 @@ try {
     $stmt = $pdo->prepare('SELECT * FROM users WHERE id = ? LIMIT 1');
     $stmt->execute([$userId]);
     $user = $stmt->fetch();
+    bind_user_device($pdo, $user, $deviceFingerprint, $browserFingerprint);
+    touch_user_presence($userId, $assignedGroupName);
+    record_user_log($userId, $assignedGroupName, 'register', '用户注册');
 
     json_response(['ok' => true, 'user' => public_user_payload($user)]);
 } catch (Throwable $th) {

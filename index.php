@@ -13,6 +13,22 @@ if (path_matches_admin_base($requestPath, $adminBase)) {
 
 require_loc_app_page();
 $webAssetVersion = web_asset_version(__DIR__);
+$isAppLoggedIn = !empty($_SESSION['user_id']);
+$assetScripts = $isAppLoggedIn
+    ? [
+        'assets/geo-aliases.js',
+        'assets/address-utils.js',
+        'assets/ip-probe.js',
+        'assets/webrtc-probe.js',
+        'assets/popup-select.js',
+        'assets/web-version.js',
+        'assets/p2p-location.js',
+        'assets/app.js',
+    ]
+    : [
+        'assets/popup-select.js',
+        'assets/auth.js',
+    ];
 header('Content-Type: text/html; charset=utf-8');
 $page = <<<'HTML'
 <!doctype html>
@@ -99,6 +115,7 @@ $page = <<<'HTML'
                     <p id="accountLine"></p>
                 </div>
                 <div class="header-actions">
+                    <button id="ticketButton" class="icon-button" type="button" aria-label="工单" hidden>工单</button>
                     <button id="announcementButton" class="icon-button" type="button" aria-label="公告" hidden>公告</button>
                     <button id="settingsButton" class="icon-button" type="button" aria-label="设置" hidden>设置</button>
                     <button id="logoutButton" class="icon-button" type="button" aria-label="退出" hidden>退出</button>
@@ -176,15 +193,7 @@ $page = <<<'HTML'
 
     <script src="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
     <script>
-        [
-            'assets/geo-aliases.js',
-            'assets/address-utils.js',
-            'assets/ip-probe.js',
-            'assets/webrtc-probe.js',
-            'assets/popup-select.js',
-            'assets/web-version.js',
-            'assets/app.js',
-        ].forEach((path) => {
+        __ASSET_SCRIPTS_JSON__.forEach((path) => {
             document.write(`<script src="${window.__assetUrl(path)}"><\/script>`);
         });
     </script>
@@ -192,6 +201,10 @@ $page = <<<'HTML'
 </body>
 </html>
 HTML;
+$page = $isAppLoggedIn
+    ? preg_replace('/\s*<section id="loginView"[\s\S]*?<\/section>\s*/', "\n", $page, 1)
+    : preg_replace('/\s*<section id="mainView"[\s\S]*<\/section>\s*<\/main>/', "\n    </main>", $page, 1);
+
 echo str_replace(
     [
         '__WEB_ASSET_VERSION_JSON__',
@@ -201,6 +214,7 @@ echo str_replace(
         '__CF_TURNSTILE_SITE_KEY_JSON__',
         '__CF_TURNSTILE_SITE_KEY_ATTR__',
         '__CF_TURNSTILE_HIDDEN__',
+        '__ASSET_SCRIPTS_JSON__',
     ],
     [
         json_encode($webAssetVersion, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT),
@@ -210,6 +224,7 @@ echo str_replace(
         json_encode(CF_TURNSTILE_SITE_KEY, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT),
         e(CF_TURNSTILE_SITE_KEY),
         trim((string) CF_TURNSTILE_SITE_KEY) === '' ? 'hidden' : '',
+        json_encode($assetScripts, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT),
     ],
     $page
 );

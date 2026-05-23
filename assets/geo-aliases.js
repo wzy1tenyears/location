@@ -247,3 +247,46 @@ window.GEO_ALIASES = {
         萨福克县: '萨福克县',
     },
 };
+
+(() => {
+    const cacheKey = 'loc_geo_aliases_db_v1';
+    const aliases = window.GEO_ALIASES || {};
+
+    function mergeAliasMap(target, source) {
+        if (!target || !source) return;
+        Object.entries(source).forEach(([key, value]) => {
+            if (key && value) {
+                target[key] = value;
+            }
+        });
+    }
+
+    function applyPayload(payload) {
+        if (!payload || !payload.available || !payload.aliases) return;
+        mergeAliasMap(aliases.CITY_ALIASES, payload.aliases.CITY_ALIASES);
+        mergeAliasMap(aliases.REGION_ALIASES, payload.aliases.REGION_ALIASES);
+    }
+
+    try {
+        applyPayload(JSON.parse(localStorage.getItem(cacheKey) || 'null'));
+    } catch (error) {
+        localStorage.removeItem(cacheKey);
+    }
+
+    fetch('api/geo_aliases.php', {
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+    })
+        .then((response) => (response.ok ? response.json() : null))
+        .then((payload) => {
+            if (!payload || !payload.ok || !payload.available) return;
+            applyPayload(payload);
+            try {
+                localStorage.setItem(cacheKey, JSON.stringify(payload));
+            } catch (error) {
+                localStorage.removeItem(cacheKey);
+            }
+        })
+        .catch(() => {});
+})();

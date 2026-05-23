@@ -228,7 +228,6 @@ function validate_location_measurements(?float $accuracy, ?float $heading, ?floa
         json_response(['ok' => false, 'message' => '定位速度异常，已拒绝上报。'], 422);
     }
 }
-
 function sanitized_location_meta(array $data): ?string
 {
     $meta = [
@@ -246,6 +245,30 @@ function sanitized_location_meta(array $data): ?string
 
     $json = json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     return is_string($json) ? $json : null;
+}
+
+function p2p_encrypted_payload_from_request(mixed $value): ?string
+{
+    if ($value === null || $value === '') {
+        return null;
+    }
+
+    if (!is_array($value)) {
+        json_response(['ok' => false, 'message' => '加密定位数据格式不正确。'], 422);
+    }
+
+    foreach (['iv', 'ciphertext'] as $field) {
+        if (empty($value[$field]) || !is_string($value[$field])) {
+            json_response(['ok' => false, 'message' => '加密定位数据不完整。'], 422);
+        }
+    }
+
+    $json = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if (!is_string($json) || strlen($json) > 500000) {
+        json_response(['ok' => false, 'message' => '加密定位数据过大。'], 422);
+    }
+
+    return $json;
 }
 
 function assert_location_report_plausible(PDO $pdo, int $userId, string $groupName, float $latitude, float $longitude, ?float $accuracy): void
@@ -316,6 +339,15 @@ try {
     require_report_device_cookie();
 
     $data = request_data();
+    $p2pEnabled = !empty($membership['p2p_enabled_at']);
+    $encryptedPayloadJson = p2p_encrypted_payload_from_request($data['encrypted_payload'] ?? null);
+    $p2pKeyVersion = max(0, (int) ($data['p2p_key_version'] ?? ($membership['p2p_key_version'] ?? 0)));
+    if ($p2pEnabled && $encryptedPayloadJson === null) {
+        json_response(['ok' => false, 'message' => '当前家庭组已开启端到端加密，请使用新版 App 上报。'], 422);
+    }
+    if (!$p2pEnabled && $encryptedPayloadJson !== null) {
+        json_response(['ok' => false, 'message' => '当前家庭组未开启端到端加密。'], 422);
+    }
     $locationId = (int) ($data['location_id'] ?? 0);
     $addressDiagnostics = sanitize_address_diagnostics(
         is_array($data['address_diagnostics'] ?? null) ? $data['address_diagnostics'] : null
@@ -357,37 +389,77 @@ try {
             json_response(['ok' => false, 'message' => '位置诊断更新已过期。'], 422);
         }
 
-        $stmt = $pdo->prepare('
-            UPDATE locations
-            SET address_diagnostics = ?,
-                address_mismatch = ?
-            WHERE id = ?
-                AND user_id = ?
-                AND group_name = ?
-        ');
-        $stmt->execute([
-            $addressDiagnosticsJson,
-            $addressMismatch,
-            $locationId,
-            (int) $user['id'],
-            (string) $membership['group_name'],
-        ]);
+        if ($p2pEnabled) {
+            $stmt = $pdo->prepare("
+                UPDATE locations
+                SET encryption_mode = 'p2p-v1',
+                    encrypted_payload = ?,
+                    p2p_key_version = ?,
+                    address_diagnostics = NULL,
+                    address_mismatch = 0
+                WHERE id = ?
+                    AND user_id = ?
+                    AND group_name = ?
+            ");
+            $stmt->execute([
+                $encryptedPayloadJson,
+                $p2pKeyVersion,
+                $locationId,
+                (int) $user['id'],
+                (string) $membership['group_name'],
+            ]);
 
-        $stmt = $pdo->prepare('
-            UPDATE latest_group_locations
-            SET address_diagnostics = ?,
-                address_mismatch = ?
-            WHERE user_id = ?
-                AND group_name = ?
-                AND latest_location_id = ?
-        ');
-        $stmt->execute([
-            $addressDiagnosticsJson,
-            $addressMismatch,
-            (int) $user['id'],
-            (string) $membership['group_name'],
-            $locationId,
-        ]);
+            $stmt = $pdo->prepare("
+                UPDATE latest_group_locations
+                SET encryption_mode = 'p2p-v1',
+                    encrypted_payload = ?,
+                    p2p_key_version = ?,
+                    address_diagnostics = NULL,
+                    address_mismatch = 0
+                WHERE user_id = ?
+                    AND group_name = ?
+                    AND latest_location_id = ?
+            ");
+            $stmt->execute([
+                $encryptedPayloadJson,
+                $p2pKeyVersion,
+                (int) $user['id'],
+                (string) $membership['group_name'],
+                $locationId,
+            ]);
+        } else {
+            $stmt = $pdo->prepare('
+                UPDATE locations
+                SET address_diagnostics = ?,
+                    address_mismatch = ?
+                WHERE id = ?
+                    AND user_id = ?
+                    AND group_name = ?
+            ');
+            $stmt->execute([
+                $addressDiagnosticsJson,
+                $addressMismatch,
+                $locationId,
+                (int) $user['id'],
+                (string) $membership['group_name'],
+            ]);
+
+            $stmt = $pdo->prepare('
+                UPDATE latest_group_locations
+                SET address_diagnostics = ?,
+                    address_mismatch = ?
+                WHERE user_id = ?
+                    AND group_name = ?
+                    AND latest_location_id = ?
+            ');
+            $stmt->execute([
+                $addressDiagnosticsJson,
+                $addressMismatch,
+                (int) $user['id'],
+                (string) $membership['group_name'],
+                $locationId,
+            ]);
+        }
 
         $pdo->commit();
         latest_locations_cache_forget_all();
@@ -396,6 +468,69 @@ try {
         json_response([
             'ok' => true,
             'message' => '位置诊断已更新。',
+            'location_id' => $locationId,
+            'reported_at' => date('Y-m-d H:i:s'),
+        ]);
+    }
+
+    if ($p2pEnabled) {
+        $pdo = db();
+        $userAgent = substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255);
+        $pdo->beginTransaction();
+
+        $stmt = $pdo->prepare("
+            INSERT INTO locations
+                (user_id, group_name, role, latitude, longitude, encryption_mode, encrypted_payload, p2p_key_version, user_agent)
+            VALUES
+                (?, ?, ?, 0, 0, 'p2p-v1', ?, ?, ?)
+        ");
+        $stmt->execute([
+            (int) $user['id'],
+            $membership['group_name'],
+            normalize_role((string) $membership['role']),
+            $encryptedPayloadJson,
+            $p2pKeyVersion,
+            $userAgent,
+        ]);
+        $locationId = (int) $pdo->lastInsertId();
+
+        $stmt = $pdo->prepare("
+            INSERT INTO latest_group_locations
+                (user_id, group_name, role, latitude, longitude, latest_location_id, encryption_mode, encrypted_payload, p2p_key_version, updated_at)
+            VALUES
+                (?, ?, ?, 0, 0, ?, 'p2p-v1', ?, ?, NOW())
+            ON DUPLICATE KEY UPDATE
+                group_name = VALUES(group_name),
+                role = VALUES(role),
+                latitude = 0,
+                longitude = 0,
+                latest_location_id = VALUES(latest_location_id),
+                encryption_mode = VALUES(encryption_mode),
+                encrypted_payload = VALUES(encrypted_payload),
+                p2p_key_version = VALUES(p2p_key_version),
+                updated_at = NOW()
+        ");
+        $stmt->execute([
+            (int) $user['id'],
+            $membership['group_name'],
+            normalize_role((string) $membership['role']),
+            $locationId,
+            $encryptedPayloadJson,
+            $p2pKeyVersion,
+        ]);
+        touch_user_presence((int) $user['id'], (string) $membership['group_name']);
+        record_user_log((int) $user['id'], (string) $membership['group_name'], 'location_report', '上报端到端加密位置', [
+            'location_id' => $locationId,
+            'p2p_key_version' => $p2pKeyVersion,
+        ]);
+
+        $pdo->commit();
+        latest_locations_cache_forget_all();
+        latest_locations_for_group((string) $membership['group_name']);
+
+        json_response([
+            'ok' => true,
+            'message' => '加密位置已上报。',
             'location_id' => $locationId,
             'reported_at' => date('Y-m-d H:i:s'),
         ]);
@@ -488,6 +623,12 @@ try {
         $locationId,
         $addressDiagnosticsJson,
         $addressMismatch,
+    ]);
+    touch_user_presence((int) $user['id'], (string) $membership['group_name']);
+    record_user_log((int) $user['id'], (string) $membership['group_name'], 'location_report', '上报位置', [
+        'location_id' => $locationId,
+        'accuracy' => $accuracy,
+        'address_mismatch' => $addressMismatch === 1,
     ]);
 
     $pdo->exec('

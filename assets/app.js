@@ -1,4 +1,4 @@
-const API_BASE = 'api';
+﻿const API_BASE = 'api';
 const THEME_STORAGE_KEY = 'theme_mode';
 const DEFAULT_REPORT_INTERVAL_MS = 300000;
 const REFRESH_MS = 15000;
@@ -15,6 +15,7 @@ const state = {
     amapInfoWindow: null,
     markers: new Map(),
     refreshTimer: null,
+    heartbeatTimer: null,
     watchId: null,
     lastAutoReportAt: 0,
     lastImmediateAutoReportKey: '',
@@ -38,6 +39,8 @@ const state = {
     announcement: null,
     legalDocuments: null,
     pendingLatestLocationFocus: false,
+    backgroundedAt: 0,
+    clipboardInviteChecked: false,
 };
 
 const el = {
@@ -56,6 +59,7 @@ const el = {
     turnstileBox: document.querySelector('#turnstileBox'),
     appTitle: document.querySelector('#appTitle'),
     accountLine: document.querySelector('#accountLine'),
+    ticketButton: document.querySelector('#ticketButton'),
     announcementButton: document.querySelector('#announcementButton'),
     settingsButton: document.querySelector('#settingsButton'),
     logoutButton: document.querySelector('#logoutButton'),
@@ -83,6 +87,48 @@ const el = {
 const systemThemeQuery = window.matchMedia
     ? window.matchMedia('(prefers-color-scheme: dark)')
     : null;
+
+function installAntiDebugGuards() {
+    let warnedAt = 0;
+
+    function warn() {
+        const now = Date.now();
+        if (now - warnedAt < 5000) {
+            return;
+        }
+        warnedAt = now;
+        showSimplePopup('环境风险', '检测到调试或开发者工具行为，部分功能可能会被限制。', {
+            closeText: '我知道了',
+        });
+    }
+
+    document.addEventListener('keydown', (event) => {
+        const key = String(event.key || '').toLowerCase();
+        const blocked = event.key === 'F12'
+            || (event.ctrlKey && event.shiftKey && ['i', 'j', 'c'].includes(key))
+            || (event.ctrlKey && ['u', 's'].includes(key));
+        if (!blocked) {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        warn();
+    }, true);
+
+    document.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        warn();
+    }, true);
+
+    window.setInterval(() => {
+        const widthGap = Math.abs(window.outerWidth - window.innerWidth);
+        const heightGap = Math.abs(window.outerHeight - window.innerHeight);
+        if ((widthGap > 180 || heightGap > 180) && !window.LocationBridge) {
+            warn();
+        }
+    }, 1200);
+}
 
 function applyThemeMode(mode) {
     const normalized = ['system', 'light', 'dark'].includes(mode) ? mode : 'system';
@@ -158,38 +204,6 @@ function showSimplePopup(title, paragraphs, options = {}) {
         title: '',
         paragraphs: Array.isArray(paragraphs) ? paragraphs : [String(paragraphs || '')],
     }], options);
-}
-
-async function loadLegalDocuments() {
-    if (state.legalDocuments) {
-        return state.legalDocuments;
-    }
-
-    const payload = await api('legal_documents', { method: 'GET' });
-    state.legalDocuments = payload.documents || {};
-    return state.legalDocuments;
-}
-
-async function showLegalDocument(type, fallbackTitle, options = {}) {
-    try {
-        const documents = await loadLegalDocuments();
-        const documentData = documents[type] || {};
-        showDocumentPopup(documentData.title || fallbackTitle, documentData.sections || [], options);
-    } catch (error) {
-        showSimplePopup('加载失败', error.message || '协议内容暂时无法加载。');
-    }
-}
-
-async function showCombinedLegalDocuments() {
-    try {
-        const documents = await loadLegalDocuments();
-        showDocumentPopup('用户协议与隐私条约', [
-            ...((documents.user_agreement && documents.user_agreement.sections) || []),
-            ...((documents.privacy_policy && documents.privacy_policy.sections) || []),
-        ]);
-    } catch (error) {
-        showSimplePopup('加载失败', error.message || '协议内容暂时无法加载。');
-    }
 }
 
 function openInlinePopupDialog(title, sections, options = {}) {
@@ -271,7 +285,9 @@ function openInlinePopupDialog(title, sections, options = {}) {
 }
 
 async function api(path, options = {}) {
-    const response = await fetch(`${API_BASE}/${path}.php`, {
+    const [scriptPath, query = ''] = String(path).split('?');
+    const url = `${API_BASE}/${scriptPath}.php${query ? `?${query}` : ''}`;
+    const response = await fetch(url, {
         credentials: 'same-origin',
         headers: {
             'Content-Type': 'application/json',
@@ -298,9 +314,17 @@ async function api(path, options = {}) {
 function showLogin(message = '') {
     stopWatch();
     stopRefresh();
+    stopHeartbeat();
     clearNativeReportingState();
     clearHistory();
     renderAddressDiagnostics(null);
+    if (!el.loginView || !el.mainView) {
+        if (message) {
+            sessionStorage.setItem('login_message', message);
+        }
+        window.location.href = window.location.pathname || '/';
+        return;
+    }
     state.user = null;
     state.selectedGroupName = '';
     state.guardianContinuousReporting = false;
@@ -322,6 +346,9 @@ function showLogin(message = '') {
     if (el.announcementButton) {
         el.announcementButton.hidden = true;
     }
+    if (el.ticketButton) {
+        el.ticketButton.hidden = true;
+    }
     el.mainView.hidden = true;
     el.loginView.hidden = false;
     el.loginMessage.hidden = message === '';
@@ -330,31 +357,45 @@ function showLogin(message = '') {
 
 function showMain(user) {
     state.user = user;
+    window.__CURRENT_USER_ID__ = Number(user && user.id) || 0;
     setReportInterval(user.report_interval_seconds);
     stopWatch();
     state.pendingLatestLocationFocus = true;
-    el.loginView.hidden = true;
-    el.mainView.hidden = false;
-    el.logoutButton.hidden = false;
+    if (el.loginView) {
+        el.loginView.hidden = true;
+    }
+    if (el.mainView) {
+        el.mainView.hidden = false;
+    }
+    if (el.logoutButton) {
+        el.logoutButton.hidden = false;
+    }
     if (el.settingsButton) {
         el.settingsButton.hidden = false;
     }
     if (el.announcementButton) {
         el.announcementButton.hidden = false;
     }
+    if (el.ticketButton) {
+        el.ticketButton.hidden = false;
+    }
     if (el.crossGroupSyncButton) {
         el.crossGroupSyncButton.hidden = false;
     }
     initMap();
+    if (window.P2PLocationCrypto && typeof window.P2PLocationCrypto.warmup === 'function') {
+        window.setTimeout(() => {
+            window.P2PLocationCrypto.warmup().catch((error) => console.warn(error));
+        }, 1500);
+    }
     startRefresh();
     applySelectedGroup(preferredGroupName(user), false);
     refreshLocations();
     refreshHistory();
     syncAutoReportWatch();
     checkFineLocationPermission();
-    uploadEnvironmentDataIfAllowed();
-    uploadDeviceReportIfAvailable();
     refreshAnnouncement(true);
+    startHeartbeat();
 }
 
 function preferredGroupName(user) {
@@ -378,6 +419,10 @@ function userGroups(user = state.user) {
 
 function currentGroup() {
     return userGroups().find((group) => group.group_name === state.selectedGroupName) || null;
+}
+
+function userDisplayName(user) {
+    return (user && (user.display_name || user.username)) || '';
 }
 
 function groupDisplayName(group) {
@@ -451,6 +496,22 @@ function renderGroupSelect() {
     el.groupSelect.value = state.selectedGroupName;
     el.groupSelect.disabled = groups.length <= 1;
     refreshPopupSelectControls();
+}
+
+function syncUserPayload(payload, preferredGroup = '') {
+    if (!payload || !payload.user) {
+        return;
+    }
+
+    state.user = payload.user;
+    setReportInterval(state.user.report_interval_seconds);
+    renderGroupSelect();
+
+    const groups = userGroups();
+    const nextGroup = preferredGroup && groups.some((group) => group.group_name === preferredGroup)
+        ? preferredGroup
+        : preferredGroupName(state.user);
+    applySelectedGroup(nextGroup, true);
 }
 
 function shouldAutoReport() {
@@ -602,72 +663,15 @@ function showPreciseLocationRequiredPopup(requestAgain = true) {
         onClose: requestAgain ? requestFineLocationPermissionAgain : null,
     });
 }
-
-async function uploadEnvironmentDataIfAllowed() {
-    if (!state.user || !state.user.environment_data_consent || !window.LocationBridge) {
-        return;
+function simpleHash(value) {
+    let hash = 0;
+    const text = String(value || '');
+    for (let index = 0; index < text.length; index += 1) {
+        hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
     }
 
-    const today = localDateKey();
-    const storageKey = `environment_reported_day_${state.user.id}`;
-    if (window.localStorage.getItem(storageKey) === today) {
-        return;
-    }
-
-    if (typeof window.LocationBridge.getEnvironmentData !== 'function') {
-        return;
-    }
-
-    try {
-        const raw = window.LocationBridge.getEnvironmentData();
-        const report = JSON.parse(raw || '{}');
-        await api('environment_report', {
-            method: 'POST',
-            body: JSON.stringify({ report }),
-        });
-        window.localStorage.setItem(storageKey, today);
-    } catch (error) {
-        console.warn(error);
-    }
+    return String(hash >>> 0);
 }
-
-async function uploadDeviceReportIfAvailable() {
-    if (!state.user || !window.LocationBridge || typeof window.LocationBridge.getDeviceIntegrityData !== 'function') {
-        return;
-    }
-
-    const storageKey = `device_integrity_reported_day_${state.user.id}`;
-    const today = localDateKey();
-    if (window.localStorage.getItem(storageKey) === today) {
-        return;
-    }
-
-    try {
-        const report = JSON.parse(window.LocationBridge.getDeviceIntegrityData() || '{}');
-        await api('device_report', {
-            method: 'POST',
-            body: JSON.stringify({ report }),
-        });
-        window.localStorage.setItem(storageKey, today);
-    } catch (error) {
-        console.warn(error);
-    }
-}
-
-function deviceReportForLocation() {
-    if (!window.LocationBridge || typeof window.LocationBridge.getDeviceIntegrityData !== 'function') {
-        return null;
-    }
-
-    try {
-        const report = JSON.parse(window.LocationBridge.getDeviceIntegrityData() || '{}');
-        return report && typeof report === 'object' ? report : null;
-    } catch (error) {
-        console.warn(error);
-        return null;
-    }
-}
-
 function localDateKey(date = new Date()) {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -710,6 +714,215 @@ function showAnnouncementPopup() {
     }]);
 }
 
+async function openTicketsPopup() {
+    const overlay = document.createElement('div');
+    overlay.className = 'popup-select-overlay';
+
+    const card = document.createElement('div');
+    card.className = 'popup-select-card popup-dialog-card ticket-dialog-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+
+    const heading = document.createElement('h2');
+    heading.textContent = '工单';
+
+    const body = document.createElement('div');
+    body.className = 'popup-dialog-body settings-dialog-body ticket-dialog-body';
+    const loading = document.createElement('p');
+    loading.textContent = '正在加载...';
+    body.append(loading);
+
+    const actions = document.createElement('div');
+    actions.className = 'popup-dialog-actions';
+    const newButton = document.createElement('button');
+    newButton.type = 'button';
+    newButton.className = 'popup-primary-action';
+    newButton.textContent = '新建工单';
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'subtle-button popup-secondary-action';
+    closeButton.textContent = '关闭';
+
+    const close = () => {
+        overlay.classList.remove('is-visible');
+        window.setTimeout(() => overlay.remove(), 200);
+    };
+    closeButton.addEventListener('click', close);
+    overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) {
+            close();
+        }
+    });
+    newButton.addEventListener('click', () => renderTicketCreateForm(body));
+
+    actions.append(closeButton, newButton);
+    card.append(heading, body, actions);
+    overlay.append(card);
+    document.body.append(overlay);
+    window.requestAnimationFrame(() => overlay.classList.add('is-visible'));
+
+    await renderTicketList(body);
+}
+
+async function renderTicketList(container) {
+    container.replaceChildren();
+    try {
+        const payload = await api('tickets', { method: 'GET' });
+        const tickets = payload.tickets || [];
+        if (!tickets.length) {
+            const empty = document.createElement('p');
+            empty.textContent = '暂无工单。';
+            container.append(empty);
+            return;
+        }
+
+        const list = document.createElement('div');
+        list.className = 'ticket-list';
+        tickets.forEach((ticket) => {
+            const item = document.createElement('button');
+            item.type = 'button';
+            item.className = 'ticket-item';
+            item.innerHTML = `<strong>${escapeHtml(ticket.subject)}</strong>
+                <span>${escapeHtml(ticket.status_label)} / ${escapeHtml(ticket.updated_at || ticket.created_at)}</span>
+                <span>${escapeHtml(ticket.last_message || '暂无回复')}</span>`;
+            item.addEventListener('click', () => renderTicketThread(container, ticket.id));
+            list.append(item);
+        });
+        container.append(list);
+    } catch (error) {
+        const message = document.createElement('div');
+        message.className = 'message';
+        message.textContent = error.message;
+        container.append(message);
+    }
+}
+
+function renderTicketCreateForm(container) {
+    container.replaceChildren();
+    const form = document.createElement('form');
+    form.className = 'ticket-form';
+    const subject = document.createElement('input');
+    subject.placeholder = '标题';
+    subject.required = true;
+    const message = document.createElement('textarea');
+    message.placeholder = '描述问题';
+    message.required = true;
+    message.rows = 5;
+    const feedback = document.createElement('div');
+    feedback.className = 'message';
+    feedback.hidden = true;
+    const submit = document.createElement('button');
+    submit.type = 'submit';
+    submit.textContent = '提交';
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'subtle-button';
+    back.textContent = '返回';
+    back.addEventListener('click', () => renderTicketList(container));
+    form.append(subject, message, feedback, submit, back);
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        submit.disabled = true;
+        feedback.hidden = true;
+        try {
+            const payload = await api('tickets', {
+                method: 'POST',
+                body: JSON.stringify({
+                    action: 'create',
+                    group_name: state.selectedGroupName,
+                    subject: subject.value,
+                    message: message.value,
+                }),
+            });
+            await renderTicketThread(container, payload.ticket_id);
+        } catch (error) {
+            feedback.textContent = error.message;
+            feedback.hidden = false;
+        } finally {
+            submit.disabled = false;
+        }
+    });
+    container.append(form);
+}
+
+async function renderTicketThread(container, ticketId) {
+    container.replaceChildren();
+    const loading = document.createElement('p');
+    loading.textContent = '正在加载...';
+    container.append(loading);
+
+    try {
+        const payload = await api(`tickets?ticket_id=${encodeURIComponent(ticketId)}`, { method: 'GET' });
+        const ticket = payload.ticket;
+        const messages = payload.messages || [];
+        container.replaceChildren();
+
+        const title = document.createElement('div');
+        title.className = 'ticket-thread-title';
+        title.innerHTML = `<strong>${escapeHtml(ticket.subject)}</strong><span>${escapeHtml(ticket.status_label)}</span>`;
+        container.append(title);
+
+        const list = document.createElement('div');
+        list.className = 'ticket-message-list';
+        messages.forEach((message) => {
+            const row = document.createElement('div');
+            row.className = `ticket-message ${message.sender_type}`;
+            row.innerHTML = `<strong>${escapeHtml(message.sender_label)} · ${escapeHtml(message.created_at)}</strong><p>${escapeHtml(message.message)}</p>`;
+            list.append(row);
+        });
+        container.append(list);
+
+        const form = document.createElement('form');
+        form.className = 'ticket-form';
+        const input = document.createElement('textarea');
+        input.rows = 3;
+        input.placeholder = ticket.status === 'closed' ? '工单已关闭' : '输入回复';
+        input.disabled = ticket.status === 'closed';
+        const feedback = document.createElement('div');
+        feedback.className = 'message';
+        feedback.hidden = true;
+        const submit = document.createElement('button');
+        submit.type = 'submit';
+        submit.textContent = '发送';
+        submit.disabled = ticket.status === 'closed';
+        const back = document.createElement('button');
+        back.type = 'button';
+        back.className = 'subtle-button';
+        back.textContent = '返回列表';
+        back.addEventListener('click', () => renderTicketList(container));
+        form.append(input, feedback, submit, back);
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            if (input.value.trim() === '') {
+                return;
+            }
+            submit.disabled = true;
+            try {
+                await api('tickets', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        action: 'reply',
+                        ticket_id: ticket.id,
+                        message: input.value,
+                    }),
+                });
+                await renderTicketThread(container, ticket.id);
+            } catch (error) {
+                feedback.textContent = error.message;
+                feedback.hidden = false;
+                submit.disabled = false;
+            }
+        });
+        container.append(form);
+    } catch (error) {
+        container.replaceChildren();
+        const message = document.createElement('div');
+        message.className = 'message';
+        message.textContent = error.message;
+        container.append(message);
+    }
+}
+
 function openSettingsPopup() {
     const overlay = document.createElement('div');
     overlay.className = 'popup-select-overlay';
@@ -744,37 +957,6 @@ function openSettingsPopup() {
     themeSelect.value = window.localStorage.getItem(THEME_STORAGE_KEY) || 'system';
     themeSelect.addEventListener('change', () => applyThemeMode(themeSelect.value));
     themeLabel.append(themeTitle, themeSelect);
-
-    const envLabel = document.createElement('label');
-    envLabel.className = 'settings-check-field';
-    const envInput = document.createElement('input');
-    envInput.type = 'checkbox';
-    envInput.checked = !!(state.user && state.user.environment_data_consent);
-    const envText = document.createElement('span');
-    envText.textContent = '同意上报环境数据用于改进软件';
-    envInput.addEventListener('change', async () => {
-        const checked = envInput.checked;
-        envInput.disabled = true;
-        try {
-            const payload = await api('settings', {
-                method: 'POST',
-                body: JSON.stringify({
-                    group_name: state.selectedGroupName,
-                    environment_data_consent: checked,
-                }),
-            });
-            state.user = payload.user;
-            if (checked) {
-                uploadEnvironmentDataIfAllowed();
-            }
-        } catch (error) {
-            envInput.checked = !checked;
-            showSimplePopup('设置失败', error.message);
-        } finally {
-            envInput.disabled = false;
-        }
-    });
-    envLabel.append(envInput, envText);
 
     const passwordLabel = document.createElement('label');
     passwordLabel.className = 'settings-field';
@@ -829,7 +1011,30 @@ function openSettingsPopup() {
     joinRow.append(joinInput, joinButton);
     joinLabel.append(joinTitle, joinRow);
 
-    body.append(themeLabel, envLabel, passwordLabel, joinLabel);
+    body.append(themeLabel, passwordLabel, joinLabel);
+
+    const selectedGroup = currentGroup();
+    if (selectedGroup) {
+        const leaveLabel = document.createElement('label');
+        leaveLabel.className = 'settings-field';
+        const leaveTitle = document.createElement('span');
+        leaveTitle.textContent = '当前家庭组';
+        const leaveRow = document.createElement('div');
+        leaveRow.className = 'settings-inline-row';
+        const leaveHelp = document.createElement('span');
+        leaveHelp.className = 'settings-help';
+        leaveHelp.textContent = groupOptionText(selectedGroup);
+        const leaveButton = document.createElement('button');
+        leaveButton.type = 'button';
+        leaveButton.className = 'subtle-button danger-subtle-button';
+        leaveButton.textContent = '退出';
+        leaveButton.addEventListener('click', () => openLeaveGroupPopup(selectedGroup, close));
+        leaveRow.append(leaveHelp, leaveButton);
+        leaveLabel.append(leaveTitle, leaveRow);
+        body.append(leaveLabel);
+
+        appendHiddenP2PSettings(body, selectedGroup);
+    }
 
     const ownedGroups = userGroups().filter((group) => Number(group.owner_user_id || 0) === Number(state.user && state.user.id));
     if (ownedGroups.length) {
@@ -842,7 +1047,7 @@ function openSettingsPopup() {
             const title = document.createElement('span');
             title.textContent = `${groupDisplayName(group)} / 组号 ${group.group_code || '未生成'}`;
             const row = document.createElement('div');
-            row.className = 'settings-inline-row';
+            row.className = 'settings-inline-row settings-wide-action-row';
             const input = document.createElement('input');
             input.value = groupDisplayName(group);
             const button = document.createElement('button');
@@ -870,7 +1075,12 @@ function openSettingsPopup() {
                     button.disabled = false;
                 }
             });
-            row.append(input, button);
+            const membersButton = document.createElement('button');
+            membersButton.type = 'button';
+            membersButton.className = 'subtle-button';
+            membersButton.textContent = '成员管理';
+            membersButton.addEventListener('click', () => openGroupMembersPopup(group));
+            row.append(input, button, membersButton);
             groupLabel.append(title, row);
             body.append(groupLabel);
         });
@@ -896,6 +1106,356 @@ function openSettingsPopup() {
     overlay.append(card);
     document.body.append(overlay);
     refreshPopupSelectControls();
+    window.requestAnimationFrame(() => overlay.classList.add('is-visible'));
+}
+
+function appendHiddenP2PSettings(body, selectedGroup) {
+    if (!window.P2PLocationCrypto || typeof window.P2PLocationCrypto.settingsElement !== 'function') {
+        return;
+    }
+
+    const trigger = document.createElement('div');
+    trigger.className = 'settings-help hidden-p2p-trigger';
+    trigger.textContent = '安全状态：正常';
+    trigger.tabIndex = 0;
+    trigger.setAttribute('role', 'button');
+
+    let clickCount = 0;
+    let unlocked = false;
+    function unlock() {
+        if (unlocked) {
+            return;
+        }
+        unlocked = true;
+        trigger.hidden = true;
+        body.append(window.P2PLocationCrypto.settingsElement(selectedGroup.group_name, () => {
+            refreshLocations();
+            refreshHistory();
+        }));
+    }
+    function tick() {
+        clickCount += 1;
+        if (clickCount >= 5) {
+            unlock();
+            return;
+        }
+        window.setTimeout(() => {
+            clickCount = 0;
+        }, 1800);
+    }
+
+    trigger.addEventListener('click', tick);
+    trigger.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            tick();
+        }
+    });
+    body.append(trigger);
+}
+
+function openActionPopup({ title, message, confirmText = '确认', danger = false, onConfirm }) {
+    const overlay = document.createElement('div');
+    overlay.className = 'popup-select-overlay';
+
+    const card = document.createElement('div');
+    card.className = 'popup-select-card popup-dialog-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+
+    const heading = document.createElement('h2');
+    heading.textContent = title;
+
+    const body = document.createElement('div');
+    body.className = 'popup-dialog-body settings-dialog-body';
+    const text = document.createElement('p');
+    text.textContent = message;
+    body.append(text);
+
+    const feedback = document.createElement('div');
+    feedback.className = 'message';
+    feedback.hidden = true;
+    body.append(feedback);
+
+    const actions = document.createElement('div');
+    actions.className = 'popup-dialog-actions';
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'subtle-button popup-secondary-action';
+    closeButton.textContent = '取消';
+    const confirmButton = document.createElement('button');
+    confirmButton.type = 'button';
+    confirmButton.className = danger ? 'danger-action-button' : 'popup-primary-action';
+    confirmButton.textContent = confirmText;
+
+    const close = () => {
+        overlay.classList.remove('is-visible');
+        window.setTimeout(() => overlay.remove(), 200);
+    };
+
+    closeButton.addEventListener('click', close);
+    overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) {
+            close();
+        }
+    });
+    confirmButton.addEventListener('click', async () => {
+        confirmButton.disabled = true;
+        feedback.hidden = true;
+        try {
+            await onConfirm();
+            close();
+        } catch (error) {
+            feedback.textContent = error.message;
+            feedback.hidden = false;
+        } finally {
+            confirmButton.disabled = false;
+        }
+    });
+
+    actions.append(closeButton, confirmButton);
+    card.append(heading, body, actions);
+    overlay.append(card);
+    document.body.append(overlay);
+    window.requestAnimationFrame(() => overlay.classList.add('is-visible'));
+}
+
+function openLeaveGroupPopup(group, closeSettings = null) {
+    openActionPopup({
+        title: '退出家庭组',
+        message: `确认退出 ${groupDisplayName(group)}？退出后将无法查看这个家庭组的位置。`,
+        confirmText: '退出',
+        danger: true,
+        onConfirm: async () => {
+            const payload = await api('groups', {
+                method: 'POST',
+                body: JSON.stringify({
+                    action: 'leave_group',
+                    group_name: group.group_name,
+                }),
+            });
+            syncUserPayload(payload);
+            if (typeof closeSettings === 'function') {
+                closeSettings();
+            }
+            showSimplePopup('已退出', '已退出该家庭组。');
+        },
+    });
+}
+
+function openGroupMembersPopup(group) {
+    const members = Array.isArray(group.members) ? group.members : [];
+    const overlay = document.createElement('div');
+    overlay.className = 'popup-select-overlay';
+
+    const card = document.createElement('div');
+    card.className = 'popup-select-card popup-dialog-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+
+    const heading = document.createElement('h2');
+    heading.textContent = `${groupDisplayName(group)} 成员`;
+
+    const body = document.createElement('div');
+    body.className = 'popup-dialog-body settings-dialog-body';
+
+    if (!members.length) {
+        const empty = document.createElement('p');
+        empty.textContent = '当前没有可管理的成员。';
+        body.append(empty);
+    }
+
+    members.forEach((member) => {
+        const row = document.createElement('div');
+        row.className = 'settings-member-row';
+
+        const info = document.createElement('div');
+        info.className = 'settings-member-info';
+        const name = document.createElement('strong');
+        name.textContent = userDisplayName(member) || '未命名用户';
+        const meta = document.createElement('span');
+        meta.textContent = `${member.username || ''} / ${member.role_label || '未知类型'}`;
+        info.append(name, meta);
+
+        const actions = document.createElement('div');
+        actions.className = 'settings-member-actions';
+        const isSelf = Number(member.user_id) === Number(state.user && state.user.id);
+
+        const resetButton = document.createElement('button');
+        resetButton.type = 'button';
+        resetButton.className = 'subtle-button';
+        resetButton.textContent = '重置密码';
+        resetButton.disabled = isSelf;
+        resetButton.addEventListener('click', () => openMemberPasswordResetPopup(group, member));
+
+        const removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.className = 'subtle-button danger-subtle-button';
+        removeButton.textContent = '踢出';
+        removeButton.disabled = isSelf;
+        removeButton.addEventListener('click', () => openRemoveMemberPopup(group, member, () => {
+            overlay.classList.remove('is-visible');
+            window.setTimeout(() => overlay.remove(), 200);
+        }));
+
+        actions.append(resetButton, removeButton);
+        row.append(info, actions);
+        body.append(row);
+    });
+
+    const dialogActions = document.createElement('div');
+    dialogActions.className = 'popup-dialog-actions';
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'subtle-button popup-secondary-action';
+    closeButton.textContent = '关闭';
+    const close = () => {
+        overlay.classList.remove('is-visible');
+        window.setTimeout(() => overlay.remove(), 200);
+    };
+    closeButton.addEventListener('click', close);
+    overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) {
+            close();
+        }
+    });
+
+    dialogActions.append(closeButton);
+    card.append(heading, body, dialogActions);
+    overlay.append(card);
+    document.body.append(overlay);
+    window.requestAnimationFrame(() => overlay.classList.add('is-visible'));
+}
+
+function openRemoveMemberPopup(group, member, closeMembers = null) {
+    openActionPopup({
+        title: '踢出成员',
+        message: `确认将 ${userDisplayName(member) || member.username} 移出 ${groupDisplayName(group)}？`,
+        confirmText: '踢出',
+        danger: true,
+        onConfirm: async () => {
+            const payload = await api('groups', {
+                method: 'POST',
+                body: JSON.stringify({
+                    action: 'remove_member',
+                    group_name: group.group_name,
+                    target_user_id: member.user_id,
+                }),
+            });
+            syncUserPayload(payload, group.group_name);
+            if (typeof closeMembers === 'function') {
+                closeMembers();
+            }
+            showSimplePopup('已移除', '成员已移出家庭组。');
+        },
+    });
+}
+
+function openMemberPasswordResetPopup(group, member) {
+    const overlay = document.createElement('div');
+    overlay.className = 'popup-select-overlay';
+
+    const card = document.createElement('div');
+    card.className = 'popup-select-card popup-dialog-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+
+    const heading = document.createElement('h2');
+    heading.textContent = '重置成员密码';
+
+    const form = document.createElement('form');
+    form.className = 'popup-dialog-body settings-dialog-body';
+
+    const intro = document.createElement('p');
+    intro.textContent = `为 ${userDisplayName(member) || member.username} 设置新密码。该成员属于多个家庭组时，需要走工单系统申请。`;
+    form.append(intro);
+
+    const inputs = {};
+    [['new_password', '新密码'], ['new_password_confirm', '确认新密码']].forEach(([name, labelText]) => {
+        const label = document.createElement('label');
+        label.className = 'settings-field';
+        const span = document.createElement('span');
+        span.textContent = labelText;
+        const input = document.createElement('input');
+        input.name = name;
+        input.type = 'password';
+        input.placeholder = '至少 6 位';
+        inputs[name] = input;
+        label.append(span, input);
+        form.append(label);
+    });
+
+    const confirmLabel = document.createElement('label');
+    confirmLabel.className = 'settings-check-field';
+    const confirmInput = document.createElement('input');
+    confirmInput.type = 'checkbox';
+    const confirmText = document.createElement('span');
+    confirmText.textContent = '我确认要重置该成员密码';
+    confirmLabel.append(confirmInput, confirmText);
+    form.append(confirmLabel);
+
+    const message = document.createElement('div');
+    message.className = 'message';
+    message.hidden = true;
+    form.append(message);
+
+    const actions = document.createElement('div');
+    actions.className = 'popup-dialog-actions';
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'subtle-button popup-secondary-action';
+    closeButton.textContent = '关闭';
+    const submitButton = document.createElement('button');
+    submitButton.type = 'button';
+    submitButton.className = 'popup-primary-action';
+    submitButton.textContent = '重置密码';
+
+    const close = () => {
+        overlay.classList.remove('is-visible');
+        window.setTimeout(() => overlay.remove(), 200);
+    };
+    closeButton.addEventListener('click', close);
+    submitButton.addEventListener('click', () => form.requestSubmit());
+    overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) {
+            close();
+        }
+    });
+
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        message.hidden = true;
+        submitButton.disabled = true;
+        try {
+            if (inputs.new_password.value !== inputs.new_password_confirm.value) {
+                throw new Error('两次输入的新密码不一致。');
+            }
+            const payload = await api('groups', {
+                method: 'POST',
+                body: JSON.stringify({
+                    action: 'reset_member_password',
+                    group_name: group.group_name,
+                    target_user_id: member.user_id,
+                    new_password: inputs.new_password.value,
+                    new_password_confirm: inputs.new_password_confirm.value,
+                    confirm: confirmInput.checked,
+                }),
+            });
+            syncUserPayload(payload, group.group_name);
+            close();
+            showSimplePopup('已重置', '成员密码已更新。');
+        } catch (error) {
+            message.textContent = error.message;
+            message.hidden = false;
+        } finally {
+            submitButton.disabled = false;
+        }
+    });
+
+    actions.append(closeButton, submitButton);
+    card.append(heading, form, actions);
+    overlay.append(card);
+    document.body.append(overlay);
     window.requestAnimationFrame(() => overlay.classList.add('is-visible'));
 }
 
@@ -1254,6 +1814,34 @@ function stopRefresh() {
     }
 }
 
+function startHeartbeat() {
+    stopHeartbeat();
+    sendHeartbeat();
+    state.heartbeatTimer = window.setInterval(sendHeartbeat, 60000);
+}
+
+function stopHeartbeat() {
+    if (state.heartbeatTimer !== null) {
+        window.clearInterval(state.heartbeatTimer);
+        state.heartbeatTimer = null;
+    }
+}
+
+async function sendHeartbeat() {
+    if (!state.user) {
+        return;
+    }
+
+    try {
+        await api('heartbeat', {
+            method: 'POST',
+            body: JSON.stringify({ group_name: state.selectedGroupName || '' }),
+        });
+    } catch (error) {
+        console.warn(error);
+    }
+}
+
 function startWatch() {
     if (!navigator.geolocation) {
         setStatus('当前浏览器不支持定位');
@@ -1371,14 +1959,21 @@ async function reportPosition(position, automatic = false) {
                 while (queuedDiagnostics) {
                     const nextDiagnostics = queuedDiagnostics;
                     queuedDiagnostics = null;
+                    const diagnosticsPayload = await buildLocationReportPayload(reportGroupName, {
+                        group_name: reportGroupName,
+                        location_id: locationId,
+                        latitude,
+                        longitude,
+                        altitude,
+                        accuracy,
+                        heading,
+                        speed,
+                        address_diagnostics: nextDiagnostics,
+                        address_mismatch: nextDiagnostics.mismatch,
+                    }, null);
                     await api('report_location', {
                         method: 'POST',
-                        body: JSON.stringify({
-                            group_name: reportGroupName,
-                            location_id: locationId,
-                            address_diagnostics: nextDiagnostics,
-                            address_mismatch: nextDiagnostics.mismatch,
-                        }),
+                        body: JSON.stringify(diagnosticsPayload),
                     });
                     if (preferredMapSource({
                         latitude,
@@ -1408,35 +2003,28 @@ async function reportPosition(position, automatic = false) {
         probeSession.onUpdate(queueDiagnostics);
         renderAddressDiagnostics(addressDiagnostics);
 
-        const deviceReport = deviceReportForLocation();
-        const buildReportPayload = (groupName, diagnostics) => {
-            const payload = {
-                group_name: groupName,
-                latitude,
-                longitude,
-                altitude,
-                accuracy,
-                heading,
-                speed,
-                address_diagnostics: diagnostics,
-                address_mismatch: diagnostics.mismatch,
-            };
-            if (deviceReport) {
-                payload.device_report = deviceReport;
-            }
-            return payload;
-        };
+        const buildReportPayload = (groupName, diagnostics) => buildLocationReportPayload(groupName, {
+            group_name: groupName,
+            latitude,
+            longitude,
+            altitude,
+            accuracy,
+            heading,
+            speed,
+            address_diagnostics: diagnostics,
+            address_mismatch: diagnostics.mismatch,
+        });
 
         setStatus(automatic ? '正在自动上报' : '正在上报');
         const report = await api('report_location', {
             method: 'POST',
-            body: JSON.stringify(buildReportPayload(reportGroupName, addressDiagnostics)),
+            body: JSON.stringify(await buildReportPayload(reportGroupName, addressDiagnostics)),
         });
         locationId = Number(report.location_id) || null;
         for (const groupName of extraGroupNames) {
             await api('report_location', {
                 method: 'POST',
-                body: JSON.stringify(buildReportPayload(groupName, addressDiagnostics)),
+                body: JSON.stringify(await buildReportPayload(groupName, addressDiagnostics)),
             });
         }
         flushDiagnostics();
@@ -1449,6 +2037,25 @@ async function reportPosition(position, automatic = false) {
     } finally {
         el.reportButton.disabled = false;
     }
+}
+
+async function buildLocationReportPayload(groupName, payload) {
+    if (window.P2PLocationCrypto && typeof window.P2PLocationCrypto.encryptReport === 'function') {
+        const encrypted = await window.P2PLocationCrypto.encryptReport(groupName, payload);
+        if (encrypted) {
+            const wrapped = {
+                group_name: groupName,
+                encrypted_payload: encrypted.payload,
+                p2p_key_version: encrypted.key_version,
+            };
+            if (payload.location_id) {
+                wrapped.location_id = payload.location_id;
+            }
+            return wrapped;
+        }
+    }
+
+    return { ...payload, group_name: groupName };
 }
 
 function manualReport() {
@@ -1492,7 +2099,12 @@ async function refreshLocations() {
         applySelectedGroup(data.selected_group ? data.selected_group.group_name : state.selectedGroupName, false);
         syncRoleControls();
         syncAutoReportWatch();
-        state.lastLocations = data.locations || [];
+        const groupName = data.selected_group ? data.selected_group.group_name : state.selectedGroupName;
+        state.lastLocations = await decryptLocationRecords(groupName, data.locations || []);
+        data.locations = state.lastLocations;
+        data.mine = state.lastLocations.find((location) => Number(location.user_id) === Number(state.user.id)) || null;
+        data.monitors = state.lastLocations.filter((location) => location.role === 'monitor');
+        data.guardians = state.lastLocations.filter((location) => location.role !== 'monitor');
         renderLocationCards(data);
         renderMarkers(visibleLatestLocations());
         setStatus(shouldAutoReport() ? '持续上报中' : '位置已同步');
@@ -1522,8 +2134,9 @@ async function refreshHistory() {
                 user_id: state.historyUserId,
             }),
         });
-        state.history = data.history || [];
-        state.historyMap = data.map_history || [];
+        const groupName = data.selected_group ? data.selected_group.group_name : state.selectedGroupName;
+        state.history = await decryptLocationRecords(groupName, data.history || []);
+        state.historyMap = await decryptLocationRecords(groupName, data.map_history || []);
         state.historyMembers = data.members || [];
         state.historyPagination = data.pagination || null;
         state.selectedHistoryId = null;
@@ -1532,6 +2145,13 @@ async function refreshHistory() {
         renderHistoryMessage(error.message);
         clearHistoryLayers();
     }
+}
+
+async function decryptLocationRecords(groupName, records) {
+    if (!window.P2PLocationCrypto || typeof window.P2PLocationCrypto.decryptRecords !== 'function') {
+        return records;
+    }
+    return window.P2PLocationCrypto.decryptRecords(groupName, records);
 }
 
 function clearHistory() {
@@ -1651,13 +2271,13 @@ function filteredHistory() {
 }
 
 function historyMapRecords() {
-    const records = [...state.historyMap];
+    const records = state.historyMap.filter(isDisplayableLocation);
     if (!state.selectedHistoryId || records.some((location) => location.id === state.selectedHistoryId)) {
         return records;
     }
 
     const selected = state.history.find((location) => location.id === state.selectedHistoryId);
-    if (selected) {
+    if (selected && isDisplayableLocation(selected)) {
         records.push(selected);
     }
 
@@ -2700,6 +3320,9 @@ function locationDisplayCoordinates(location) {
 }
 
 function formatCoord(location) {
+    if (location && location.encrypted_unreadable) {
+        return '加密位置无法解密';
+    }
     const coordinates = locationDisplayCoordinates(location);
     const sourceLabel = coordinates.source ? ` / ${coordinates.source.name || '探测位置'}` : '';
     const accuracy = !coordinates.source && location.accuracy !== null ? ` / 精度 ${Math.round(location.accuracy)}m` : '';
@@ -2982,11 +3605,21 @@ function fitAmapToOverlays(overlays, maxZoom = 15, padding = [34, 34, 34, 34]) {
 }
 
 function visibleLatestLocations() {
+    const readable = state.lastLocations.filter(isDisplayableLocation);
     if (!state.historyUserId) {
-        return state.lastLocations;
+        return readable;
     }
 
-    return state.lastLocations.filter((location) => String(location.user_id) === String(state.historyUserId));
+    return readable.filter((location) => String(location.user_id) === String(state.historyUserId));
+}
+
+function isDisplayableLocation(location) {
+    const latitude = Number(location && location.latitude);
+    const longitude = Number(location && location.longitude);
+    return !location.encrypted_unreadable
+        && Number.isFinite(latitude)
+        && Number.isFinite(longitude)
+        && !(latitude === 0 && longitude === 0 && location.encryption_mode === 'p2p-v1');
 }
 
 function userColor(userId) {
@@ -3058,415 +3691,24 @@ function escapeHtml(value) {
         .replace(/'/g, '&#039;');
 }
 
-function openRegisterPopup() {
-    const overlay = document.createElement('div');
-    overlay.className = 'popup-select-overlay';
-    const card = document.createElement('div');
-    card.className = 'popup-select-card popup-dialog-card';
-    card.setAttribute('role', 'dialog');
-    card.setAttribute('aria-modal', 'true');
-
-    const heading = document.createElement('h2');
-    heading.textContent = '注册账号';
-    const body = document.createElement('form');
-    body.className = 'popup-dialog-body settings-dialog-body';
-
-    const inputs = {};
-
-    function addField(name, labelText, placeholder, type = 'text') {
-        const label = document.createElement('label');
-        label.className = 'settings-field';
-        const span = document.createElement('span');
-        span.textContent = labelText;
-        const input = document.createElement('input');
-        input.name = name;
-        input.type = type;
-        input.placeholder = placeholder;
-        inputs[name] = input;
-        label.append(span, input);
-        body.append(label);
-        return label;
-    }
-
-    addField('username', '用户名', '至少 6 位，包含英文和数字');
-    addField('password', '密码', '至少 6 位', 'password');
-    addField('password_confirm', '确认密码', '再次输入密码', 'password');
-    addField('display_name', '显示名称', '留空时使用用户名');
-    addField('invite_code', '邀请码', '输入邀请码后自动检测');
-    inputs.invite_code.autocomplete = 'one-time-code';
-
-    const inviteStatus = document.createElement('div');
-    inviteStatus.className = 'message subtle-message';
-    inviteStatus.setAttribute('role', 'status');
-    inviteStatus.setAttribute('aria-live', 'polite');
-    inviteStatus.hidden = true;
-    body.append(inviteStatus);
-
-    const groupNameLabel = addField('group_name', '家庭组名称', '填写要使用的家庭组名称');
-    groupNameLabel.hidden = true;
-    const groupCodeLabel = addField('group_code', '家庭组号', '填写 6 位家庭组号');
-    groupCodeLabel.hidden = true;
-    inputs.group_code.maxLength = 6;
-
-    function addRegisterDocumentButton(text, documentType, title) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'text-link';
-        button.textContent = text;
-        button.addEventListener('click', () => showLegalDocument(documentType, title));
-        return button;
-    }
-
-    function addRegisterAgreement(name, parts, checked = false) {
-        const label = document.createElement('label');
-        label.className = 'terms-field';
-        const input = document.createElement('input');
-        input.type = 'checkbox';
-        input.name = name;
-        input.value = '1';
-        input.checked = checked;
-        const text = document.createElement('span');
-        parts.forEach((part) => text.append(part));
-        label.append(input, text);
-        body.append(label);
-        return input;
-    }
-
-    const registerTermsAccepted = addRegisterAgreement('terms_accepted', [
-        document.createTextNode('我已阅读并同意 '),
-        addRegisterDocumentButton('用户协议', 'user_agreement', '用户协议'),
-        document.createTextNode(' 和 '),
-        addRegisterDocumentButton('隐私条约', 'privacy_policy', '隐私条约'),
-    ], !!(el.termsAccepted && el.termsAccepted.checked));
-    const registerCrossBorderAccepted = addRegisterAgreement('cross_border_transfer_accepted', [
-        document.createTextNode('我已阅读并同意 '),
-        addRegisterDocumentButton('用户数据跨境加密传输协议', 'cross_border_transfer', '用户数据跨境加密传输协议'),
-    ], !!(el.crossBorderAccepted && el.crossBorderAccepted.checked));
-
-    const requiresRegisterTurnstile = String(window.CF_TURNSTILE_SITE_KEY || '').trim() !== '';
-    let registerTurnstileToken = '';
-    let registerTurnstileWidgetId = null;
-    const registerTurnstileBox = document.createElement('div');
-    registerTurnstileBox.className = 'turnstile-box';
-    if (requiresRegisterTurnstile) {
-        body.append(registerTurnstileBox);
-    }
-
-    const message = document.createElement('div');
-    message.className = 'message';
-    message.setAttribute('role', 'alert');
-    message.hidden = true;
-    body.append(message);
-
-    let inviteCheck = null;
-    let inviteChecking = false;
-    let inviteCheckTimer = null;
-
-    function setInviteStatus(text, ok = false) {
-        inviteStatus.textContent = text;
-        inviteStatus.hidden = text === '';
-        inviteStatus.classList.toggle('success-message', ok);
-    }
-
-    function resetInviteCheck(text = '') {
-        inviteCheck = null;
-        groupNameLabel.hidden = true;
-        groupCodeLabel.hidden = true;
-        inputs.group_name.value = '';
-        inputs.group_code.value = '';
-        setInviteStatus(text, false);
-    }
-
-    async function checkInviteCodeNow() {
-        const code = inputs.invite_code.value.trim().toLowerCase();
-        inputs.invite_code.value = code;
-        if (code === '') {
-            resetInviteCheck('');
-            return null;
-        }
-
-        inviteChecking = true;
-        setInviteStatus('正在检测邀请码...', false);
-        try {
-            const payload = await api('invite_check', {
-                method: 'POST',
-                body: JSON.stringify({ code }),
-            });
-            inviteCheck = {
-                code,
-                requiresGroupName: !!payload.requires_group_name,
-                requiresGroupCode: !!payload.requires_group_code,
-            };
-            groupNameLabel.hidden = !inviteCheck.requiresGroupName;
-            groupCodeLabel.hidden = !inviteCheck.requiresGroupCode;
-            if (!inviteCheck.requiresGroupName) {
-                inputs.group_name.value = '';
-            }
-            if (!inviteCheck.requiresGroupCode) {
-                inputs.group_code.value = '';
-            }
-            setInviteStatus(
-                inviteCheck.requiresGroupName || inviteCheck.requiresGroupCode
-                    ? '邀请码可用，请补充下方信息。'
-                    : '邀请码可用，可以注册。',
-                true
-            );
-            return inviteCheck;
-        } catch (error) {
-            resetInviteCheck(error.message || '邀请码检测失败。');
-            return null;
-        } finally {
-            inviteChecking = false;
-        }
-    }
-
-    inputs.invite_code.addEventListener('input', () => {
-        const value = inputs.invite_code.value.trim().toLowerCase().replace(/[^0-9a-z]/g, '').slice(0, 255);
-        inputs.invite_code.value = value;
-        window.clearTimeout(inviteCheckTimer);
-        if (value !== '') {
-            inviteCheckTimer = window.setTimeout(checkInviteCodeNow, 420);
-        } else {
-            resetInviteCheck('');
-        }
-    });
-
-    const actions = document.createElement('div');
-    actions.className = 'popup-dialog-actions';
-    const submitButton = document.createElement('button');
-    submitButton.type = 'button';
-    submitButton.className = 'popup-primary-action';
-    submitButton.textContent = '注册';
-    submitButton.disabled = requiresRegisterTurnstile;
-    if (requiresRegisterTurnstile) {
-        submitButton.textContent = '等待验证';
-    }
-    const closeButton = document.createElement('button');
-    closeButton.type = 'button';
-    closeButton.className = 'subtle-button popup-secondary-action';
-    closeButton.textContent = '关闭';
-    const close = () => {
-        overlay.classList.remove('is-visible');
-        window.setTimeout(() => overlay.remove(), 200);
-    };
-    closeButton.addEventListener('click', close);
-    function updateRegisterSubmitState(submitting = false) {
-        const waitingTurnstile = requiresRegisterTurnstile && registerTurnstileToken === '';
-        submitButton.disabled = submitting || waitingTurnstile;
-        submitButton.textContent = waitingTurnstile ? '等待验证' : '注册';
-    }
-
-    body.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        message.hidden = true;
-        updateRegisterSubmitState(true);
-        try {
-            const username = inputs.username.value.trim();
-            const code = inputs.invite_code.value.trim().toLowerCase();
-            if (inputs.password.value !== inputs.password_confirm.value) {
-                throw new Error('两次输入的密码不一致。');
-            }
-            if (!registerTermsAccepted.checked || !registerCrossBorderAccepted.checked) {
-                throw new Error('请先同意全部协议。');
-            }
-            let currentInviteCheck = inviteCheck && inviteCheck.code === code ? inviteCheck : null;
-            if (!currentInviteCheck) {
-                currentInviteCheck = await checkInviteCodeNow();
-            }
-            if (!currentInviteCheck) {
-                throw new Error('请先填写有效的邀请码。');
-            }
-            if (currentInviteCheck.requiresGroupName && inputs.group_name.value.trim() === '') {
-                throw new Error('请填写家庭组名称。');
-            }
-            if (currentInviteCheck.requiresGroupCode && !/^[0-9a-z]{6}$/.test(inputs.group_code.value.trim().toLowerCase())) {
-                throw new Error('请填写 6 位家庭组号。');
-            }
-
-            const payload = await api('register', {
-                method: 'POST',
-                body: JSON.stringify({
-                    username,
-                    password: inputs.password.value,
-                    password_confirm: inputs.password_confirm.value,
-                    display_name: inputs.display_name.value.trim() || username,
-                    invite_code: code,
-                    group_name: inputs.group_name.value,
-                    group_code: inputs.group_code.value.trim().toLowerCase(),
-                    terms_accepted: registerTermsAccepted.checked,
-                    cross_border_transfer_accepted: registerCrossBorderAccepted.checked,
-                    turnstile_token: registerTurnstileToken || turnstileToken(),
-                }),
-            });
-            close();
-            showMain(payload.user);
-        } catch (error) {
-            message.textContent = error.message;
-            message.hidden = false;
-            if (registerTurnstileWidgetId !== null && window.turnstile) {
-                window.turnstile.reset(registerTurnstileWidgetId);
-                registerTurnstileToken = '';
-                updateRegisterSubmitState(false);
-            } else {
-                resetTurnstile();
-            }
-        } finally {
-            updateRegisterSubmitState(false);
-        }
-    });
-    submitButton.addEventListener('click', () => body.requestSubmit());
-    overlay.addEventListener('click', (event) => {
-        if (event.target === overlay) {
-            close();
-        }
-    });
-    actions.append(closeButton, submitButton);
-    card.append(heading, body, actions);
-    overlay.append(card);
-    document.body.append(overlay);
-    window.requestAnimationFrame(() => overlay.classList.add('is-visible'));
-
-    function renderRegisterTurnstile() {
-        if (!document.body.contains(overlay)) {
-            return;
-        }
-        if (!requiresRegisterTurnstile) {
-            return;
-        }
-        if (!window.turnstile || typeof window.turnstile.render !== 'function') {
-            window.setTimeout(renderRegisterTurnstile, 200);
-            return;
-        }
-        if (registerTurnstileWidgetId !== null) {
-            return;
-        }
-        registerTurnstileWidgetId = window.turnstile.render(registerTurnstileBox, {
-            sitekey: window.CF_TURNSTILE_SITE_KEY,
-            callback: (token) => {
-                registerTurnstileToken = token;
-                updateRegisterSubmitState(false);
-            },
-            'expired-callback': () => {
-                registerTurnstileToken = '';
-                updateRegisterSubmitState(false);
-            },
-            'error-callback': () => {
-                registerTurnstileToken = '';
-                updateRegisterSubmitState(false);
-            },
-        });
-    }
-    renderRegisterTurnstile();
-}
-
-if (el.termsButton) {
-    el.termsButton.addEventListener('click', () => showLegalDocument('user_agreement', '用户协议'));
-}
-if (el.privacyButton) {
-    el.privacyButton.addEventListener('click', () => showLegalDocument('privacy_policy', '隐私条约'));
-}
-if (el.crossBorderButton) {
-    el.crossBorderButton.addEventListener('click', () => showLegalDocument('cross_border_transfer', '用户数据跨境加密传输协议'));
-}
 if (el.settingsButton) {
     el.settingsButton.addEventListener('click', openSettingsPopup);
 }
 if (el.announcementButton) {
     el.announcementButton.addEventListener('click', showAnnouncementPopup);
 }
-if (el.registerButton) {
-    el.registerButton.disabled = false;
-    el.registerButton.setAttribute('aria-disabled', 'false');
-    el.registerButton.textContent = '注册账号';
-    el.registerButton.addEventListener('click', openRegisterPopup);
+if (el.ticketButton) {
+    el.ticketButton.addEventListener('click', openTicketsPopup);
 }
-
-window.onTurnstileSuccess = (token) => {
-    window.__turnstileToken = token;
-};
-
-window.onTurnstileExpired = () => {
-    window.__turnstileToken = '';
-};
-
-function turnstileToken() {
-    if (!String(window.CF_TURNSTILE_SITE_KEY || '').trim()) {
-        return '';
-    }
-
-    if (window.turnstile && el.turnstileBox) {
-        const response = window.turnstile.getResponse();
-        if (response) {
-            return response;
+if (el.logoutButton) {
+    el.logoutButton.addEventListener('click', async () => {
+        try {
+            await api('logout', { method: 'POST' });
+        } finally {
+            showLogin();
         }
-    }
-
-    return String(window.__turnstileToken || '');
+    });
 }
-
-function resetTurnstile() {
-    try {
-        if (window.turnstile && el.turnstileBox) {
-            window.turnstile.reset();
-        }
-    } catch (error) {
-        console.warn(error);
-    }
-    window.__turnstileToken = '';
-}
-
-el.loginForm.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    el.loginMessage.hidden = true;
-
-    if (el.termsAccepted && !el.termsAccepted.checked) {
-        await showCombinedLegalDocuments();
-        return;
-    }
-
-    if (el.crossBorderAccepted && !el.crossBorderAccepted.checked) {
-        await showLegalDocument('cross_border_transfer', '用户数据跨境加密传输协议', {
-            closeText: '我知道了',
-        });
-        return;
-    }
-
-    try {
-        const payload = await api('login', {
-            method: 'POST',
-            body: JSON.stringify({
-                username: el.username.value,
-                password: el.password.value,
-                terms_accepted: !!(el.termsAccepted && el.termsAccepted.checked),
-                cross_border_transfer_accepted: !!(el.crossBorderAccepted && el.crossBorderAccepted.checked),
-                turnstile_token: turnstileToken(),
-            }),
-        });
-
-        el.password.value = '';
-        if (!payload.user && !payload.redirect) {
-            return;
-        }
-        if (payload.redirect) {
-            window.location.href = payload.redirect;
-            return;
-        }
-
-        showMain(payload.user);
-    } catch (error) {
-        el.loginMessage.textContent = error.message;
-        el.loginMessage.hidden = false;
-        resetTurnstile();
-    }
-});
-
-el.logoutButton.addEventListener('click', async () => {
-    try {
-        await api('logout', { method: 'POST' });
-    } finally {
-        showLogin();
-    }
-});
 
 el.reportButton.addEventListener('click', manualReport);
 if (el.crossGroupSyncButton) {
@@ -3485,13 +3727,26 @@ window.addEventListener('online', () => {
     refreshHistory();
 });
 window.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        state.backgroundedAt = Date.now();
+        return;
+    }
+
     if (!document.hidden && state.user) {
+        const wasBackgroundedMs = state.backgroundedAt > 0 ? Date.now() - state.backgroundedAt : 0;
         refreshLocations();
         refreshHistory();
+        if (typeof window.AppWebVersion?.check === 'function') {
+            window.AppWebVersion.check();
+        }
+        if (wasBackgroundedMs >= 5000) {
+            sendHeartbeat();
+        }
     }
 });
 
 initThemeMode();
+installAntiDebugGuards();
 if (typeof startWebVersionWatcher === 'function') {
     startWebVersionWatcher();
 }

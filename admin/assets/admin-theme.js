@@ -195,6 +195,15 @@
             }
             body.append(node.cloneNode(true));
         });
+        body.querySelectorAll('.popup-select-button').forEach((button) => button.remove());
+        body.querySelectorAll('select.popup-select-native').forEach((nativeSelect) => {
+            nativeSelect.classList.remove('popup-select-native');
+            nativeSelect.style.removeProperty('height');
+            nativeSelect.style.removeProperty('opacity');
+            nativeSelect.style.removeProperty('pointer-events');
+            nativeSelect.style.removeProperty('position');
+            nativeSelect.style.removeProperty('width');
+        });
         body.querySelectorAll('form[data-confirm]').forEach(bindConfirmForm);
 
         const actions = document.createElement('div');
@@ -233,6 +242,9 @@
         dialog.append(title, body, actions);
         overlay.append(dialog);
         document.body.append(overlay);
+        if (typeof window.refreshPopupSelects === 'function') {
+            window.refreshPopupSelects(body);
+        }
         window.requestAnimationFrame(() => overlay.classList.add('is-visible'));
     }
 
@@ -245,7 +257,7 @@
         }
 
         const details = summary.parentElement;
-        if (!details || details.classList.contains('installed-apps-details')) {
+        if (!details) {
             return;
         }
 

@@ -264,15 +264,11 @@
                 const mine = (current.members || []).find((member) => Number(member.user_id) === Number(window.__CURRENT_USER_ID__));
                 consentInput.checked = !!(mine && mine.consented);
                 action.hidden = !current.is_owner || current.enabled;
-                action.disabled = current.enabled;
                 const ready = (current.members || []).filter((member) => member.consented && member.has_public_key).length;
                 const memberCount = (current.members || []).length;
                 const allReady = memberCount > 0 && ready === memberCount;
-                action.dataset.mode = current.is_owner && !current.enabled && !consentInput.checked ? 'consent' : 'enable';
-                action.textContent = action.dataset.mode === 'consent' ? '同意并生成密钥' : '开启端到端加密';
-                if (current.is_owner && !current.enabled && consentInput.checked && !allReady) {
-                    action.disabled = true;
-                }
+                action.disabled = !current.is_owner || current.enabled || !allReady;
+                action.textContent = '开启端到端加密';
                 statusLine.textContent = current.enabled
                     ? `已开启，密钥版本 ${current.key_version}`
                     : `准备状态：${ready}/${memberCount} 名成员已同意并生成密钥`;
@@ -307,18 +303,18 @@
 
         action.addEventListener('click', async () => {
             action.disabled = true;
+            let restoredByRefresh = false;
             try {
-                if (action.dataset.mode === 'consent') {
-                    await setConsent(groupName, true);
-                } else {
-                    await enableGroup(groupName);
-                }
+                await enableGroup(groupName);
                 await refresh();
+                restoredByRefresh = true;
                 if (typeof onChange === 'function') onChange();
             } catch (error) {
                 statusLine.textContent = error.message;
             } finally {
-                action.disabled = false;
+                if (!restoredByRefresh) {
+                    action.disabled = false;
+                }
             }
         });
 
@@ -367,7 +363,7 @@
             const confirmButton = document.createElement('button');
             confirmButton.type = 'button';
             confirmButton.className = 'popup-primary-action';
-            confirmButton.textContent = '我已了解，继续';
+            confirmButton.textContent = '同意并生成密钥';
 
             function close(value) {
                 overlay.classList.remove('is-visible');

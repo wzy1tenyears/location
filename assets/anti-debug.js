@@ -94,15 +94,8 @@
         const heightGap = Math.abs(window.outerHeight - window.innerHeight);
         if (widthGap > 160 || heightGap > 160) {
             lockPage();
-            return;
         }
-
-        const startedAt = performance.now();
-        debugger;
-        if (performance.now() - startedAt > 120) {
-            lockPage();
-        }
-    }, 1000);
+    }, 5000);
 
     window.installAntiDebugGuards = () => {};
 })();

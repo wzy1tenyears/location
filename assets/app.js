@@ -1056,15 +1056,6 @@ function openSettingsPopup() {
         leaveLabel.append(leaveTitle, leaveRow);
         body.append(leaveLabel);
 
-        if (window.P2PLocationCrypto && typeof window.P2PLocationCrypto.settingsElement === 'function') {
-            const p2pSection = document.createElement('section');
-            p2pSection.className = 'settings-field p2p-group-settings';
-            p2pSection.append(window.P2PLocationCrypto.settingsElement(selectedGroup.group_name, () => {
-                refreshLocations();
-                refreshHistory();
-            }));
-            body.append(p2pSection);
-        }
     }
 
     const ownedGroups = userGroups().filter((group) => Number(group.owner_user_id || 0) === Number(state.user && state.user.id));

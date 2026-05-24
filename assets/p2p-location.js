@@ -263,6 +263,7 @@
                 const current = await status(groupName, true);
                 const mine = (current.members || []).find((member) => Number(member.user_id) === Number(window.__CURRENT_USER_ID__));
                 consentInput.checked = !!(mine && mine.consented);
+                consentInput.disabled = consentInput.checked || !!current.enabled;
                 action.hidden = !current.is_owner || current.enabled;
                 const ready = (current.members || []).filter((member) => member.consented && member.has_public_key).length;
                 const memberCount = (current.members || []).length;
@@ -297,7 +298,7 @@
                 consentInput.checked = !nextChecked;
                 statusLine.textContent = error.message;
             } finally {
-                consentInput.disabled = false;
+                consentInput.disabled = consentInput.checked;
             }
         });
 

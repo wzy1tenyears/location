@@ -1712,6 +1712,7 @@ try {
                     $statusText = ((int) $location['address_mismatch'] === 1) ? '位置信息不一致' : '正常';
                     $locationMeta = !empty($location['location_meta']) ? json_decode((string) $location['location_meta'], true) : [];
                     $locationMeta = is_array($locationMeta) ? $locationMeta : [];
+                    $isP2pLocation = (string) ($location['encryption_mode'] ?? '') === 'p2p-v1';
                     ?>
                     <article class="history-record-card">
                         <div class="history-record-head">
@@ -1733,6 +1734,9 @@ try {
                             </form>
                         </div>
                         <div class="history-record-actions">
+                            <?php if ($isP2pLocation): ?>
+                            <div class="history-encrypted-note">p2p定位记录</div>
+                            <?php else: ?>
                             <details class="row-more history-more">
                                 <summary>更多信息</summary>
                                 <div class="history-detail-grid">
@@ -1806,6 +1810,7 @@ try {
                                     <?php endforeach; ?>
                                 </div>
                             </details>
+                            <?php endif; ?>
                         </div>
                     </article>
                 <?php endforeach; ?>

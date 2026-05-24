@@ -4,11 +4,12 @@
     const RELOAD_PARAM = '_web_v';
     const STORAGE_KEY = 'web_asset_version';
     let timer = null;
+    let startupTimer = null;
     let currentVersion = window.__WEB_ASSET_VERSION__ || window.localStorage.getItem(STORAGE_KEY) || '';
     let reloading = false;
 
     async function checkWebVersion() {
-        if (reloading) {
+        if (reloading || document.visibilityState === 'hidden') {
             return;
         }
 
@@ -50,15 +51,37 @@
 
     function startWebVersionWatcher() {
         stopWebVersionWatcher();
-        checkWebVersion();
-        timer = window.setInterval(checkWebVersion, CHECK_MS);
+        scheduleWebVersionCheck(8000);
+        timer = window.setInterval(() => scheduleWebVersionCheck(), CHECK_MS);
     }
 
     function stopWebVersionWatcher() {
+        if (startupTimer) {
+            window.clearTimeout(startupTimer);
+            startupTimer = null;
+        }
         if (timer) {
             window.clearInterval(timer);
             timer = null;
         }
+    }
+
+    function scheduleWebVersionCheck(delay = 0) {
+        const run = () => {
+            startupTimer = null;
+            if (typeof window.requestIdleCallback === 'function') {
+                window.requestIdleCallback(() => checkWebVersion(), { timeout: 5000 });
+                return;
+            }
+            window.setTimeout(checkWebVersion, 0);
+        };
+
+        if (delay > 0) {
+            startupTimer = window.setTimeout(run, delay);
+            return;
+        }
+
+        run();
     }
 
     window.AppWebVersion = {

@@ -65,7 +65,7 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 25;
+    private static final int APP_VERSION_CODE = 26;
     private static final String APP_VERSION_NAME = "1.2.0";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
@@ -102,13 +102,16 @@ public class MainActivity extends Activity {
     private boolean backgroundLocationPromptShown;
     private boolean batteryOptimizationPromptShown;
     private boolean locationPermissionRequestInFlight;
+    private final Runnable keepAliveSyncRunnable = () -> {
+        checkPermissionIntegrity();
+        syncKeepAliveService();
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         configureWindow();
-        checkPermissionIntegrity();
-        syncKeepAliveService();
+        scheduleKeepAliveServiceSync(1200);
 
         String serverUrl = getStoredServerUrl();
         if (serverUrl.isEmpty()) {
@@ -705,7 +708,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String loadedUrl) {
                 super.onPageFinished(view, loadedUrl);
-                CookieManager.getInstance().flush();
+                flushCookiesAsync();
                 if (loadedUrl != null && loadedUrl.contains("admin_logout=1")) {
                     view.clearHistory();
                 }
@@ -804,7 +807,17 @@ public class MainActivity extends Activity {
 
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setCookie(serverUrl, cookie.toString());
-        cookieManager.flush();
+        flushCookiesAsync();
+    }
+
+    private void flushCookiesAsync() {
+        new Thread(() -> {
+            try {
+                CookieManager.getInstance().flush();
+            } catch (Exception exception) {
+                Log.w(TAG, "Cookie flush failed: " + exception.getMessage());
+            }
+        }, "位置Cookie保存").start();
     }
 
     private String deviceCookieValue() {
@@ -859,7 +872,7 @@ public class MainActivity extends Activity {
                 .apply();
             runOnUiThread(() -> {
                 checkPermissionIntegrity(true);
-                syncKeepAliveService();
+                scheduleKeepAliveServiceSync(300);
             });
         }
 
@@ -1016,6 +1029,11 @@ public class MainActivity extends Activity {
         } catch (Exception exception) {
             Log.w(TAG, "Keep-alive service start failed: " + exception.getMessage());
         }
+    }
+
+    private void scheduleKeepAliveServiceSync(long delayMs) {
+        updateHandler.removeCallbacks(keepAliveSyncRunnable);
+        updateHandler.postDelayed(keepAliveSyncRunnable, Math.max(0, delayMs));
     }
 
     private boolean shouldNativeReport() {
@@ -1302,15 +1320,13 @@ public class MainActivity extends Activity {
         if (requestCode == REQUEST_LOCATION
             || requestCode == REQUEST_BACKGROUND_LOCATION
             || requestCode == REQUEST_NOTIFICATION) {
-            checkPermissionIntegrity();
-            syncKeepAliveService();
+            scheduleKeepAliveServiceSync(300);
             return;
         }
     }
 
     @Override
     protected void onPause() {
-        CookieManager.getInstance().flush();
         super.onPause();
     }
 
@@ -1318,13 +1334,13 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         tryInstallCompletedUpdate();
-        checkPermissionIntegrity();
-        syncKeepAliveService();
+        scheduleKeepAliveServiceSync(800);
     }
 
     @Override
     protected void onDestroy() {
         updateHandler.removeCallbacks(updateDownloadPoller);
+        updateHandler.removeCallbacks(keepAliveSyncRunnable);
         if (updateReceiver != null) {
             try {
                 unregisterReceiver(updateReceiver);

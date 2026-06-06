@@ -10,6 +10,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     json_response(['ok' => false, 'message' => 'Method not allowed.'], 405);
 }
 
+rate_limit_or_fail('register', 20, 3600);
+
 try {
     $data = request_data();
     $username = input_string('username', 64);
@@ -62,15 +64,17 @@ try {
         json_response(['ok' => false, 'message' => '用户名已存在。'], 409);
     }
 
-    $stmt = $pdo->prepare('SELECT * FROM invite_codes WHERE code = ? AND is_active = 1 LIMIT 1');
+    $pdo->beginTransaction();
+
+    $stmt = $pdo->prepare('SELECT * FROM invite_codes WHERE code = ? AND is_active = 1 LIMIT 1 FOR UPDATE');
     $stmt->execute([$inviteCode]);
     $invite = $stmt->fetch();
     if (!$invite || (int) $invite['used_count'] >= (int) $invite['max_uses']) {
+        $pdo->rollBack();
         json_response(['ok' => false, 'message' => '邀请码无效或次数已用完。'], 403);
     }
 
     $role = 'guardian';
-    $pdo->beginTransaction();
 
     if ((string) $invite['invite_type'] === 'group_create') {
         $assignedGroupName = trim((string) ($invite['assigned_group_name'] ?? ''));
@@ -86,14 +90,11 @@ try {
         if (!preg_match('/^[0-9a-z]{6}$/', $groupCode)) {
             json_response(['ok' => false, 'message' => '请填写 6 位家庭组号。'], 422);
         }
-        $stmt = $pdo->prepare('SELECT group_name, p2p_enabled_at FROM family_groups WHERE group_code = ? LIMIT 1');
+        $stmt = $pdo->prepare('SELECT group_name FROM family_groups WHERE group_code = ? LIMIT 1');
         $stmt->execute([$groupCode]);
         $group = $stmt->fetch();
         if (!$group) {
             json_response(['ok' => false, 'message' => '家庭组号不存在。'], 404);
-        }
-        if (!empty($group['p2p_enabled_at'])) {
-            json_response(['ok' => false, 'message' => '该家庭组已开启端到端加密，暂不允许新成员直接加入。'], 409);
         }
         $assignedGroupName = (string) $group['group_name'];
     }
@@ -130,8 +131,12 @@ try {
     $stmt = $pdo->prepare('INSERT INTO user_groups (user_id, group_name, role) VALUES (?, ?, ?)');
     $stmt->execute([$userId, $assignedGroupName, $role]);
 
-    $stmt = $pdo->prepare('UPDATE invite_codes SET used_count = used_count + 1 WHERE id = ?');
+    $stmt = $pdo->prepare('UPDATE invite_codes SET used_count = used_count + 1 WHERE id = ? AND is_active = 1 AND used_count < max_uses');
     $stmt->execute([(int) $invite['id']]);
+    if ($stmt->rowCount() !== 1) {
+        $pdo->rollBack();
+        json_response(['ok' => false, 'message' => '邀请码无效或次数已用完。'], 403);
+    }
 
     $pdo->commit();
 

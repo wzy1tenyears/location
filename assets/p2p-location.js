@@ -125,12 +125,7 @@
         }
 
         const rawGroupKey = crypto.getRandomValues(new Uint8Array(32));
-        const wrappedKeys = {};
-        for (const member of members) {
-            const publicKey = await importPublicKey(member.public_key_jwk);
-            const wrapped = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, publicKey, rawGroupKey);
-            wrappedKeys[String(member.user_id)] = bytesToBase64(new Uint8Array(wrapped));
-        }
+        const wrappedKeys = await wrappedKeysForMembers(members, rawGroupKey);
 
         const keyVersion = Math.floor(Date.now() / 1000);
         const payload = await api('p2p_crypto', {
@@ -141,6 +136,49 @@
         });
         statusCache.set(groupName, payload);
         groupKeyCache.delete(groupName);
+        return payload;
+    }
+
+    async function wrappedKeysForMembers(members, rawGroupKey) {
+        const wrappedKeys = {};
+        for (const member of members) {
+            const publicKey = await importPublicKey(member.public_key_jwk);
+            const wrapped = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, publicKey, rawGroupKey);
+            wrappedKeys[String(member.user_id)] = bytesToBase64(new Uint8Array(wrapped));
+        }
+        return wrappedKeys;
+    }
+
+    async function distributeGroupKey(groupName) {
+        const current = await status(groupName, true);
+        if (!current || !current.is_owner) {
+            throw new Error('只有家庭组管理员可以补发密钥。');
+        }
+        if (!current.enabled) {
+            throw new Error('当前家庭组尚未开启端到端加密。');
+        }
+
+        const targets = (current.members || []).filter((member) => (
+            member.needs_key_distribution
+            && member.consented
+            && member.public_key_jwk
+        ));
+        if (!targets.length) {
+            return current;
+        }
+
+        const keyData = await groupKey(groupName);
+        if (!keyData || !keyData.raw) {
+            throw new Error('当前设备没有可用于补发的组密钥。');
+        }
+
+        const payload = await api('p2p_crypto', {
+            action: 'distribute_group_key',
+            group_name: groupName,
+            key_version: current.key_version,
+            wrapped_keys: await wrappedKeysForMembers(targets, keyData.raw),
+        });
+        statusCache.set(groupName, payload);
         return payload;
     }
 
@@ -164,8 +202,9 @@
             privateKey,
             base64ToBytes(current.wrapped_group_key)
         );
-        const aesKey = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
-        const result = { key: aesKey, version: current.key_version };
+        const rawBytes = new Uint8Array(raw);
+        const aesKey = await crypto.subtle.importKey('raw', rawBytes, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+        const result = { key: aesKey, raw: rawBytes, version: current.key_version };
         groupKeyCache.set(groupName, result);
         return result;
     }
@@ -258,21 +297,29 @@
         action.className = 'subtle-button';
         action.textContent = '开启端到端加密';
 
+        let latestStatus = null;
+
         async function refresh() {
             try {
                 const current = await status(groupName, true);
+                latestStatus = current;
                 const mine = (current.members || []).find((member) => Number(member.user_id) === Number(window.__CURRENT_USER_ID__));
                 consentInput.checked = !!(mine && mine.consented);
-                consentInput.disabled = consentInput.checked || !!current.enabled;
-                action.hidden = !current.is_owner || current.enabled;
+                consentInput.disabled = consentInput.checked;
+                action.hidden = !current.is_owner || (current.enabled && !current.needs_key_distribution);
                 const ready = (current.members || []).filter((member) => member.consented && member.has_public_key).length;
                 const memberCount = (current.members || []).length;
                 const allReady = memberCount > 0 && ready === memberCount;
-                action.disabled = !current.is_owner || current.enabled || !allReady;
-                action.textContent = '开启端到端加密';
-                statusLine.textContent = current.enabled
-                    ? `已开启，密钥版本 ${current.key_version}`
-                    : `准备状态：${ready}/${memberCount} 名成员已同意并生成密钥`;
+                const pendingKeys = (current.members || []).filter((member) => member.needs_key_distribution).length;
+                action.disabled = !current.is_owner || (current.enabled ? pendingKeys === 0 : !allReady);
+                action.textContent = current.enabled ? '补发端到端密钥' : '开启端到端加密';
+                if (current.enabled) {
+                    statusLine.textContent = pendingKeys > 0
+                        ? `已开启，${pendingKeys} 名成员等待补发密钥`
+                        : `已开启，密钥版本 ${current.key_version}`;
+                } else {
+                    statusLine.textContent = `准备状态：${ready}/${memberCount} 名成员已同意并生成密钥`;
+                }
             } catch (error) {
                 statusLine.textContent = error.message;
             }
@@ -306,7 +353,11 @@
             action.disabled = true;
             let restoredByRefresh = false;
             try {
-                await enableGroup(groupName);
+                if (latestStatus && latestStatus.enabled) {
+                    await distributeGroupKey(groupName);
+                } else {
+                    await enableGroup(groupName);
+                }
                 await refresh();
                 restoredByRefresh = true;
                 if (typeof onChange === 'function') onChange();

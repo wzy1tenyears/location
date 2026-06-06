@@ -14,10 +14,20 @@ CREATE TABLE IF NOT EXISTS users (
     user_agreement_accepted_at DATETIME NULL,
     privacy_policy_accepted_at DATETIME NULL,
     cross_border_transfer_accepted_at DATETIME NULL,
+    environment_data_consent_at DATETIME NULL,
     debug_mode TINYINT(1) NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_users_group_role (group_name, role)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS environment_reports (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNSIGNED NOT NULL,
+    report_json LONGTEXT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_environment_reports_user_created (user_id, created_at),
+    CONSTRAINT fk_environment_reports_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS user_devices (
@@ -202,4 +212,40 @@ CREATE TABLE IF NOT EXISTS user_logs (
     INDEX idx_user_logs_group_created (group_name, created_at),
     INDEX idx_user_logs_type_created (event_type, created_at),
     CONSTRAINT fk_user_logs_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    setting_key VARCHAR(80) NOT NULL PRIMARY KEY,
+    setting_value TEXT NOT NULL,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS admin_login_failures (
+    ip VARCHAR(45) NOT NULL PRIMARY KEY,
+    failed_count INT UNSIGNED NOT NULL DEFAULT 0,
+    locked_at DATETIME NULL,
+    last_failed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS group_join_failures (
+    user_id INT UNSIGNED NOT NULL,
+    ip VARCHAR(45) NOT NULL,
+    failed_count INT UNSIGNED NOT NULL DEFAULT 0,
+    locked_at DATETIME NULL,
+    last_failed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, ip),
+    INDEX idx_group_join_failures_ip (ip, last_failed_at),
+    CONSTRAINT fk_group_join_failures_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS api_rate_limits (
+    bucket VARCHAR(80) NOT NULL,
+    identity_hash CHAR(64) NOT NULL,
+    window_started_at DATETIME NOT NULL,
+    hit_count INT UNSIGNED NOT NULL DEFAULT 0,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (bucket, identity_hash),
+    INDEX idx_api_rate_limits_updated (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

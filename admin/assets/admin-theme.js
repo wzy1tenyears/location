@@ -257,12 +257,33 @@
         }
 
         const details = summary.parentElement;
-        if (!details) {
+        if (!details || details.classList.contains('installed-apps-details')) {
             return;
         }
 
         event.preventDefault();
         details.open = false;
         openDetailsModal(details);
+    });
+
+    document.addEventListener('change', (event) => {
+        const toggle = event.target.closest('.installed-app-system-toggle');
+        if (!toggle) {
+            return;
+        }
+
+        const details = toggle.closest('.installed-apps-details');
+        if (!details) {
+            return;
+        }
+
+        details.querySelectorAll('.installed-app-item.is-system-app').forEach((item) => {
+            item.hidden = !toggle.checked;
+        });
+
+        const countTarget = details.querySelector('[data-installed-visible-count]');
+        if (countTarget) {
+            countTarget.textContent = String(details.querySelectorAll('.installed-app-item:not([hidden])').length);
+        }
     });
 })();

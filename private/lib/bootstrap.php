@@ -292,6 +292,7 @@ function ensure_schema(PDO $pdo): void
             user_agreement_accepted_at DATETIME NULL,
             privacy_policy_accepted_at DATETIME NULL,
             cross_border_transfer_accepted_at DATETIME NULL,
+            environment_data_consent_at DATETIME NULL,
             debug_mode TINYINT(1) NOT NULL DEFAULT 0,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -388,6 +389,7 @@ function ensure_schema(PDO $pdo): void
     add_column_if_missing($pdo, 'users', 'user_agreement_accepted_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'privacy_policy_accepted_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'cross_border_transfer_accepted_at', 'DATETIME NULL');
+    add_column_if_missing($pdo, 'users', 'environment_data_consent_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'debug_mode', 'TINYINT(1) NOT NULL DEFAULT 0');
     add_column_if_missing($pdo, 'users', 'report_interval_seconds', 'INT UNSIGNED NOT NULL DEFAULT ' . DEFAULT_REPORT_INTERVAL_SECONDS);
     add_column_if_missing($pdo, 'family_groups', 'display_name', "VARCHAR(100) NOT NULL DEFAULT ''");
@@ -465,6 +467,16 @@ function ensure_schema(PDO $pdo): void
         ");
     }
 
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS environment_reports (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            user_id INT UNSIGNED NOT NULL,
+            report_json LONGTEXT NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_environment_reports_user_created (user_id, created_at),
+            CONSTRAINT fk_environment_reports_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
 
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS p2p_user_keys (
@@ -596,6 +608,49 @@ function ensure_schema(PDO $pdo): void
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
 
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS app_settings (
+            setting_key VARCHAR(80) NOT NULL PRIMARY KEY,
+            setting_value TEXT NOT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS admin_login_failures (
+            ip VARCHAR(45) NOT NULL PRIMARY KEY,
+            failed_count INT UNSIGNED NOT NULL DEFAULT 0,
+            locked_at DATETIME NULL,
+            last_failed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS group_join_failures (
+            user_id INT UNSIGNED NOT NULL,
+            ip VARCHAR(45) NOT NULL,
+            failed_count INT UNSIGNED NOT NULL DEFAULT 0,
+            locked_at DATETIME NULL,
+            last_failed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, ip),
+            INDEX idx_group_join_failures_ip (ip, last_failed_at),
+            CONSTRAINT fk_group_join_failures_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS api_rate_limits (
+            bucket VARCHAR(80) NOT NULL,
+            identity_hash CHAR(64) NOT NULL,
+            window_started_at DATETIME NOT NULL,
+            hit_count INT UNSIGNED NOT NULL DEFAULT 0,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (bucket, identity_hash),
+            INDEX idx_api_rate_limits_updated (updated_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
 
     $done = true;
 }
@@ -774,6 +829,142 @@ function assert_safe_identifier(string $identifier): void
         throw new RuntimeException('Unsafe SQL identifier.');
     }
 }
+
+function app_setting_keys(): array
+{
+    return [
+        'ban_root_users',
+        'ban_adb_users',
+        'ban_fake_location_users',
+        'ban_accessibility_users',
+        'ban_packet_capture_users',
+    ];
+}
+
+function app_setting(string $key, string $default = ''): string
+{
+    if (!in_array($key, app_setting_keys(), true)) {
+        return $default;
+    }
+
+    $stmt = db()->prepare('SELECT setting_value FROM app_settings WHERE setting_key = ? LIMIT 1');
+    $stmt->execute([$key]);
+    $value = $stmt->fetchColumn();
+    return is_string($value) ? $value : $default;
+}
+
+function app_setting_bool(string $key, bool $default = false): bool
+{
+    $value = app_setting($key, $default ? '1' : '0');
+    return in_array(strtolower(trim($value)), ['1', 'true', 'yes', 'on'], true);
+}
+
+function set_app_setting(string $key, string $value): void
+{
+    if (!in_array($key, app_setting_keys(), true)) {
+        throw new RuntimeException('设置项不存在。');
+    }
+
+    $stmt = db()->prepare('
+        INSERT INTO app_settings (setting_key, setting_value)
+        VALUES (?, ?)
+        ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)
+    ');
+    $stmt->execute([$key, $value]);
+}
+
+function security_policy_settings(): array
+{
+    $settings = [];
+    foreach (app_setting_keys() as $key) {
+        $settings[$key] = app_setting_bool($key);
+    }
+
+    return $settings;
+}
+
+function security_policy_enabled(): bool
+{
+    foreach (app_setting_keys() as $key) {
+        if (app_setting_bool($key)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function device_report_policy_violations(array $report): array
+{
+    $violations = [];
+
+    if (app_setting_bool('ban_root_users') && !empty($report['root_detected'])) {
+        $violations[] = 'Root';
+    }
+    if (app_setting_bool('ban_adb_users') && !empty($report['adb_enabled'])) {
+        $violations[] = 'ADB';
+    }
+    if (
+        app_setting_bool('ban_fake_location_users')
+        && (!empty($report['mock_location_risk']) || !empty($report['fake_location_detected']))
+    ) {
+        $violations[] = '模拟定位';
+    }
+    if (
+        app_setting_bool('ban_accessibility_users')
+        && (!empty($report['accessibility_risk']) || !empty($report['accessibility_services']))
+    ) {
+        $violations[] = '无障碍风险服务';
+    }
+    if (app_setting_bool('ban_packet_capture_users') && device_report_has_packet_capture_risk($report)) {
+        $violations[] = '抓包工具';
+    }
+
+    return $violations;
+}
+
+function device_report_has_packet_capture_risk(array $report): bool
+{
+    if (!empty($report['reqable_detected'])) {
+        return true;
+    }
+
+    $packages = $report['suspicious_packages'] ?? [];
+    if (!is_array($packages)) {
+        return false;
+    }
+
+    foreach ($packages as $package) {
+        $name = strtolower((string) $package);
+        if (str_contains($name, 'reqable') || str_contains($name, 'httpcanary') || str_contains($name, 'charles')) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function enforce_device_report_policy(array $user, ?array $report): void
+{
+    if (!security_policy_enabled() || !empty($user['debug_mode'])) {
+        return;
+    }
+
+    if (!$report) {
+        json_response(['ok' => false, 'message' => '缺少设备环境数据，已拒绝请求。'], 403);
+    }
+
+    $violations = device_report_policy_violations($report);
+    if (!$violations) {
+        return;
+    }
+
+    json_response([
+        'ok' => false,
+        'message' => '当前设备环境不符合后台安全策略：' . implode('、', $violations) . '。',
+    ], 403);
+}
+
 function e(string $value): string
 {
     return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
@@ -921,6 +1112,11 @@ function user_privacy_policy_accepted(array $user): bool
 function user_cross_border_transfer_accepted(array $user): bool
 {
     return !empty($user['cross_border_transfer_accepted_at']);
+}
+
+function user_environment_data_consent(array $user): bool
+{
+    return !empty($user['environment_data_consent_at']);
 }
 
 function require_app_user_agent(): void
@@ -1211,6 +1407,7 @@ function public_user_payload(array $user): array
         'role_label' => $membership ? role_label((string) $membership['role']) : '',
         'terms_accepted' => user_terms_accepted($user),
         'cross_border_transfer_accepted' => user_cross_border_transfer_accepted($user),
+        'environment_data_consent' => user_environment_data_consent($user),
         'groups' => $payloadGroups,
         'report_interval_seconds' => user_report_interval_seconds($user),
     ];
@@ -1394,6 +1591,135 @@ function clear_failed_login(PDO $pdo, int $userId): void
 {
     $stmt = $pdo->prepare('UPDATE users SET failed_login_count = 0, login_locked_at = NULL WHERE id = ?');
     $stmt->execute([$userId]);
+}
+
+function admin_login_failure_limit(): int
+{
+    return defined('ADMIN_MAX_LOGIN_FAILURES') ? max(1, (int) ADMIN_MAX_LOGIN_FAILURES) : 5;
+}
+
+function admin_login_locked(PDO $pdo, string $ip): bool
+{
+    $stmt = $pdo->prepare('SELECT locked_at FROM admin_login_failures WHERE ip = ? LIMIT 1');
+    $stmt->execute([$ip]);
+    $row = $stmt->fetch();
+
+    return $row && !empty($row['locked_at']) && strtotime((string) $row['locked_at']) > time() - LOGIN_LOCK_SECONDS;
+}
+
+function record_failed_admin_login(PDO $pdo, string $ip): bool
+{
+    $stmt = $pdo->prepare('SELECT * FROM admin_login_failures WHERE ip = ? LIMIT 1');
+    $stmt->execute([$ip]);
+    $row = $stmt->fetch();
+
+    $failedCount = 1;
+    if ($row && strtotime((string) $row['last_failed_at']) > time() - LOGIN_LOCK_SECONDS) {
+        $failedCount = (int) $row['failed_count'] + 1;
+    }
+    $lockedAt = $failedCount >= admin_login_failure_limit() ? date('Y-m-d H:i:s') : null;
+
+    $stmt = $pdo->prepare('
+        INSERT INTO admin_login_failures (ip, failed_count, locked_at, last_failed_at)
+        VALUES (?, ?, ?, NOW())
+        ON DUPLICATE KEY UPDATE
+            failed_count = VALUES(failed_count),
+            locked_at = VALUES(locked_at),
+            last_failed_at = NOW()
+    ');
+    $stmt->execute([$ip, $failedCount, $lockedAt]);
+
+    return $lockedAt !== null;
+}
+
+function clear_failed_admin_login(PDO $pdo, string $ip): void
+{
+    $stmt = $pdo->prepare('DELETE FROM admin_login_failures WHERE ip = ?');
+    $stmt->execute([$ip]);
+}
+
+function group_join_failure_limit(): int
+{
+    return defined('GROUP_JOIN_MAX_FAILURES') ? max(1, (int) GROUP_JOIN_MAX_FAILURES) : 10;
+}
+
+function group_join_locked(PDO $pdo, int $userId, string $ip): bool
+{
+    $stmt = $pdo->prepare('SELECT locked_at FROM group_join_failures WHERE user_id = ? AND ip = ? LIMIT 1');
+    $stmt->execute([$userId, $ip]);
+    $row = $stmt->fetch();
+
+    return $row && !empty($row['locked_at']) && strtotime((string) $row['locked_at']) > time() - LOGIN_LOCK_SECONDS;
+}
+
+function record_failed_group_join(PDO $pdo, int $userId, string $ip): bool
+{
+    $stmt = $pdo->prepare('SELECT * FROM group_join_failures WHERE user_id = ? AND ip = ? LIMIT 1');
+    $stmt->execute([$userId, $ip]);
+    $row = $stmt->fetch();
+
+    $failedCount = 1;
+    if ($row && strtotime((string) $row['last_failed_at']) > time() - LOGIN_LOCK_SECONDS) {
+        $failedCount = (int) $row['failed_count'] + 1;
+    }
+    $lockedAt = $failedCount >= group_join_failure_limit() ? date('Y-m-d H:i:s') : null;
+
+    $stmt = $pdo->prepare('
+        INSERT INTO group_join_failures (user_id, ip, failed_count, locked_at, last_failed_at)
+        VALUES (?, ?, ?, ?, NOW())
+        ON DUPLICATE KEY UPDATE
+            failed_count = VALUES(failed_count),
+            locked_at = VALUES(locked_at),
+            last_failed_at = NOW()
+    ');
+    $stmt->execute([$userId, $ip, $failedCount, $lockedAt]);
+
+    return $lockedAt !== null;
+}
+
+function clear_failed_group_join(PDO $pdo, int $userId, string $ip): void
+{
+    $stmt = $pdo->prepare('DELETE FROM group_join_failures WHERE user_id = ? AND ip = ?');
+    $stmt->execute([$userId, $ip]);
+}
+
+function rate_limit_or_fail(string $bucket, int $maxHits, int $windowSeconds, string $identity = ''): void
+{
+    $bucket = substr(preg_replace('/[^a-zA-Z0-9:_-]/', '', $bucket), 0, 80);
+    if ($bucket === '') {
+        $bucket = 'default';
+    }
+
+    $maxHits = max(1, $maxHits);
+    $windowSeconds = max(1, $windowSeconds);
+    $identitySource = $identity !== '' ? $identity : client_ip_address();
+    $identityHash = hash('sha256', $bucket . '|' . $identitySource);
+    $pdo = db();
+
+    $stmt = $pdo->prepare('SELECT window_started_at, hit_count FROM api_rate_limits WHERE bucket = ? AND identity_hash = ? LIMIT 1');
+    $stmt->execute([$bucket, $identityHash]);
+    $row = $stmt->fetch();
+
+    if (!$row || strtotime((string) $row['window_started_at']) <= time() - $windowSeconds) {
+        $stmt = $pdo->prepare('
+            INSERT INTO api_rate_limits (bucket, identity_hash, window_started_at, hit_count)
+            VALUES (?, ?, NOW(), 1)
+            ON DUPLICATE KEY UPDATE
+                window_started_at = VALUES(window_started_at),
+                hit_count = 1,
+                updated_at = NOW()
+        ');
+        $stmt->execute([$bucket, $identityHash]);
+        return;
+    }
+
+    $nextHitCount = (int) $row['hit_count'] + 1;
+    $stmt = $pdo->prepare('UPDATE api_rate_limits SET hit_count = ?, updated_at = NOW() WHERE bucket = ? AND identity_hash = ?');
+    $stmt->execute([$nextHitCount, $bucket, $identityHash]);
+
+    if ($nextHitCount > $maxHits) {
+        json_response(['ok' => false, 'message' => '请求过于频繁，请稍后再试。'], 429);
+    }
 }
 
 function client_ip_address(): string

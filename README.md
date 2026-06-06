@@ -156,11 +156,6 @@ https://example.com/admin/
 - 登录失败多次会临时锁定账号。
 - 未同意用户协议和隐私条约的账号请求会被拒绝。
 - 位置上报会做基础字段校验和地址一致性记录。
-- 详细安全说明见：
-
-```text
-private/deploy/SECURITY_NOTES.md
-```
 
 ## 免责声明
 

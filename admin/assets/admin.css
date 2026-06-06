@@ -758,7 +758,7 @@ th {
     overflow-wrap: anywhere;
 }
 
-.legal-consent-box {
+.environment-box {
     background: var(--field);
     border: 1px solid var(--line-soft);
     border-radius: 8px;
@@ -767,12 +767,29 @@ th {
     padding: 8px;
 }
 
-.legal-consent-status {
+.environment-status {
     align-items: center;
     display: flex;
     flex-wrap: wrap;
     gap: 5px;
     line-height: 1.35;
+}
+
+.installed-app-list {
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    display: grid;
+    gap: 6px;
+    margin-top: 8px;
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 8px;
+}
+
+.installed-app-toolbar {
+    display: grid;
+    gap: 6px;
+    margin-top: 8px;
 }
 
 .compact-check {
@@ -880,6 +897,27 @@ th {
 .ticket-admin-reply {
     display: grid;
     gap: 8px;
+}
+
+.installed-app-item {
+    border-top: 1px solid var(--line-soft);
+    display: grid;
+    gap: 3px;
+    padding-top: 7px;
+}
+
+.installed-app-item[hidden] {
+    display: none;
+}
+
+.installed-app-item:first-child {
+    border-top: 0;
+    padding-top: 0;
+}
+
+.installed-app-item span {
+    color: var(--muted-soft);
+    font-size: 12px;
 }
 
 .compact-danger {

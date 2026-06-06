@@ -10,6 +10,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     json_response(['ok' => false, 'message' => 'Method not allowed.'], 405);
 }
 
+rate_limit_or_fail('login', 30, 300);
+
 try {
     $username = input_string('username', 64);
     $password = input_string('password', 255);
@@ -25,10 +27,20 @@ try {
     verify_turnstile_token($turnstileToken);
 
     if (hash_equals(ADMIN_USERNAME, $username)) {
-        if (!hash_equals(ADMIN_PASSWORD, $password)) {
+        $pdo = db();
+        $adminIp = client_ip_address();
+        if (admin_login_locked($pdo, $adminIp)) {
+            json_response(['ok' => false, 'message' => '管理员登录尝试过多，请 30 分钟后再试。'], 423);
+        }
+
+        if (!admin_password_matches($password)) {
+            if (record_failed_admin_login($pdo, $adminIp)) {
+                json_response(['ok' => false, 'message' => '管理员登录尝试过多，请 30 分钟后再试。'], 423);
+            }
             json_response(['ok' => false, 'message' => '账号或密码错误。'], 401);
         }
 
+        clear_failed_admin_login($pdo, $adminIp);
         session_regenerate_id(true);
         unset($_SESSION['user_id']);
         $_SESSION['admin_logged_in'] = true;
@@ -138,4 +150,13 @@ function verify_turnstile_token(string $token): void
     if (!is_array($decoded) || empty($decoded['success'])) {
         json_response(['ok' => false, 'message' => '人机验证失败，请重试。'], 403);
     }
+}
+
+function admin_password_matches(string $password): bool
+{
+    if (defined('ADMIN_PASSWORD_HASH') && trim((string) ADMIN_PASSWORD_HASH) !== '') {
+        return password_verify($password, (string) ADMIN_PASSWORD_HASH);
+    }
+
+    return hash_equals((string) ADMIN_PASSWORD, $password);
 }

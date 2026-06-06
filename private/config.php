@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 const APP_NAME = '位置';
-const ANDROID_VERSION_CODE = 25;
+const ANDROID_VERSION_CODE = 26;
 const ANDROID_VERSION_NAME = '1.2.0';
 const ANDROID_APK_FILENAME = 'location-release.apk';
 const ANDROID_FORCE_UPDATE = true;
@@ -36,6 +36,7 @@ const CF_TURNSTILE_SECRET_KEY = '';
 
 const ADMIN_USERNAME = 'admin';
 const ADMIN_PASSWORD = 'password';
+const ADMIN_PASSWORD_HASH = '';
 const ADMIN_PATH = 'admin';
 const ADMIN_SOURCE_DIR = 'admin';
 

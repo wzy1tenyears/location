@@ -96,6 +96,61 @@ try {
         json_response(p2p_status_payload($pdo, $user, $groupName));
     }
 
+    if ($action === 'distribute_group_key') {
+        $group = p2p_require_group_initiator($user, $groupName);
+        if (empty($group['p2p_enabled_at'])) {
+            json_response(['ok' => false, 'message' => '当前家庭组尚未开启端到端加密。'], 409);
+        }
+
+        $keyVersion = (int) ($group['p2p_key_version'] ?? 0);
+        if ($keyVersion <= 0 || (int) ($data['key_version'] ?? 0) !== $keyVersion) {
+            json_response(['ok' => false, 'message' => '密钥版本不一致，请刷新后重试。'], 409);
+        }
+
+        $wrappedKeys = is_array($data['wrapped_keys'] ?? null) ? $data['wrapped_keys'] : [];
+        $members = p2p_group_member_rows($pdo, $groupName);
+        $targets = [];
+        foreach ($members as $member) {
+            $memberId = (int) $member['user_id'];
+            $hasCurrentWrappedKey = !empty($member['wrapped_group_key'])
+                && (int) ($member['key_version'] ?? 0) === $keyVersion;
+            if ($hasCurrentWrappedKey) {
+                continue;
+            }
+            if (empty($member['public_key_jwk']) || empty($member['consent_at'])) {
+                continue;
+            }
+            if (!p2p_valid_wrapped_key($wrappedKeys[(string) $memberId] ?? null)) {
+                json_response(['ok' => false, 'message' => '补发密钥数据不完整。'], 422);
+            }
+            $targets[] = $memberId;
+        }
+
+        if (!$targets) {
+            json_response(p2p_status_payload($pdo, $user, $groupName));
+        }
+
+        $pdo->beginTransaction();
+        $stmt = $pdo->prepare('
+            INSERT INTO p2p_group_members (group_name, user_id, wrapped_group_key, key_version)
+            VALUES (?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                wrapped_group_key = VALUES(wrapped_group_key),
+                key_version = VALUES(key_version),
+                updated_at = NOW()
+        ');
+        foreach ($targets as $memberId) {
+            $stmt->execute([$groupName, $memberId, (string) $wrappedKeys[(string) $memberId], $keyVersion]);
+        }
+        $pdo->commit();
+
+        record_user_log((int) $user['id'], $groupName, 'p2p_key_distribute', '补发端到端加密组密钥', [
+            'key_version' => $keyVersion,
+            'target_user_ids' => $targets,
+        ]);
+        json_response(p2p_status_payload($pdo, $user, $groupName));
+    }
+
     json_response(p2p_status_payload($pdo, $user, $groupName));
 } catch (Throwable $th) {
     if (isset($pdo) && $pdo instanceof PDO && $pdo->inTransaction()) {
@@ -167,41 +222,59 @@ function p2p_status_payload(PDO $pdo, array $user, string $groupName): array
     $stmt->execute([$groupName]);
     $group = $stmt->fetch() ?: [];
     $members = p2p_group_member_rows($pdo, $groupName);
-
+    $enabled = !empty($group['p2p_enabled_at']);
+    $keyVersion = (int) ($group['p2p_key_version'] ?? 0);
     $userWrappedKey = null;
     foreach ($members as $member) {
-        if ((int) $member['user_id'] === (int) $user['id']) {
-            $userWrappedKey = $member['wrapped_group_key'] ?: null;
+        if (
+            (int) $member['user_id'] === (int) $user['id']
+            && !empty($member['wrapped_group_key'])
+            && (int) ($member['key_version'] ?? 0) === $keyVersion
+        ) {
+            $userWrappedKey = (string) $member['wrapped_group_key'];
             break;
         }
     }
 
+    $needsKeyDistribution = false;
+    $memberPayloads = array_map(static function (array $member) use ($enabled, $keyVersion, &$needsKeyDistribution): array {
+        $publicKey = null;
+        if (!empty($member['public_key_jwk'])) {
+            $decoded = json_decode((string) $member['public_key_jwk'], true);
+            $publicKey = is_array($decoded) ? $decoded : null;
+        }
+        $hasWrappedKey = !empty($member['wrapped_group_key'])
+            && (int) ($member['key_version'] ?? 0) === $keyVersion;
+        $memberNeedsKey = $enabled
+            && $publicKey !== null
+            && !empty($member['consent_at'])
+            && !$hasWrappedKey;
+        $needsKeyDistribution = $needsKeyDistribution || $memberNeedsKey;
+
+        return [
+            'user_id' => (int) $member['user_id'],
+            'username' => (string) $member['username'],
+            'display_name' => (string) $member['display_name'],
+            'role' => normalize_role((string) $member['role']),
+            'role_label' => role_label((string) $member['role']),
+            'has_public_key' => $publicKey !== null,
+            'has_wrapped_key' => $hasWrappedKey,
+            'needs_key_distribution' => $memberNeedsKey,
+            'consented' => !empty($member['consent_at']),
+            'public_key_jwk' => $publicKey,
+        ];
+    }, $members);
+
     return [
         'ok' => true,
         'group_name' => $groupName,
-        'enabled' => !empty($group['p2p_enabled_at']),
-        'key_version' => (int) ($group['p2p_key_version'] ?? 0),
+        'enabled' => $enabled,
+        'key_version' => $keyVersion,
         'is_owner' => (int) ($group['owner_user_id'] ?? 0) > 0
             && (int) ($group['owner_user_id'] ?? 0) === (int) $user['id'],
         'wrapped_group_key' => $userWrappedKey,
-        'members' => array_map(static function (array $member): array {
-            $publicKey = null;
-            if (!empty($member['public_key_jwk'])) {
-                $decoded = json_decode((string) $member['public_key_jwk'], true);
-                $publicKey = is_array($decoded) ? $decoded : null;
-            }
-
-            return [
-                'user_id' => (int) $member['user_id'],
-                'username' => (string) $member['username'],
-                'display_name' => (string) $member['display_name'],
-                'role' => normalize_role((string) $member['role']),
-                'role_label' => role_label((string) $member['role']),
-                'has_public_key' => $publicKey !== null,
-                'consented' => !empty($member['consent_at']),
-                'public_key_jwk' => $publicKey,
-            ];
-        }, $members),
+        'needs_key_distribution' => $needsKeyDistribution,
+        'members' => $memberPayloads,
     ];
 }
 

@@ -17,19 +17,27 @@ try {
 
     if ($action === 'join_by_code') {
         $groupCode = strtolower(trim((string) ($data['group_code'] ?? '')));
+        $pdo = db();
+        $joinIp = client_ip_address();
+        if (group_join_locked($pdo, (int) $user['id'], $joinIp)) {
+            json_response(['ok' => false, 'message' => '组号尝试过多，请 30 分钟后再试。'], 423);
+        }
+
         if (!preg_match('/^[0-9a-z]{6}$/', $groupCode)) {
+            if (record_failed_group_join($pdo, (int) $user['id'], $joinIp)) {
+                json_response(['ok' => false, 'message' => '组号尝试过多，请 30 分钟后再试。'], 423);
+            }
             json_response(['ok' => false, 'message' => '组号格式不正确。'], 422);
         }
 
-        $pdo = db();
         $stmt = $pdo->prepare('SELECT * FROM family_groups WHERE group_code = ? LIMIT 1');
         $stmt->execute([$groupCode]);
         $group = $stmt->fetch();
         if (!$group) {
+            if (record_failed_group_join($pdo, (int) $user['id'], $joinIp)) {
+                json_response(['ok' => false, 'message' => '组号尝试过多，请 30 分钟后再试。'], 423);
+            }
             json_response(['ok' => false, 'message' => '家庭组不存在。'], 404);
-        }
-        if (!empty($group['p2p_enabled_at'])) {
-            json_response(['ok' => false, 'message' => '该家庭组已开启端到端加密，暂不允许新成员直接加入。'], 409);
         }
 
         $pdo->beginTransaction();
@@ -40,6 +48,7 @@ try {
             $stmt->execute([(string) $group['group_name'], (int) $user['id']]);
         }
         $pdo->commit();
+        clear_failed_group_join($pdo, (int) $user['id'], $joinIp);
 
         $freshUser = current_user() ?: $user;
         json_response(['ok' => true, 'user' => public_user_payload($freshUser)]);

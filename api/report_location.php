@@ -311,6 +311,17 @@ function assert_location_report_plausible(PDO $pdo, int $userId, string $groupNa
     $travelSpeed = $effectiveDistance / $elapsed;
 
     if ($travelSpeed > MAX_REASONABLE_TRAVEL_MPS) {
+        record_user_log($userId, $groupName, 'location_jump_anomaly', '位置变化异常', [
+            'previous_latitude' => (float) $previous['latitude'],
+            'previous_longitude' => (float) $previous['longitude'],
+            'latitude' => $latitude,
+            'longitude' => $longitude,
+            'distance_meters' => round($distance, 2),
+            'elapsed_seconds' => $elapsed,
+            'effective_speed_mps' => round($travelSpeed, 2),
+            'previous_accuracy' => $previousAccuracy,
+            'current_accuracy' => $currentAccuracy,
+        ]);
         error_log(sprintf(
             '[family-location] unusual location jump accepted: user=%d group=%s distance=%.2f elapsed=%d speed=%.2f',
             $userId,
@@ -335,6 +346,7 @@ function haversine_distance_meters(float $lat1, float $lon1, float $lat2, float 
 
 try {
     $user = require_user();
+    rate_limit_or_fail('report_location', 900, 3600, 'user:' . (int) $user['id']);
     $membership = require_user_membership($user, selected_group_name_from_request());
     require_report_device_cookie();
 

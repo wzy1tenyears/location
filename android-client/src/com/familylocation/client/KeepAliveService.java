@@ -17,6 +17,7 @@ import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
 import android.util.Log;
@@ -54,6 +55,7 @@ public class KeepAliveService extends Service {
     private static final String USER_AGENT = "loc-app/1.2.0";
 
     private Handler handler;
+    private HandlerThread workerThread;
     private LocationManager locationManager;
     private LocationListener locationListener;
     private Runnable tickRunnable;
@@ -75,7 +77,9 @@ public class KeepAliveService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        handler = new Handler(Looper.getMainLooper());
+        workerThread = new HandlerThread("位置后台定位");
+        workerThread.start();
+        handler = new Handler(workerThread.getLooper());
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
         createNotificationChannel();
         createLocationListener();
@@ -84,6 +88,14 @@ public class KeepAliveService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        try {
+            startForegroundCompat();
+        } catch (Exception exception) {
+            Log.w(TAG, "进入前台服务失败：" + exception.getMessage());
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
         if (!shouldReport()) {
             stopLocationUpdates();
             if (handler != null && tickRunnable != null) {
@@ -94,8 +106,15 @@ public class KeepAliveService extends Service {
             return START_NOT_STICKY;
         }
 
-        startForegroundCompat();
-        syncLocationUpdates();
+        if (handler != null) {
+            handler.post(() -> {
+                syncLocationUpdates();
+                Location location = bestLastKnownLocation();
+                if (location != null) {
+                    reportIfDue(location);
+                }
+            });
+        }
         scheduleNextTick(2000);
         return START_STICKY;
     }
@@ -105,6 +124,10 @@ public class KeepAliveService extends Service {
         stopLocationUpdates();
         if (handler != null && tickRunnable != null) {
             handler.removeCallbacks(tickRunnable);
+        }
+        if (workerThread != null) {
+            workerThread.quitSafely();
+            workerThread = null;
         }
         super.onDestroy();
     }
@@ -238,7 +261,8 @@ public class KeepAliveService extends Service {
             boolean requested = false;
             for (String provider : providers) {
                 try {
-                    locationManager.requestLocationUpdates(provider, intervalMs, 0f, locationListener, Looper.getMainLooper());
+                    Looper looper = handler == null ? Looper.getMainLooper() : handler.getLooper();
+                    locationManager.requestLocationUpdates(provider, intervalMs, 0f, locationListener, looper);
                     requested = true;
                 } catch (Exception exception) {
                     Log.w(TAG, "启动 " + provider + " 定位失败：" + exception.getMessage());

@@ -532,7 +532,7 @@ async function reverseGpsByMeituan(latitude, longitude, fallback) {
 
 function formatMeituanCoordinate(value) {
     const number = Number(value);
-    return Number.isFinite(number) ? number.toFixed(6) : String(value || '').trim();
+    return Number.isFinite(number) ? number.toFixed(4) : String(value || '').trim();
 }
 
 function uniqueAddressParts(parts) {

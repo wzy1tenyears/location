@@ -454,10 +454,25 @@ function addressPrecisionScore(result) {
     if (result && result.city) score = Math.max(score, 3);
     if (result && result.district) score = Math.max(score, 4);
     if (street || /(?:街道|镇|乡|路|街|大道|巷|弄)/.test(combined)) score = Math.max(score, 5);
-    if (/(?:小区|花园|家园|公寓|大厦|广场|中心|园区|学校|医院|写字楼|商务|住宅区)/.test(combined)) score = Math.max(score, 6);
-    if (detail || /(?:\d+\s*号|[一二三四五六七八九十\d]+\s*(?:栋|幢|座|单元|楼|层|室)|[A-Z]\s*\d)/i.test(combined)) score = Math.max(score, 7);
+    if (hasPlaceLevelAddress(combined) || hasSpecificPlaceDetail(detail)) score = Math.max(score, 6);
+    if (hasBuildingLevelAddress(combined) || hasBuildingLevelAddress(detail)) score = Math.max(score, 7);
 
     return score;
+}
+
+function hasPlaceLevelAddress(text) {
+    return /(?:小区|花园|家园|公寓|大厦|广场|中心|园区|学校|医院|写字楼|商务|住宅区|酒店|商场|市场|超市|银行|地铁站|车站|停车场|便利店|餐厅|门店|店|馆|苑|府|轩|阁)/.test(String(text || ''));
+}
+
+function hasBuildingLevelAddress(text) {
+    return /(?:\d+\s*号|[一二三四五六七八九十\d]+\s*(?:栋|幢|座|单元|楼|层|室)|[A-Z]\s*\d)/i.test(String(text || ''));
+}
+
+function hasSpecificPlaceDetail(detail) {
+    const text = String(detail || '').trim();
+    return text !== ''
+        && !/^(?:[\u4e00-\u9fa5]{1,12}(?:省|市|区|县|街道|镇|乡|村|社区|路|街|大道|巷|弄))$/.test(text)
+        && hasPlaceLevelAddress(text);
 }
 
 async function reverseGpsByMeituan(latitude, longitude, fallback) {

@@ -123,6 +123,10 @@ try {
 
 function verify_turnstile_token(string $token): void
 {
+    if (consume_app_challenge_token($token, 'login')) {
+        return;
+    }
+
     if (!defined('CF_TURNSTILE_SECRET_KEY') || trim((string) CF_TURNSTILE_SECRET_KEY) === '') {
         return;
     }

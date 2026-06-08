@@ -21,8 +21,6 @@ import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
 import android.util.Log;
-import android.webkit.CookieManager;
-
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -48,11 +46,12 @@ public class KeepAliveService extends Service {
     private static final String KEY_GROUP_SESSIONS = "group_sessions_json";
     private static final String KEY_REPORT_INTERVAL_SECONDS = "report_interval_seconds";
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
+    private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final int DEFAULT_REPORT_INTERVAL_SECONDS = 300;
     private static final int NOTIFICATION_ID = 10001;
     private static final String TAG = "位置服务";
-    private static final String USER_AGENT = "loc-app/1.2.6";
+    private static final String USER_AGENT = "loc-app/2.0.0";
 
     private Handler handler;
     private HandlerThread workerThread;
@@ -440,8 +439,15 @@ public class KeepAliveService extends Service {
                         body.put("speed", location.getSpeed());
                     }
 
+                    JSONObject encryptedBody = P2PCryptoSupport.encryptedReportOrNull(
+                        (endpoint, payload) -> postJson(serverUrl, cookie, endpoint, payload),
+                        this,
+                        target.groupName,
+                        body
+                    );
+                    JSONObject reportBody = encryptedBody == null ? body : encryptedBody;
                     HttpURLConnection connection = openJsonConnection(serverUrl + "api/report_location.php", "POST", cookie);
-                    byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+                    byte[] bytes = reportBody.toString().getBytes(StandardCharsets.UTF_8);
                     try (OutputStream outputStream = connection.getOutputStream()) {
                         outputStream.write(bytes);
                     }
@@ -455,6 +461,23 @@ public class KeepAliveService extends Service {
                 }
             }
         }).start();
+    }
+
+    private JSONObject postJson(String serverUrl, String cookie, String endpoint, JSONObject payload) throws Exception {
+        HttpURLConnection connection = openJsonConnection(serverUrl + endpoint, "POST", cookie);
+        byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
+        try (OutputStream outputStream = connection.getOutputStream()) {
+            outputStream.write(bytes);
+        }
+
+        int status = connection.getResponseCode();
+        String response = readResponse(status >= 400 ? connection.getErrorStream() : connection.getInputStream());
+        connection.disconnect();
+        JSONObject json = response.isEmpty() ? new JSONObject() : new JSONObject(response);
+        if (status < 200 || status >= 300 || !json.optBoolean("ok", false)) {
+            throw new IllegalStateException(json.optString("message", "请求失败。"));
+        }
+        return json;
     }
 
     private HttpURLConnection openJsonConnection(String url, String method, String cookie) throws Exception {
@@ -652,26 +675,12 @@ public class KeepAliveService extends Service {
             return "";
         }
 
-        ensureDeviceCookie(serverUrl);
-        String cookie = CookieManager.getInstance().getCookie(serverUrl);
-        return cookie == null ? "" : cookie;
-    }
-
-    private void ensureDeviceCookie(String serverUrl) {
-        String value = deviceCookieValue();
-        StringBuilder cookie = new StringBuilder()
-            .append(DEVICE_COOKIE_NAME)
-            .append("=")
-            .append(value)
-            .append("; Path=/; Max-Age=315360000; SameSite=Lax; HttpOnly");
-
-        if (serverUrl != null && serverUrl.toLowerCase().startsWith("https://")) {
-            cookie.append("; Secure");
+        String sessionCookie = prefs().getString(KEY_SESSION_COOKIE, "");
+        String deviceCookie = DEVICE_COOKIE_NAME + "=" + deviceCookieValue();
+        if (sessionCookie == null || sessionCookie.trim().isEmpty()) {
+            return deviceCookie;
         }
-
-        CookieManager cookieManager = CookieManager.getInstance();
-        cookieManager.setCookie(serverUrl, cookie.toString());
-        cookieManager.flush();
+        return sessionCookie + "; " + deviceCookie;
     }
 
     private String deviceCookieValue() {

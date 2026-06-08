@@ -30,6 +30,7 @@ try {
         require_csrf();
 
         $action = post_string('action', 32);
+        $message = '';
 
         if ($action === 'update_security_settings') {
             foreach (app_setting_keys() as $key) {

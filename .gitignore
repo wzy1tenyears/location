@@ -1,0 +1,7 @@
+*.apk
+*.idsig
+*.keystore
+android-client/build/
+android-admin-client/build/
+location-release.apk
+private/location-admin-release.apk

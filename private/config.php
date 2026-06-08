@@ -3,9 +3,13 @@
 declare(strict_types=1);
 
 const APP_NAME = '位置';
-const ANDROID_VERSION_CODE = 32;
-const ANDROID_VERSION_NAME = '1.2.6';
+const ANDROID_VERSION_CODE = 33;
+const ANDROID_VERSION_NAME = '2.0.0';
 const ANDROID_APK_FILENAME = 'location-release.apk';
+const ANDROID_ADMIN_VERSION_CODE = 33;
+const ANDROID_ADMIN_VERSION_NAME = '2.0.0';
+const ANDROID_ADMIN_APK_FILENAME = 'location-admin-release.apk';
+const ANDROID_ADMIN_FORCE_UPDATE = true;
 const ANDROID_FORCE_UPDATE = true;
 const IPINFO_LITE_TOKEN = ''; // https://ipinfo.io/
 const IP2LOCATION_IO_KEY = ''; // https://www.ip2location.io/

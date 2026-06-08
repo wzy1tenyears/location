@@ -652,6 +652,21 @@ function ensure_schema(PDO $pdo): void
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
 
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS app_challenges (
+            id CHAR(32) NOT NULL PRIMARY KEY,
+            secret_hash CHAR(64) NOT NULL,
+            device_fingerprint CHAR(64) NOT NULL,
+            purpose VARCHAR(20) NOT NULL,
+            verified_at DATETIME NULL,
+            consumed_at DATETIME NULL,
+            expires_at DATETIME NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_app_challenges_device (device_fingerprint, purpose, expires_at),
+            INDEX idx_app_challenges_expires (expires_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
     $done = true;
 }
 
@@ -1225,6 +1240,48 @@ function json_response(array $data, int $status = 200): never
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
+}
+
+function consume_app_challenge_token(string $token, string $purpose): bool
+{
+    if (!str_starts_with($token, 'app:')) {
+        return false;
+    }
+
+    $parts = explode(':', $token, 3);
+    if (count($parts) !== 3) {
+        return false;
+    }
+
+    $challengeId = $parts[1];
+    $secret = $parts[2];
+    if (!preg_match('/^[a-f0-9]{32}$/i', $challengeId) || !preg_match('/^[a-f0-9]{64}$/i', $secret)) {
+        return false;
+    }
+
+    $deviceFingerprint = request_device_fingerprint();
+    $pdo = db();
+    $stmt = $pdo->prepare('
+        SELECT *
+        FROM app_challenges
+        WHERE id = ?
+            AND purpose = ?
+            AND device_fingerprint = ?
+            AND verified_at IS NOT NULL
+            AND consumed_at IS NULL
+            AND expires_at > NOW()
+        LIMIT 1
+    ');
+    $stmt->execute([$challengeId, $purpose, $deviceFingerprint]);
+    $challenge = $stmt->fetch();
+    if (!$challenge || !hash_equals((string) $challenge['secret_hash'], hash('sha256', $secret))) {
+        return false;
+    }
+
+    $stmt = $pdo->prepare('UPDATE app_challenges SET consumed_at = NOW() WHERE id = ? AND consumed_at IS NULL');
+    $stmt->execute([$challengeId]);
+
+    return $stmt->rowCount() === 1;
 }
 
 function post_string(string $key, int $maxLength = 255): string

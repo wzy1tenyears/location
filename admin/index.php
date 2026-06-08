@@ -954,7 +954,7 @@ require_once __DIR__ . '/../private/admin/controller.php';
         </section>
     </main>
     <script src="/<?= e(admin_url_path()) ?>assets/admin-theme.js?v=<?= (int) filemtime(__DIR__ . '/assets/admin-theme.js') ?>" defer></script>
-    <script src="/assets/popup-select.js" defer></script>
+    <script src="/<?= e(admin_url_path()) ?>assets/popup-select.js?v=<?= (int) filemtime(__DIR__ . '/assets/popup-select.js') ?>" defer></script>
 </body>
 </html>
 

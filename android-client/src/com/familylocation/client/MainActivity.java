@@ -2,7 +2,7 @@ package com.familylocation.client;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.app.DownloadManager;
 import android.content.Context;
 import android.content.Intent;
@@ -12,6 +12,7 @@ import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.database.Cursor;
 import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
@@ -23,6 +24,11 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.TextPaint;
+import android.text.method.LinkMovementMethod;
+import android.text.style.ClickableSpan;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -67,14 +73,17 @@ public class MainActivity extends Activity {
     private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String TAG = "FamilyLocationNative";
-
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private LinearLayout content;
     private TextView statusView;
     private Button reportButton;
     private Button refreshButton;
     private JSONObject currentUser;
+    private JSONObject legalDocuments;
     private String selectedGroupName = "";
+    private int historyPage = 1;
+    private int historyPageSize = 20;
+    private int historyUserId = 0;
     private boolean reporting;
 
     @Override
@@ -141,7 +150,7 @@ public class MainActivity extends Activity {
                 runUi(this::showHome);
                 refreshLocations();
             } catch (Exception exception) {
-                runUi(() -> showLoginWithMessage(exception.getMessage()));
+                runUi(this::showLogin);
             }
         });
     }
@@ -177,10 +186,8 @@ public class MainActivity extends Activity {
         EditText username = input("账号");
         EditText password = input("密码");
         password.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        CheckBox terms = new CheckBox(this);
-        terms.setText("我已同意用户协议、隐私条约和跨境加密传输协议");
-        terms.setTextColor(colorText());
-        terms.setChecked(true);
+        CheckBox terms = termsCheckBox();
+
         Button login = primaryButton("登录");
         login.setOnClickListener(view -> login(username.getText().toString(), password.getText().toString(), terms.isChecked()));
         Button register = secondaryButton("注册账号");
@@ -207,10 +214,8 @@ public class MainActivity extends Activity {
         EditText groupName = input("家庭组名称：创建型邀请码需要填写");
         EditText groupCode = input("家庭组号：加入型邀请码需要填写 6 位小写组号");
         groupCode.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        CheckBox terms = new CheckBox(this);
-        terms.setText("我已同意用户协议、隐私条款和跨境加密传输协议");
-        terms.setTextColor(colorText());
-        terms.setChecked(true);
+        CheckBox terms = termsCheckBox();
+
 
         Button checkInvite = secondaryButton("检查邀请码");
         checkInvite.setOnClickListener(view -> checkInviteCode(inviteCode.getText().toString(), groupName, groupCode));
@@ -241,6 +246,94 @@ public class MainActivity extends Activity {
         card.addView(back, blockParams(0));
         setScreen(card, true);
         setStatus("请先填写邀请码；不确定类型时点“检查邀请码”。");
+    }
+
+    private CheckBox termsCheckBox() {
+        String text = "\u6211\u5df2\u540c\u610f\u7528\u6237\u534f\u8bae\u3001\u9690\u79c1\u6761\u7ea6\u548c\u7528\u6237\u6570\u636e\u8de8\u5883\u52a0\u5bc6\u4f20\u8f93\u534f\u8bae";
+        CheckBox terms = new CheckBox(this);
+        SpannableString spannable = new SpannableString(text);
+        addLegalLink(spannable, text, "\u7528\u6237\u534f\u8bae", "user_agreement", "\u7528\u6237\u534f\u8bae");
+        addLegalLink(spannable, text, "\u9690\u79c1\u6761\u7ea6", "privacy_policy", "\u9690\u79c1\u6761\u7ea6");
+        addLegalLink(spannable, text, "\u7528\u6237\u6570\u636e\u8de8\u5883\u52a0\u5bc6\u4f20\u8f93\u534f\u8bae", "cross_border_transfer", "\u7528\u6237\u6570\u636e\u8de8\u5883\u52a0\u5bc6\u4f20\u8f93\u534f\u8bae");
+        terms.setText(spannable);
+        terms.setMovementMethod(LinkMovementMethod.getInstance());
+        terms.setHighlightColor(Color.TRANSPARENT);
+        terms.setLinkTextColor(Color.rgb(13, 95, 84));
+        terms.setTextColor(colorText());
+        terms.setChecked(true);
+        return terms;
+    }
+
+    private void addLegalLink(SpannableString spannable, String fullText, String label, String documentKey, String fallbackTitle) {
+        int start = fullText.indexOf(label);
+        if (start < 0) {
+            return;
+        }
+        int end = start + label.length();
+        spannable.setSpan(new ClickableSpan() {
+            @Override
+            public void onClick(View widget) {
+                openLegalDocument(documentKey, fallbackTitle);
+            }
+
+            @Override
+            public void updateDrawState(TextPaint ds) {
+                super.updateDrawState(ds);
+                ds.setColor(Color.rgb(13, 95, 84));
+                ds.setUnderlineText(false);
+            }
+        }, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    }
+
+    private void openLegalDocument(String documentKey, String fallbackTitle) {
+        setStatus("\u6b63\u5728\u52a0\u8f7d" + fallbackTitle);
+        runBackground(() -> {
+            try {
+                JSONObject documents = legalDocuments;
+                if (documents == null) {
+                    JSONObject response = getJson("api/legal_documents.php");
+                    documents = response.optJSONObject("documents");
+                    if (documents == null) {
+                        throw new IllegalStateException("\u670d\u52a1\u7aef\u672a\u8fd4\u56de\u534f\u8bae\u6587\u6863\u3002");
+                    }
+                    legalDocuments = documents;
+                }
+                JSONObject document = documents.optJSONObject(documentKey);
+                if (document == null) {
+                    throw new IllegalStateException("\u670d\u52a1\u7aef\u7f3a\u5c11" + fallbackTitle + "\u3002");
+                }
+                String title = document.optString("title", fallbackTitle);
+                String[][] sections = parseLegalSections(document.optJSONArray("sections"));
+                runUi(() -> {
+                    setStatus("");
+                    showPopupDialog(title, sections, "\u5173\u95ed", null, null);
+                });
+            } catch (Exception exception) {
+                runUi(() -> setStatus("\u52a0\u8f7d\u534f\u8bae\u5931\u8d25\uff1a" + exception.getMessage()));
+            }
+        });
+    }
+
+    private String[][] parseLegalSections(JSONArray sectionsJson) {
+        List<String[]> sections = new ArrayList<>();
+        if (sectionsJson == null) {
+            return new String[0][0];
+        }
+        for (int index = 0; index < sectionsJson.length(); index += 1) {
+            JSONObject section = sectionsJson.optJSONObject(index);
+            if (section == null) {
+                continue;
+            }
+            JSONArray paragraphs = section.optJSONArray("paragraphs");
+            int paragraphCount = paragraphs == null ? 0 : paragraphs.length();
+            String[] items = new String[paragraphCount + 1];
+            items[0] = section.optString("title", "");
+            for (int paragraphIndex = 0; paragraphIndex < paragraphCount; paragraphIndex += 1) {
+                items[paragraphIndex + 1] = paragraphs.optString(paragraphIndex, "");
+            }
+            sections.add(items);
+        }
+        return sections.toArray(new String[0][]);
     }
 
     private void checkInviteCode(String inviteCode, EditText groupName, EditText groupCode) {
@@ -438,6 +531,8 @@ public class MainActivity extends Activity {
     }
 
     private void showHistory() {
+        historyPage = 1;
+        historyUserId = 0;
         LinearLayout card = screen("历史定位");
         Button refresh = primaryButton("刷新历史记录");
         Button back = secondaryButton("返回位置看板");
@@ -457,10 +552,16 @@ public class MainActivity extends Activity {
             return;
         }
 
+        final int page = Math.max(1, historyPage);
+        final int perPage = normalizedHistoryPageSize(historyPageSize);
+        final int userId = Math.max(0, historyUserId);
         setStatus("正在加载历史记录");
         runBackground(() -> {
             try {
-                String endpoint = "api/history.php?page=1&per_page=20";
+                String endpoint = "api/history.php?page=" + page + "&per_page=" + perPage;
+                if (userId > 0) {
+                    endpoint += "&user_id=" + userId;
+                }
                 if (!selectedGroupName.isEmpty()) {
                     endpoint += "&group_name=" + urlEncode(selectedGroupName);
                 }
@@ -473,12 +574,23 @@ public class MainActivity extends Activity {
         });
     }
 
+    private int normalizedHistoryPageSize(int value) {
+        return value == 50 || value == 100 ? value : 20;
+    }
+
     private void renderHistory(JSONObject response) {
         if (content == null) {
             return;
         }
 
         removeDynamicRows();
+        JSONObject pagination = response.optJSONObject("pagination");
+        if (pagination != null) {
+            historyPage = Math.max(1, pagination.optInt("page", historyPage));
+            historyPageSize = normalizedHistoryPageSize(pagination.optInt("per_page", historyPageSize));
+            historyUserId = Math.max(0, pagination.optInt("user_id", historyUserId));
+        }
+
         JSONObject selectedGroup = response.optJSONObject("selected_group");
         if (selectedGroup != null) {
             TextView group = infoPanel("家庭组：" + selectedGroup.optString("display_name", selectedGroup.optString("group_name", "")), true);
@@ -486,7 +598,12 @@ public class MainActivity extends Activity {
             content.addView(group, blockParams(10));
         }
 
+        renderHistoryControls(response);
+
         JSONArray history = response.optJSONArray("history");
+        int total = pagination == null ? (history == null ? 0 : history.length()) : pagination.optInt("total", history == null ? 0 : history.length());
+        int totalPages = pagination == null ? 1 : Math.max(1, pagination.optInt("total_pages", 1));
+        content.addView(sectionTitle("历史记录（第 " + historyPage + " / " + totalPages + " 页）"), blockParams(8));
         if (history == null || history.length() == 0) {
             TextView empty = infoPanel("暂无历史定位记录。", true);
             empty.setTag("dynamic");
@@ -495,13 +612,92 @@ public class MainActivity extends Activity {
             return;
         }
 
-        content.addView(sectionTitle("最近 20 条"), blockParams(8));
         for (int index = 0; index < history.length(); index += 1) {
             appendHistoryRow(history.optJSONObject(index));
         }
-        JSONObject pagination = response.optJSONObject("pagination");
-        String total = pagination == null ? "" : String.valueOf(pagination.optInt("total", history.length()));
         setStatus("已加载历史记录：" + history.length() + " / " + total);
+    }
+
+    private void renderHistoryControls(JSONObject response) {
+        JSONArray members = response.optJSONArray("members");
+        if (members != null && members.length() > 1) {
+            content.addView(sectionTitle("筛选成员"), blockParams(8));
+            Button all = secondaryButton(historyUserId == 0 ? "✓ 全部成员" : "全部成员");
+            all.setTag("dynamic");
+            all.setOnClickListener(view -> {
+                historyUserId = 0;
+                historyPage = 1;
+                loadHistory();
+            });
+            content.addView(all, blockParams(6));
+            for (int index = 0; index < members.length(); index += 1) {
+                JSONObject member = members.optJSONObject(index);
+                if (member == null) {
+                    continue;
+                }
+                int memberId = member.optInt("user_id", 0);
+                String label = memberLabel(member);
+                Button memberButton = secondaryButton((memberId == historyUserId ? "✓ " : "") + label);
+                memberButton.setTag("dynamic");
+                memberButton.setOnClickListener(view -> {
+                    historyUserId = memberId;
+                    historyPage = 1;
+                    loadHistory();
+                });
+                content.addView(memberButton, blockParams(6));
+            }
+        }
+
+        content.addView(sectionTitle("每页条数"), blockParams(8));
+        int[] sizes = new int[] {20, 50, 100};
+        for (int size : sizes) {
+            Button sizeButton = secondaryButton((historyPageSize == size ? "✓ " : "") + size + " 条");
+            sizeButton.setTag("dynamic");
+            sizeButton.setOnClickListener(view -> {
+                historyPageSize = size;
+                historyPage = 1;
+                loadHistory();
+            });
+            content.addView(sizeButton, blockParams(6));
+        }
+
+        JSONObject pagination = response.optJSONObject("pagination");
+        int total = pagination == null ? 0 : pagination.optInt("total", 0);
+        int totalPages = pagination == null ? 1 : Math.max(1, pagination.optInt("total_pages", 1));
+        TextView pageInfo = infoPanel("共 " + total + " 条，当前第 " + historyPage + " / " + totalPages + " 页", true);
+        pageInfo.setTag("dynamic");
+        content.addView(pageInfo, blockParams(8));
+
+        LinearLayout pager = new LinearLayout(this);
+        pager.setTag("dynamic");
+        pager.setOrientation(LinearLayout.HORIZONTAL);
+        Button previous = secondaryButton("上一页");
+        Button next = secondaryButton("下一页");
+        previous.setEnabled(historyPage > 1);
+        next.setEnabled(historyPage < totalPages);
+        previous.setOnClickListener(view -> {
+            if (historyPage > 1) {
+                historyPage -= 1;
+                loadHistory();
+            }
+        });
+        next.setOnClickListener(view -> {
+            if (historyPage < totalPages) {
+                historyPage += 1;
+                loadHistory();
+            }
+        });
+        pager.addView(previous, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        View spacer = new View(this);
+        pager.addView(spacer, new LinearLayout.LayoutParams(dp(8), 1));
+        pager.addView(next, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        content.addView(pager, blockParams(10));
+    }
+
+    private String memberLabel(JSONObject member) {
+        String name = member.optString("display_name", member.optString("username", "成员"));
+        String role = member.optString("role_label", "");
+        return role.isEmpty() ? name : name + " / " + role;
     }
 
     private void appendHistoryRow(JSONObject location) {
@@ -903,6 +1099,7 @@ public class MainActivity extends Activity {
                 save.setOnClickListener(view -> renameGroup(groupId, rename.getText().toString()));
                 content.addView(rename, blockParams(8));
                 content.addView(save, blockParams(10));
+                appendOwnedGroupMembers(group);
             }
         }
         setStatus("家庭组已加载：" + groups.length());
@@ -974,6 +1171,141 @@ public class MainActivity extends Activity {
                 runUi(() -> {
                     renderGroups();
                     setStatus("家庭组名称已保存");
+                });
+            } catch (Exception exception) {
+                runUi(() -> setStatus(exception.getMessage()));
+            }
+        });
+    }
+
+    private void appendOwnedGroupMembers(JSONObject group) {
+        JSONArray members = group.optJSONArray("members");
+        if (members == null || members.length() == 0) {
+            return;
+        }
+
+        String groupName = group.optString("group_name", "");
+        content.addView(sectionTitle("\u6210\u5458\u7ba1\u7406"), blockParams(6));
+        int currentUserId = currentUser == null ? 0 : currentUser.optInt("id", 0);
+        for (int index = 0; index < members.length(); index += 1) {
+            JSONObject member = members.optJSONObject(index);
+            if (member == null) {
+                continue;
+            }
+            int memberId = member.optInt("user_id", 0);
+            String memberLabel = userDisplayName(member);
+            TextView memberRow = infoPanel(
+                memberLabel
+                    + "\n\u8d26\u53f7\uff1a" + member.optString("username", "")
+                    + "\n\u8eab\u4efd\uff1a" + member.optString("role_label", ""),
+                true
+            );
+            memberRow.setTag("dynamic");
+            content.addView(memberRow, blockParams(6));
+
+            if (memberId > 0 && memberId != currentUserId) {
+                Button reset = secondaryButton("\u91cd\u7f6e\u5bc6\u7801\uff1a" + memberLabel);
+                reset.setTag("dynamic");
+                reset.setOnClickListener(view -> showMemberPasswordReset(groupName, memberId, memberLabel));
+                Button remove = secondaryButton("\u79fb\u51fa\u6210\u5458\uff1a" + memberLabel);
+                remove.setTag("dynamic");
+                remove.setOnClickListener(view -> confirmRemoveMember(groupName, memberId, memberLabel));
+                content.addView(reset, blockParams(6));
+                content.addView(remove, blockParams(10));
+            }
+        }
+    }
+
+    private void confirmRemoveMember(String groupName, int memberId, String memberLabel) {
+        showPopupDialog(
+            "\u79fb\u51fa\u6210\u5458",
+            new String[][] {
+                new String[] {"\u786e\u8ba4\u64cd\u4f5c", "\u786e\u8ba4\u5c06 " + memberLabel + " \u79fb\u51fa\u5f53\u524d\u5bb6\u5ead\u7ec4\uff1f\u79fb\u51fa\u540e\u8be5\u6210\u5458\u5c06\u65e0\u6cd5\u67e5\u770b\u8fd9\u4e2a\u5bb6\u5ead\u7ec4\u7684\u4f4d\u7f6e\u3002"}
+            },
+            "\u786e\u8ba4\u79fb\u51fa",
+            () -> removeMember(groupName, memberId),
+            "\u53d6\u6d88"
+        );
+    }
+
+    private void removeMember(String groupName, int memberId) {
+        if (groupName == null || groupName.trim().isEmpty() || memberId <= 0) {
+            setStatus("\u6210\u5458\u4fe1\u606f\u4e0d\u5b8c\u6574\u3002");
+            return;
+        }
+
+        setStatus("\u6b63\u5728\u79fb\u51fa\u6210\u5458");
+        runBackground(() -> {
+            try {
+                JSONObject response = postJson("api/groups.php", new JSONObject()
+                    .put("action", "remove_member")
+                    .put("group_name", groupName)
+                    .put("target_user_id", memberId));
+                applyUserResponse(response);
+                runUi(() -> {
+                    renderGroups();
+                    setStatus("\u6210\u5458\u5df2\u79fb\u51fa\u5bb6\u5ead\u7ec4");
+                });
+            } catch (Exception exception) {
+                runUi(() -> setStatus(exception.getMessage()));
+            }
+        });
+    }
+
+    private void showMemberPasswordReset(String groupName, int memberId, String memberLabel) {
+        LinearLayout card = screen("\u91cd\u7f6e\u6210\u5458\u5bc6\u7801");
+        TextView warning = infoPanel("\u4ec5\u5f53\u8be5\u6210\u5458\u53ea\u5c5e\u4e8e\u5f53\u524d\u5bb6\u5ead\u7ec4\u65f6\u53ef\u76f4\u63a5\u91cd\u7f6e\u3002\u82e5\u6210\u5458\u5c5e\u4e8e\u591a\u4e2a\u5bb6\u5ead\u7ec4\uff0c\u8bf7\u8d70\u5de5\u5355\u3002\n\u6210\u5458\uff1a" + memberLabel, false);
+        EditText newPassword = input("\u65b0\u5bc6\u7801\uff0c\u81f3\u5c11 6 \u4f4d");
+        newPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        EditText newPasswordConfirm = input("\u518d\u6b21\u8f93\u5165\u65b0\u5bc6\u7801");
+        newPasswordConfirm.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        CheckBox confirm = new CheckBox(this);
+        confirm.setText("\u6211\u786e\u8ba4\u8981\u91cd\u7f6e\u8be5\u6210\u5458\u5bc6\u7801");
+        confirm.setTextColor(colorText());
+        Button submit = primaryButton("\u786e\u8ba4\u91cd\u7f6e\u5bc6\u7801");
+        submit.setOnClickListener(view -> resetMemberPassword(
+            groupName,
+            memberId,
+            newPassword.getText().toString(),
+            newPasswordConfirm.getText().toString(),
+            confirm.isChecked()
+        ));
+        Button back = secondaryButton("\u8fd4\u56de\u5bb6\u5ead\u7ec4");
+        back.setOnClickListener(view -> showGroups());
+
+        card.addView(warning, blockParams(14));
+        card.addView(newPassword, blockParams(10));
+        card.addView(newPasswordConfirm, blockParams(10));
+        card.addView(confirm, blockParams(10));
+        card.addView(submit, blockParams(10));
+        card.addView(back, blockParams(0));
+        setScreen(card, true);
+    }
+
+    private void resetMemberPassword(String groupName, int memberId, String newPassword, String newPasswordConfirm, boolean confirmed) {
+        if (!confirmed) {
+            setStatus("\u8bf7\u5148\u52fe\u9009\u786e\u8ba4\u91cd\u7f6e\u64cd\u4f5c\u3002");
+            return;
+        }
+        if (newPassword.trim().length() < 6 || !newPassword.equals(newPasswordConfirm)) {
+            setStatus("\u8bf7\u586b\u5199\u4e24\u904d\u4e00\u81f4\u4e14\u81f3\u5c11 6 \u4f4d\u7684\u65b0\u5bc6\u7801\u3002");
+            return;
+        }
+
+        setStatus("\u6b63\u5728\u91cd\u7f6e\u6210\u5458\u5bc6\u7801");
+        runBackground(() -> {
+            try {
+                JSONObject response = postJson("api/groups.php", new JSONObject()
+                    .put("action", "reset_member_password")
+                    .put("group_name", groupName)
+                    .put("target_user_id", memberId)
+                    .put("new_password", newPassword)
+                    .put("new_password_confirm", newPasswordConfirm)
+                    .put("confirm", true));
+                applyUserResponse(response);
+                runUi(() -> {
+                    showGroups();
+                    setStatus("\u6210\u5458\u5bc6\u7801\u5df2\u91cd\u7f6e");
                 });
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
@@ -1686,16 +2018,19 @@ public class MainActivity extends Activity {
             requestPermissions(new String[] { Manifest.permission.ACCESS_BACKGROUND_LOCATION }, REQUEST_BACKGROUND_LOCATION);
             return;
         }
-        new AlertDialog.Builder(this)
-            .setTitle("允许后台定位")
-            .setMessage("持续上报需要在系统设置中把定位权限改为“始终允许”。")
-            .setPositiveButton("去设置", (dialog, which) -> {
+        showPopupDialog(
+            "\u5141\u8bb8\u540e\u53f0\u5b9a\u4f4d",
+            new String[][] {
+                new String[] {"\u6743\u9650\u8bf4\u660e", "\u6301\u7eed\u4e0a\u62a5\u9700\u8981\u5728\u7cfb\u7edf\u8bbe\u7f6e\u4e2d\u628a\u5b9a\u4f4d\u6743\u9650\u6539\u4e3a\u201c\u59cb\u7ec8\u5141\u8bb8\u201d\u3002"}
+            },
+            "\u53bb\u8bbe\u7f6e",
+            () -> {
                 Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
                 intent.setData(Uri.parse("package:" + getPackageName()));
                 startActivity(intent);
-            })
-            .setNegativeButton("稍后", null)
-            .show();
+            },
+            "\u7a0d\u540e"
+        );
     }
 
     @Override
@@ -1789,6 +2124,7 @@ public class MainActivity extends Activity {
         statusView = body("");
         statusView.setPadding(dp(12), dp(8), dp(12), dp(8));
         statusView.setBackground(pillBackground());
+        statusView.setVisibility(View.GONE);
         card.addView(statusView, blockParams(16));
         return card;
     }
@@ -1799,15 +2135,126 @@ public class MainActivity extends Activity {
 
     private void setScreen(LinearLayout card, boolean center) {
         content = card;
+        if (center) {
+            LinearLayout root = new LinearLayout(this);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.setGravity(Gravity.CENTER);
+            root.setPadding(dp(16), dp(16), dp(16), dp(16));
+            root.setBackgroundColor(colorSurface());
+            root.addView(card, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            setContentView(root, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            return;
+        }
+
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         LinearLayout root = new LinearLayout(this);
-        root.setGravity((center ? Gravity.CENTER : Gravity.TOP) | Gravity.CENTER_HORIZONTAL);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         root.setPadding(dp(16), dp(16), dp(16), dp(16));
         root.setBackgroundColor(colorSurface());
         root.addView(card, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        scroll.addView(root);
+        scroll.addView(root, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(scroll);
+    }
+
+    private void showPopupDialog(String title, String[][] sections, String primaryText, Runnable primaryAction, String secondaryText) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(cardBackground());
+        card.setPadding(0, 0, 0, 0);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            card.setElevation(dp(8));
+        }
+
+        TextView heading = new TextView(this);
+        heading.setText(title == null || title.isEmpty() ? "\u63d0\u793a" : title);
+        heading.setTextSize(17);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        heading.setTextColor(colorText());
+        heading.setPadding(dp(16), dp(16), dp(16), dp(14));
+        card.addView(heading, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        card.addView(divider(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(16), dp(14), dp(16), dp(14));
+        if (sections != null) {
+            for (String[] section : sections) {
+                if (section == null || section.length == 0) {
+                    continue;
+                }
+                TextView sectionTitle = sectionHeading(section[0]);
+                body.addView(sectionTitle, blockParams(6));
+                for (int index = 1; index < section.length; index += 1) {
+                    TextView paragraph = body(section[index]);
+                    paragraph.setLineSpacing(0, 1.65f);
+                    body.addView(paragraph, blockParams(10));
+                }
+            }
+        }
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(body, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        int maxBodyHeight = Math.min((int) (getResources().getDisplayMetrics().heightPixels * 0.58f), dp(460));
+        card.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxBodyHeight));
+        card.addView(divider(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setGravity(Gravity.CENTER_VERTICAL);
+        actions.setPadding(dp(16), dp(12), dp(16), dp(12));
+        if (secondaryText != null && !secondaryText.isEmpty()) {
+            Button secondary = secondaryButton(secondaryText);
+            secondary.setOnClickListener(view -> dialog.dismiss());
+            actions.addView(secondary, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.45f));
+            View spacer = new View(this);
+            actions.addView(spacer, new LinearLayout.LayoutParams(dp(8), 1));
+        }
+        Button primary = primaryButton(primaryText == null || primaryText.isEmpty() ? "\u5173\u95ed" : primaryText);
+        primary.setOnClickListener(view -> {
+            dialog.dismiss();
+            if (primaryAction != null) {
+                primaryAction.run();
+            }
+        });
+        actions.addView(primary, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        card.addView(actions, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        dialog.setContentView(card);
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            android.view.WindowManager.LayoutParams params = window.getAttributes();
+            params.dimAmount = 0.58f;
+            window.setAttributes(params);
+        }
+        dialog.show();
+        Window shownWindow = dialog.getWindow();
+        if (shownWindow != null) {
+            int width = Math.min(getResources().getDisplayMetrics().widthPixels - dp(44), dp(560));
+            shownWindow.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    private TextView sectionHeading(String text) {
+        TextView view = new TextView(this);
+        view.setText(text == null ? "" : text);
+        view.setTextSize(15);
+        view.setTypeface(Typeface.DEFAULT_BOLD);
+        view.setTextColor(colorText());
+        view.setPadding(0, dp(4), 0, 0);
+        return view;
+    }
+
+    private View divider() {
+        View view = new View(this);
+        view.setBackgroundColor(isDarkMode() ? Color.rgb(45, 72, 66) : Color.rgb(217, 231, 226));
+        return view;
     }
 
     private void showLoading(String text) {
@@ -1815,20 +2262,18 @@ public class MainActivity extends Activity {
         TextView message = body(text);
         message.setGravity(Gravity.CENTER_HORIZONTAL);
         card.addView(message, blockParams(0));
-        setScreen(card);
+        setScreen(card, true);
     }
 
     private TextView sectionTitle(String text) {
-        TextView title = new TextView(this);
-        title.setTag("dynamic");
-        title.setText(text);
-        title.setTextSize(18);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setTextColor(colorText());
-        title.setPadding(0, dp(4), 0, 0);
-        return title;
+        TextView view = new TextView(this);
+        view.setText(text == null ? "" : text);
+        view.setTextSize(17);
+        view.setTypeface(Typeface.DEFAULT_BOLD);
+        view.setTextColor(colorText());
+        view.setPadding(0, dp(4), 0, 0);
+        return view;
     }
-
     private TextView body(String text) {
         TextView view = new TextView(this);
         view.setText(text == null ? "" : text);
@@ -1955,7 +2400,9 @@ public class MainActivity extends Activity {
 
     private void setStatus(String message) {
         if (statusView != null) {
-            statusView.setText(message == null ? "" : message);
+            String value = message == null ? "" : message.trim();
+            statusView.setText(value);
+            statusView.setVisibility(value.isEmpty() ? View.GONE : View.VISIBLE);
         }
     }
 

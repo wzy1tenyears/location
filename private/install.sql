@@ -249,3 +249,16 @@ CREATE TABLE IF NOT EXISTS api_rate_limits (
     PRIMARY KEY (bucket, identity_hash),
     INDEX idx_api_rate_limits_updated (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS app_challenges (
+    id CHAR(32) NOT NULL PRIMARY KEY,
+    secret_hash CHAR(64) NOT NULL,
+    device_fingerprint CHAR(64) NOT NULL,
+    purpose VARCHAR(20) NOT NULL,
+    verified_at DATETIME NULL,
+    consumed_at DATETIME NULL,
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_app_challenges_device (device_fingerprint, purpose, expires_at),
+    INDEX idx_app_challenges_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

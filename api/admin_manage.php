@@ -26,6 +26,61 @@ function admin_manage_string(array $data, string $key, int $maxLength = 255): st
     return $value;
 }
 
+
+function admin_manage_role(string $role): string
+{
+    $role = normalize_role($role);
+    if (!in_array($role, ['monitor', 'guardian'], true)) {
+        throw new RuntimeException('家庭组身份不正确。');
+    }
+    return $role;
+}
+
+function admin_manage_refresh_latest_location(PDO $pdo, int $userId, string $groupName): void
+{
+    $stmt = $pdo->prepare('
+        SELECT *
+        FROM locations
+        WHERE user_id = ? AND group_name = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+    ');
+    $stmt->execute([$userId, $groupName]);
+    $location = $stmt->fetch();
+    if (!$location) {
+        $stmt = $pdo->prepare('DELETE FROM latest_group_locations WHERE user_id = ? AND group_name = ?');
+        $stmt->execute([$userId, $groupName]);
+        return;
+    }
+
+    $stmt = $pdo->prepare('
+        REPLACE INTO latest_group_locations (
+            user_id, group_name, role, latitude, longitude, altitude, accuracy, heading, speed,
+            location_meta, latest_location_id, address_diagnostics, address_mismatch,
+            encryption_mode, encrypted_payload, p2p_key_version, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ');
+    $stmt->execute([
+        (int) $location['user_id'],
+        (string) $location['group_name'],
+        normalize_role((string) $location['role']),
+        $location['latitude'],
+        $location['longitude'],
+        $location['altitude'],
+        $location['accuracy'],
+        $location['heading'],
+        $location['speed'],
+        $location['location_meta'],
+        (int) $location['id'],
+        $location['address_diagnostics'],
+        (int) ($location['address_mismatch'] ?? 0),
+        (string) ($location['encryption_mode'] ?? ''),
+        $location['encrypted_payload'],
+        (int) ($location['p2p_key_version'] ?? 0),
+        (string) $location['created_at'],
+    ]);
+}
+
 try {
     $pdo = db();
     $data = admin_manage_input();
@@ -174,6 +229,105 @@ try {
         $stmt = $pdo->prepare('UPDATE invite_codes SET is_active = ? WHERE id = ?');
         $stmt->execute([$next, $inviteId]);
         $message = $next === 1 ? '邀请码已启用。' : '邀请码已停用。';
+    } elseif ($action === 'add_user') {
+        $username = admin_manage_string($data, 'username', 64);
+        $password = (string) ($data['password'] ?? '');
+        $displayName = admin_manage_string($data, 'display_name', 100);
+        $groupName = admin_manage_string($data, 'group_name', 100);
+        $role = admin_manage_role(admin_manage_string($data, 'role', 16));
+        $reportIntervalSeconds = normalize_report_interval_seconds((int) ($data['report_interval_seconds'] ?? DEFAULT_REPORT_INTERVAL_SECONDS));
+        if ($username === '' || $password === '' || $groupName === '') {
+            throw new RuntimeException('账号、密码和初始家庭组不能为空。');
+        }
+        ensure_app_username_available($pdo, $username);
+        $pdo->beginTransaction();
+        ensure_family_group_record($pdo, $groupName);
+        $stmt = $pdo->prepare('INSERT INTO users (username, password_hash, display_name, group_name, role, report_interval_seconds) VALUES (?, ?, ?, ?, ?, ?)');
+        $stmt->execute([$username, password_hash($password, PASSWORD_DEFAULT), $displayName, $groupName, $role, $reportIntervalSeconds]);
+        $userId = (int) $pdo->lastInsertId();
+        ensure_family_group_record($pdo, $groupName, $userId);
+        $stmt = $pdo->prepare('INSERT INTO user_groups (user_id, group_name, role) VALUES (?, ?, ?)');
+        $stmt->execute([$userId, $groupName, $role]);
+        $pdo->commit();
+        $message = '账号已添加。';
+    } elseif ($action === 'add_membership') {
+        $userId = (int) ($data['user_id'] ?? 0);
+        $groupName = admin_manage_string($data, 'group_name', 100);
+        $role = admin_manage_role(admin_manage_string($data, 'role', 16));
+        if ($userId <= 0 || $groupName === '') {
+            throw new RuntimeException('账号或家庭组不能为空。');
+        }
+        ensure_family_group_record($pdo, $groupName, $userId);
+        $stmt = $pdo->prepare('SELECT id FROM user_groups WHERE user_id = ? AND group_name = ? LIMIT 1');
+        $stmt->execute([$userId, $groupName]);
+        if ($stmt->fetch()) {
+            throw new RuntimeException('这个账号已经在该家庭组内。');
+        }
+        $stmt = $pdo->prepare('INSERT INTO user_groups (user_id, group_name, role) VALUES (?, ?, ?)');
+        $stmt->execute([$userId, $groupName, $role]);
+        $message = '家庭组身份已添加。';
+    } elseif ($action === 'update_membership') {
+        $membershipId = (int) ($data['membership_id'] ?? 0);
+        $groupName = admin_manage_string($data, 'group_name', 100);
+        $role = admin_manage_role(admin_manage_string($data, 'role', 16));
+        if ($membershipId <= 0 || $groupName === '') {
+            throw new RuntimeException('家庭组身份不存在或名称为空。');
+        }
+        $stmt = $pdo->prepare('SELECT * FROM user_groups WHERE id = ? LIMIT 1');
+        $stmt->execute([$membershipId]);
+        $membership = $stmt->fetch();
+        if (!$membership) {
+            throw new RuntimeException('家庭组身份不存在。');
+        }
+        $stmt = $pdo->prepare('SELECT id FROM user_groups WHERE user_id = ? AND group_name = ? AND id <> ? LIMIT 1');
+        $stmt->execute([(int) $membership['user_id'], $groupName, $membershipId]);
+        if ($stmt->fetch()) {
+            throw new RuntimeException('这个账号已经在该家庭组内。');
+        }
+        $oldGroupName = (string) $membership['group_name'];
+        $pdo->beginTransaction();
+        ensure_family_group_record($pdo, $groupName, (int) $membership['user_id']);
+        if (!hash_equals($oldGroupName, $groupName)) {
+            $stmt = $pdo->prepare('DELETE FROM latest_group_locations WHERE user_id = ? AND group_name = ?');
+            $stmt->execute([(int) $membership['user_id'], $groupName]);
+        }
+        $stmt = $pdo->prepare('UPDATE user_groups SET group_name = ?, role = ? WHERE id = ?');
+        $stmt->execute([$groupName, $role, $membershipId]);
+        $stmt = $pdo->prepare('UPDATE latest_group_locations SET group_name = ?, role = ? WHERE user_id = ? AND group_name = ?');
+        $stmt->execute([$groupName, $role, (int) $membership['user_id'], $oldGroupName]);
+        $stmt = $pdo->prepare('UPDATE locations SET group_name = ?, role = ? WHERE user_id = ? AND group_name = ?');
+        $stmt->execute([$groupName, $role, (int) $membership['user_id'], $oldGroupName]);
+        $stmt = $pdo->prepare('UPDATE users SET group_name = ?, role = ? WHERE id = ? AND group_name = ?');
+        $stmt->execute([$groupName, $role, (int) $membership['user_id'], $oldGroupName]);
+        $pdo->commit();
+        $message = '家庭组身份已更新。';
+    } elseif ($action === 'delete_membership') {
+        $membershipId = (int) ($data['membership_id'] ?? 0);
+        $stmt = $pdo->prepare('SELECT * FROM user_groups WHERE id = ? LIMIT 1');
+        $stmt->execute([$membershipId]);
+        $membership = $stmt->fetch();
+        if (!$membership) {
+            throw new RuntimeException('家庭组身份不存在。');
+        }
+        $stmt = $pdo->prepare('SELECT COUNT(*) FROM user_groups WHERE user_id = ?');
+        $stmt->execute([(int) $membership['user_id']]);
+        if ((int) $stmt->fetchColumn() <= 1) {
+            throw new RuntimeException('每个账号至少保留一个家庭组。');
+        }
+        $pdo->beginTransaction();
+        $stmt = $pdo->prepare('DELETE FROM user_groups WHERE id = ?');
+        $stmt->execute([$membershipId]);
+        $stmt = $pdo->prepare('DELETE FROM latest_group_locations WHERE user_id = ? AND group_name = ?');
+        $stmt->execute([(int) $membership['user_id'], (string) $membership['group_name']]);
+        $stmt = $pdo->prepare('SELECT group_name, role FROM user_groups WHERE user_id = ? ORDER BY group_name ASC, id ASC LIMIT 1');
+        $stmt->execute([(int) $membership['user_id']]);
+        $nextMembership = $stmt->fetch();
+        if ($nextMembership) {
+            $stmt = $pdo->prepare('UPDATE users SET group_name = ?, role = ? WHERE id = ? AND group_name = ?');
+            $stmt->execute([(string) $nextMembership['group_name'], (string) $nextMembership['role'], (int) $membership['user_id'], (string) $membership['group_name']]);
+        }
+        $pdo->commit();
+        $message = '家庭组身份已删除。';
     } elseif ($action === 'update_user') {
         $userId = (int) ($data['user_id'] ?? 0);
         $username = admin_manage_string($data, 'username', 64);
@@ -208,6 +362,39 @@ try {
         $stmt->execute([password_hash($password, PASSWORD_DEFAULT), $userId]);
         clear_failed_login($pdo, $userId);
         $message = '密码已重置。';
+    } elseif ($action === 'delete_user') {
+        $userId = (int) ($data['user_id'] ?? 0);
+        if ($userId <= 0) {
+            throw new RuntimeException('账号不存在。');
+        }
+        $stmt = $pdo->prepare('DELETE FROM users WHERE id = ?');
+        $stmt->execute([$userId]);
+        $message = '账号已删除。';
+    } elseif ($action === 'delete_user_device') {
+        $deviceId = (int) ($data['device_id'] ?? 0);
+        if ($deviceId <= 0) {
+            throw new RuntimeException('设备绑定不存在。');
+        }
+        $stmt = $pdo->prepare('DELETE FROM user_devices WHERE id = ?');
+        $stmt->execute([$deviceId]);
+        $message = '设备绑定已删除。';
+    } elseif ($action === 'delete_location') {
+        $locationId = (int) ($data['location_id'] ?? 0);
+        if ($locationId <= 0) {
+            throw new RuntimeException('定位记录不存在。');
+        }
+        $stmt = $pdo->prepare('SELECT * FROM locations WHERE id = ? LIMIT 1');
+        $stmt->execute([$locationId]);
+        $location = $stmt->fetch();
+        if (!$location) {
+            throw new RuntimeException('定位记录不存在。');
+        }
+        $pdo->beginTransaction();
+        $stmt = $pdo->prepare('DELETE FROM locations WHERE id = ?');
+        $stmt->execute([$locationId]);
+        admin_manage_refresh_latest_location($pdo, (int) $location['user_id'], (string) $location['group_name']);
+        $pdo->commit();
+        $message = '定位记录已删除。';
     } elseif ($action === 'reply_ticket') {
         $ticketId = (int) ($data['ticket_id'] ?? 0);
         $reply = admin_manage_string($data, 'reply', 2000);

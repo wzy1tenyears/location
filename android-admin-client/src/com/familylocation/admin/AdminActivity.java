@@ -66,8 +66,8 @@ public class AdminActivity extends Activity {
     private static final String KEY_PENDING_UPDATE_INSTALL_ID = "pending_update_install_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "";
-    private static final int APP_VERSION_CODE = 46;
-    private static final String APP_VERSION_NAME = "2.0.13";
+    private static final int APP_VERSION_CODE = 47;
+    private static final String APP_VERSION_NAME = "2.0.14";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
@@ -756,7 +756,17 @@ public class AdminActivity extends Activity {
                     "\n坐标：" + formatCoordinate(location.optDouble("latitude")) + ", " + formatCoordinate(location.optDouble("longitude")) +
                     "\n地址：" + (address.isEmpty() ? "未解析" : address) +
                     "\n时间：" + location.optString("updated_at", "");
-                card.addView(infoPanel(line), blockParams(12));
+                card.addView(infoPanel(line), blockParams(8));
+                int locationId = location.optInt("id", 0);
+                if (locationId > 0) {
+                    Button deleteLocation = secondaryButton("删除这条定位");
+                    deleteLocation.setOnClickListener(view -> {
+                        JSONObject payload = adminPayload("delete_location");
+                        putJson(payload, "location_id", locationId);
+                        postAdminAction(payload, redirectPath);
+                    });
+                    card.addView(deleteLocation, blockParams(12));
+                }
             }
         }
 
@@ -1084,6 +1094,39 @@ public class AdminActivity extends Activity {
     private void showUserManager(JSONObject response, String redirectPath) {
         LinearLayout card = screen("账号管理");
         JSONArray users = response.optJSONArray("users");
+        JSONArray memberships = response.optJSONArray("memberships");
+        JSONArray devices = response.optJSONArray("devices");
+
+        card.addView(sectionTitle("新增账号"), blockParams(8));
+        EditText addUsername = input("账号");
+        EditText addPassword = input("密码");
+        addPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        EditText addDisplayName = input("显示名");
+        EditText addGroupName = input("初始家庭组");
+        EditText addInterval = input("上报间隔秒");
+        addInterval.setInputType(InputType.TYPE_CLASS_NUMBER);
+        addInterval.setText("300");
+        CheckBox addMonitor = policyCheckBox("初始身份为监护端", true);
+        Button addUser = primaryButton("新增账号");
+        addUser.setOnClickListener(view -> {
+            JSONObject payload = adminPayload("add_user");
+            putJson(payload, "username", addUsername.getText().toString());
+            putJson(payload, "password", addPassword.getText().toString());
+            putJson(payload, "display_name", addDisplayName.getText().toString());
+            putJson(payload, "group_name", addGroupName.getText().toString());
+            putJson(payload, "role", addMonitor.isChecked() ? "monitor" : "guardian");
+            putJson(payload, "report_interval_seconds", parseInt(addInterval.getText().toString(), 300));
+            postAdminAction(payload, redirectPath);
+        });
+        card.addView(addUsername, blockParams(6));
+        card.addView(addPassword, blockParams(6));
+        card.addView(addDisplayName, blockParams(6));
+        card.addView(addGroupName, blockParams(6));
+        card.addView(addInterval, blockParams(6));
+        card.addView(addMonitor, blockParams(8));
+        card.addView(addUser, blockParams(16));
+
+        card.addView(sectionTitle("现有账号"), blockParams(8));
         if (users == null || users.length() == 0) {
             card.addView(infoPanel("暂无账号。"), blockParams(12));
         } else {
@@ -1111,7 +1154,9 @@ public class AdminActivity extends Activity {
                 card.addView(sectionTitle(displayName(user)), blockParams(6));
                 card.addView(infoPanel("状态：" + (active ? "启用" : "停用") + " / " + (user.optBoolean("online", false) ? "在线" : "离线")
                     + "\n家庭组：" + user.optString("group_name", "") + " / " + user.optString("role_label", "")
-                    + "\n最后在线：" + user.optString("last_seen_at", "无")), blockParams(8));
+                    + "\n最后在线：" + user.optString("last_seen_at", "无")
+                    + "\n成员关系：" + userMembershipSummary(memberships, userId)
+                    + "\n设备：" + userDeviceSummary(devices, userId)), blockParams(8));
                 card.addView(username, blockParams(6));
                 card.addView(displayNameInput, blockParams(6));
                 card.addView(interval, blockParams(6));
@@ -1140,9 +1185,31 @@ public class AdminActivity extends Activity {
                     putJson(payload, "new_password", newPassword.getText().toString());
                     postAdminAction(payload, redirectPath);
                 });
+                Button deleteUser = secondaryButton("删除账号");
+                deleteUser.setOnClickListener(view -> {
+                    JSONObject payload = adminPayload("delete_user");
+                    putJson(payload, "user_id", userId);
+                    postAdminAction(payload, redirectPath);
+                });
                 card.addView(buttonRow(save, toggle), blockParams(8));
                 card.addView(newPassword, blockParams(6));
-                card.addView(reset, blockParams(16));
+                card.addView(buttonRow(reset, deleteUser), blockParams(10));
+
+                EditText newGroup = input("添加家庭组名称");
+                CheckBox newGroupMonitor = policyCheckBox("身份为监护端", true);
+                Button addMembership = secondaryButton("添加家庭组身份");
+                addMembership.setOnClickListener(view -> {
+                    JSONObject payload = adminPayload("add_membership");
+                    putJson(payload, "user_id", userId);
+                    putJson(payload, "group_name", newGroup.getText().toString());
+                    putJson(payload, "role", newGroupMonitor.isChecked() ? "monitor" : "guardian");
+                    postAdminAction(payload, redirectPath);
+                });
+                card.addView(newGroup, blockParams(6));
+                card.addView(newGroupMonitor, blockParams(6));
+                card.addView(addMembership, blockParams(8));
+                addMembershipEditors(card, memberships, userId, redirectPath);
+                addDeviceEditors(card, devices, userId, redirectPath);
             }
         }
         Button back = secondaryButton("返回概览");
@@ -1150,6 +1217,111 @@ public class AdminActivity extends Activity {
         card.addView(back, blockParams(0));
         setScreen(card, false);
         setStatus("");
+    }
+
+    private void addMembershipEditors(LinearLayout card, JSONArray memberships, int userId, String redirectPath) {
+        if (memberships == null) {
+            return;
+        }
+        for (int index = 0; index < memberships.length(); index += 1) {
+            JSONObject membership = memberships.optJSONObject(index);
+            if (membership == null || membership.optInt("user_id", 0) != userId) {
+                continue;
+            }
+            int membershipId = membership.optInt("id", 0);
+            EditText groupName = input("成员家庭组");
+            groupName.setText(membership.optString("group_name", ""));
+            CheckBox monitor = policyCheckBox("身份为监护端", "monitor".equals(membership.optString("role", "")));
+            Button save = secondaryButton("保存成员关系");
+            save.setOnClickListener(view -> {
+                JSONObject payload = adminPayload("update_membership");
+                putJson(payload, "membership_id", membershipId);
+                putJson(payload, "group_name", groupName.getText().toString());
+                putJson(payload, "role", monitor.isChecked() ? "monitor" : "guardian");
+                postAdminAction(payload, redirectPath);
+            });
+            Button delete = secondaryButton("删除成员关系");
+            delete.setOnClickListener(view -> {
+                JSONObject payload = adminPayload("delete_membership");
+                putJson(payload, "membership_id", membershipId);
+                postAdminAction(payload, redirectPath);
+            });
+            card.addView(infoPanel("成员关系 #" + membershipId + "：" + membership.optString("group_name", "") + " / " + membership.optString("role_label", "")), blockParams(6));
+            card.addView(groupName, blockParams(6));
+            card.addView(monitor, blockParams(6));
+            card.addView(buttonRow(save, delete), blockParams(8));
+        }
+    }
+
+    private void addDeviceEditors(LinearLayout card, JSONArray devices, int userId, String redirectPath) {
+        if (devices == null) {
+            return;
+        }
+        int shown = 0;
+        for (int index = 0; index < devices.length(); index += 1) {
+            JSONObject device = devices.optJSONObject(index);
+            if (device == null || device.optInt("user_id", 0) != userId) {
+                continue;
+            }
+            int deviceId = device.optInt("id", 0);
+            String fingerprint = device.optString("device_fingerprint", "");
+            if (fingerprint.length() > 16) {
+                fingerprint = fingerprint.substring(0, 16) + "…";
+            }
+            card.addView(infoPanel("设备 #" + deviceId + "：" + fingerprint
+                + "\n首次：" + device.optString("first_seen_at", "")
+                + " / 最近：" + device.optString("last_seen_at", "")), blockParams(6));
+            Button delete = secondaryButton("解绑设备");
+            delete.setOnClickListener(view -> {
+                JSONObject payload = adminPayload("delete_user_device");
+                putJson(payload, "device_id", deviceId);
+                postAdminAction(payload, redirectPath);
+            });
+            card.addView(delete, blockParams(8));
+            shown += 1;
+            if (shown >= 3) {
+                break;
+            }
+        }
+    }
+
+    private String userMembershipSummary(JSONArray memberships, int userId) {
+        if (memberships == null) {
+            return "无";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (int index = 0; index < memberships.length(); index += 1) {
+            JSONObject membership = memberships.optJSONObject(index);
+            if (membership == null || membership.optInt("user_id", 0) != userId) {
+                continue;
+            }
+            if (builder.length() > 0) {
+                builder.append("；");
+            }
+            builder.append(membership.optString("group_name", ""))
+                .append("/")
+                .append(membership.optString("role_label", ""));
+        }
+        return builder.length() == 0 ? "无" : builder.toString();
+    }
+
+    private String userDeviceSummary(JSONArray devices, int userId) {
+        if (devices == null) {
+            return "无";
+        }
+        int count = 0;
+        String latest = "";
+        for (int index = 0; index < devices.length(); index += 1) {
+            JSONObject device = devices.optJSONObject(index);
+            if (device == null || device.optInt("user_id", 0) != userId) {
+                continue;
+            }
+            count += 1;
+            if (latest.isEmpty()) {
+                latest = device.optString("last_seen_at", "");
+            }
+        }
+        return count == 0 ? "无" : count + " 台 / 最近：" + latest;
     }
 
     private void showTicketManager(JSONObject response, String redirectPath) {

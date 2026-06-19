@@ -56,7 +56,7 @@ echo <<<HTML
           continue;
         }
         if (value && typeof value === 'object') {
-          const nested = firstText(value.name, value.number ? `${value.street || ''}${value.number}` : '', value.street, value.address);
+          const nested = firstText(value.name, value.number ? `\${value.street || ''}\${value.number}` : '', value.street, value.address);
           if (nested) return nested;
           continue;
         }
@@ -143,7 +143,7 @@ echo <<<HTML
         return;
       }
       const script = document.createElement('script');
-      script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(AMAP_KEY)}&plugin=AMap.Geocoder`;
+      script.src = `https://webapi.amap.com/maps?v=2.0&key=\${encodeURIComponent(AMAP_KEY)}&plugin=AMap.Geocoder`;
       script.onerror = () => sendError('amap script failed');
       script.onload = () => {
         try {

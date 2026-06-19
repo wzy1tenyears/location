@@ -191,6 +191,36 @@ try {
         ];
     }, $invitesStmt->fetchAll());
 
+    $devicesStmt = $pdo->query('
+        SELECT
+            d.id,
+            d.user_id,
+            d.device_fingerprint,
+            d.browser_fingerprint,
+            d.user_agent,
+            d.first_seen_at,
+            d.last_seen_at,
+            u.username,
+            u.display_name
+        FROM user_devices d
+        INNER JOIN users u ON u.id = d.user_id
+        ORDER BY d.last_seen_at DESC, d.id DESC
+        LIMIT 200
+    ');
+    $devices = array_map(static function (array $device): array {
+        return [
+            'id' => (int) $device['id'],
+            'user_id' => (int) $device['user_id'],
+            'username' => (string) $device['username'],
+            'display_name' => (string) $device['display_name'],
+            'device_fingerprint' => (string) $device['device_fingerprint'],
+            'browser_fingerprint' => (string) ($device['browser_fingerprint'] ?? ''),
+            'user_agent' => (string) ($device['user_agent'] ?? ''),
+            'first_seen_at' => format_datetime((string) $device['first_seen_at']),
+            'last_seen_at' => format_datetime((string) $device['last_seen_at']),
+        ];
+    }, $devicesStmt->fetchAll());
+
     $ticketsStmt = $pdo->query('
         SELECT
             t.*,
@@ -231,6 +261,7 @@ try {
         'security_settings' => security_policy_settings(),
         'users' => $users,
         'locations' => $locations,
+        'devices' => $devices,
         'announcement' => $announcementPayload,
         'invites' => $invites,
         'tickets' => $tickets,

@@ -41,7 +41,7 @@ echo <<<HTML
           return;
         }
         const script = document.createElement('script');
-        script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(AMAP_KEY)}&plugin=AMap.Scale,AMap.ToolBar`;
+        script.src = `https://webapi.amap.com/maps?v=2.0&key=\${encodeURIComponent(AMAP_KEY)}&plugin=AMap.Scale,AMap.ToolBar`;
         script.onload = () => resolve(window.AMap);
         script.onerror = () => reject(new Error('高德地图加载失败'));
         document.head.appendChild(script);
@@ -68,8 +68,8 @@ echo <<<HTML
       const name = String((record && (record.display_name || record.username)) || '成员');
       const time = String((record && (record.created_at || record.updated_at)) || '');
       const diag = record && record.address_diagnostics;
-      const address = diag && diag.preferred_address ? `\n${diag.preferred_address}` : '';
-      return `${name}\n${time}${address}`;
+      const address = diag && diag.preferred_address ? `\n\${diag.preferred_address}` : '';
+      return `\${name}\n\${time}\${address}`;
     }
     function grouped(records) {
       const map = new Map();
@@ -109,7 +109,7 @@ echo <<<HTML
             const marker = new AMap.Marker({
               position: [Number(record.longitude), Number(record.latitude)],
               title: title(record),
-              content: `<div class="dot" style="--color:${color}">${initial(record)}</div>`,
+              content: `<div class="dot" style="--color:\${color}">\${initial(record)}</div>`,
               offset: new AMap.Pixel(-14, -14),
               zIndex: 100 + index,
             });

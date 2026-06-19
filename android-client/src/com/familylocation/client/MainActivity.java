@@ -8,6 +8,7 @@ import android.app.Dialog;
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.IntentFilter;
 import android.content.Intent;
@@ -72,10 +73,13 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
     private static final class ChallengeCancelledException extends Exception {
@@ -84,8 +88,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 56;
-    private static final String APP_VERSION_NAME = "2.0.23";
+    private static final int APP_VERSION_CODE = 57;
+    private static final String APP_VERSION_NAME = "2.0.24";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -98,6 +102,7 @@ public class MainActivity extends Activity {
     private static final String KEY_PENDING_UPDATE_INSTALL_ID = "pending_update_install_id";
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
     private static final String KEY_SESSION_COOKIE = "session_cookie";
+    private static final String KEY_SEEN_ANNOUNCEMENT_PREFIX = "announcement_seen_";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String TAG = "FamilyLocationNative";
     private static final String UPDATE_APK_NAME = "location-release.apk";
@@ -298,7 +303,75 @@ public class MainActivity extends Activity {
         card.addView(submit, blockParams(10));
         card.addView(back, blockParams(0));
         setScreen(card, true);
-        setStatus("请先填写邀请码；不确定类型时点“检查邀请码”。");
+        maybeFillClipboardInvite(inviteCode, groupName, groupCode);
+        if (inviteCode.getText().toString().trim().isEmpty()) {
+            setStatus("请先填写邀请码；不确定类型时点“检查邀请码”。");
+        }
+    }
+
+
+    private void maybeFillClipboardInvite(EditText inviteCode, EditText groupName, EditText groupCode) {
+        String code = inviteCodeFromClipboardText(readClipboardText());
+        if (code.isEmpty()) {
+            return;
+        }
+        runBackground(() -> {
+            try {
+                getJson("api/invite_check.php?code=" + urlEncode(code));
+                runUi(() -> {
+                    if (!inviteCode.getText().toString().trim().isEmpty()) {
+                        return;
+                    }
+                    inviteCode.setText(code);
+                    checkInviteCode(code, groupName, groupCode);
+                    showPopupDialog(
+                        "检测到邀请码",
+                        new String[][] {new String[] {"剪贴板", "剪贴板中存在可用邀请码，已自动填入注册表单。"}},
+                        "我知道了",
+                        null,
+                        null
+                    );
+                });
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private String readClipboardText() {
+        try {
+            ClipboardManager manager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (manager == null || !manager.hasPrimaryClip()) {
+                return "";
+            }
+            ClipData clip = manager.getPrimaryClip();
+            if (clip == null || clip.getItemCount() == 0 || clip.getItemAt(0) == null) {
+                return "";
+            }
+            CharSequence text = clip.getItemAt(0).coerceToText(this);
+            return text == null ? "" : text.toString();
+        } catch (Exception exception) {
+            return "";
+        }
+    }
+
+    private String inviteCodeFromClipboardText(String text) {
+        String raw = text == null ? "" : text.trim();
+        if (raw.isEmpty()) {
+            return "";
+        }
+        if (raw.matches("^[0-9a-zA-Z]{1,255}$")) {
+            return sanitizeInviteCode(raw);
+        }
+        Matcher matcher = Pattern.compile("(?:邀请码|invite(?:\\s*code)?)[^0-9a-zA-Z]{0,12}([0-9a-zA-Z]{1,255})", Pattern.CASE_INSENSITIVE).matcher(raw);
+        return matcher.find() ? sanitizeInviteCode(matcher.group(1)) : "";
+    }
+
+    private String sanitizeInviteCode(String value) {
+        if (value == null) {
+            return "";
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT).replaceAll("[^0-9a-z]", "");
+        return normalized.length() > 255 ? normalized.substring(0, 255) : normalized;
     }
 
     private CheckBox termsCheckBox() {
@@ -656,6 +729,7 @@ public class MainActivity extends Activity {
         setScreen(card, false);
         requestStartupPermissions();
         syncKeepAliveService();
+        maybeAutoShowAnnouncement();
     }
 
     private String currentUserRole() {
@@ -1177,6 +1251,57 @@ public class MainActivity extends Activity {
     }
 
 
+
+    private void maybeAutoShowAnnouncement() {
+        runBackground(() -> {
+            try {
+                JSONObject response = getJson("api/announcement.php");
+                JSONObject announcement = response.optJSONObject("announcement");
+                if (announcement == null || !shouldAutoShowAnnouncement(announcement)) {
+                    return;
+                }
+                runUi(() -> showAnnouncementPopup(announcement, true));
+            } catch (Exception exception) {
+                Log.w(TAG, "Auto announcement check failed: " + exception.getMessage());
+            }
+        });
+    }
+
+    private boolean shouldAutoShowAnnouncement(JSONObject announcement) {
+        String key = announcementSeenKey(announcement);
+        return !key.isEmpty() && prefs().getInt(key, 0) != 1;
+    }
+
+    private String announcementSeenKey(JSONObject announcement) {
+        int id = announcement == null ? 0 : announcement.optInt("id", 0);
+        int version = announcement == null ? 0 : announcement.optInt("version", 0);
+        if (id <= 0 || version <= 0) {
+            return "";
+        }
+        return KEY_SEEN_ANNOUNCEMENT_PREFIX + id + "_" + version;
+    }
+
+    private void showAnnouncementPopup(JSONObject announcement, boolean markSeen) {
+        if (announcement == null) {
+            return;
+        }
+        String bodyText = announcement.optString("body", "").trim();
+        if (bodyText.isEmpty()) {
+            return;
+        }
+        String key = markSeen ? announcementSeenKey(announcement) : "";
+        if (!key.isEmpty()) {
+            prefs().edit().putInt(key, 1).apply();
+        }
+        showPopupDialog(
+            announcement.optString("title", "公告"),
+            new String[][] {new String[] {"公告内容", bodyText + "\n\n更新时间：" + announcement.optString("updated_at", "")}},
+            "知道了",
+            null,
+            null
+        );
+    }
+
     private void showAnnouncement() {
         currentTab = TAB_POSITION;
         LinearLayout card = screen("公告");
@@ -1231,6 +1356,10 @@ public class MainActivity extends Activity {
         TextView row = infoPanel(builder.toString(), true);
         row.setTag("dynamic");
         content.addView(row, blockParams(10));
+        Button popup = secondaryButton("弹窗查看公告");
+        popup.setTag("dynamic");
+        popup.setOnClickListener(view -> showAnnouncementPopup(announcement, false));
+        content.addView(popup, blockParams(10));
         setStatus("公告已加载");
     }
 

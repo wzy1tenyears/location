@@ -83,8 +83,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 51;
-    private static final String APP_VERSION_NAME = "2.0.18";
+    private static final int APP_VERSION_CODE = 52;
+    private static final String APP_VERSION_NAME = "2.0.19";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -1832,6 +1832,14 @@ public class MainActivity extends Activity {
 
         Button saveEnvironment = primaryButton("保存环境数据设置");
         saveEnvironment.setOnClickListener(view -> saveEnvironmentConsent(environmentConsent.isChecked()));
+        Button uploadEnvironment = secondaryButton("立即上报环境信息");
+        uploadEnvironment.setOnClickListener(view -> {
+            if (!environmentConsent.isChecked()) {
+                setStatus("请先勾选并保存环境数据设置。");
+                return;
+            }
+            uploadEnvironmentReport(true, true, true);
+        });
         Button saveContinuous = secondaryButton("保存持续上报设置");
         saveContinuous.setOnClickListener(view -> saveGuardianContinuous(guardianContinuous.isChecked()));
         Button changePassword = secondaryButton("修改密码");
@@ -1850,7 +1858,8 @@ public class MainActivity extends Activity {
         card.addView(themeButton("dark", "暗色"), blockParams(14));
         card.addView(sectionTitle("隐私与上报"), blockParams(8));
         card.addView(environmentConsent, blockParams(8));
-        card.addView(saveEnvironment, blockParams(12));
+        card.addView(saveEnvironment, blockParams(8));
+        card.addView(uploadEnvironment, blockParams(12));
         card.addView(guardianContinuous, blockParams(8));
         card.addView(saveContinuous, blockParams(14));
         card.addView(sectionTitle("账号安全"), blockParams(8));
@@ -2945,8 +2954,18 @@ public class MainActivity extends Activity {
     }
 
     private void uploadEnvironmentReport(boolean includeInstalledApps, boolean force) {
+        uploadEnvironmentReport(includeInstalledApps, force, false);
+    }
+
+    private void uploadEnvironmentReport(boolean includeInstalledApps, boolean force, boolean showResult) {
         if (currentUser == null || !currentUser.optBoolean("environment_data_consent", false)) {
+            if (showResult) {
+                setStatus("环境上报未开启，请先保存环境数据设置。");
+            }
             return;
+        }
+        if (showResult) {
+            setStatus("正在上报环境信息");
         }
         runBackground(() -> {
             try {
@@ -2954,11 +2973,18 @@ public class MainActivity extends Activity {
                     .put("force", force)
                     .put("report", buildDeviceEnvironmentReport(includeInstalledApps));
                 postJson("api/environment_report.php", payload);
+                if (showResult) {
+                    runUi(() -> setStatus("环境信息已上报。"));
+                }
             } catch (Exception exception) {
                 Log.w(TAG, "Environment report failed: " + exception.getMessage());
+                if (showResult) {
+                    runUi(() -> setStatus("环境信息上报失败：" + exception.getMessage()));
+                }
             }
         });
     }
+
 
     private boolean isAdbEnabled() {
         try {

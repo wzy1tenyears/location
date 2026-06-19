@@ -3,6 +3,7 @@ package com.familylocation.admin;
 import android.app.Activity;
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -62,11 +63,13 @@ public class AdminActivity extends Activity {
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
+    private static final String KEY_PENDING_UPDATE_INSTALL_ID = "pending_update_install_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "";
-    private static final int APP_VERSION_CODE = 43;
-    private static final String APP_VERSION_NAME = "2.0.10";
+    private static final int APP_VERSION_CODE = 44;
+    private static final String APP_VERSION_NAME = "2.0.11";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
+    private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
     private static final String TAG = "FamilyLocationAdmin";
     private static final long MAX_CACHE_BYTES = 50L * 1024L * 1024L;
@@ -97,6 +100,11 @@ public class AdminActivity extends Activity {
             serverUrl = DEFAULT_SERVER_URL;
         }
         prefs().edit().putString(KEY_SERVER_URL, normalizeUrl(serverUrl)).apply();
+        if (!prefs().getString(KEY_SESSION_COOKIE, "").trim().isEmpty()) {
+            showStartupLoading();
+            checkStoredSessionThenUpdate();
+            return;
+        }
         showLogin("");
     }
 
@@ -107,6 +115,25 @@ public class AdminActivity extends Activity {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M && !isDarkMode()) {
             window.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         }
+    }
+
+
+    private void showStartupLoading() {
+        LinearLayout card = screen("后台");
+        card.addView(infoPanel("正在检查登录状态和后台更新。"), blockParams(12));
+        setScreen(card, true);
+        setStatus("");
+    }
+
+    private void checkStoredSessionThenUpdate() {
+        runBackground(() -> {
+            try {
+                checkAdminUpdateThenShowHome(ADMIN_UPDATE_PATH);
+            } catch (Exception exception) {
+                prefs().edit().remove(KEY_SESSION_COOKIE).apply();
+                runUi(() -> showLogin("登录已失效，请重新登录。"));
+            }
+        });
     }
 
     private void showLogin(String message) {
@@ -276,7 +303,8 @@ public class AdminActivity extends Activity {
             request.setDescription("正在下载 " + ADMIN_APK_NAME);
             request.setMimeType("application/vnd.android.package-archive");
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, ADMIN_APK_NAME);
+            prepareUpdateApkFile();
+            request.setDestinationUri(Uri.fromFile(updateApkFile()));
             request.addRequestHeader("User-Agent", USER_AGENT);
             String cookies = cookieHeader();
             if (!cookies.trim().isEmpty()) {
@@ -288,6 +316,8 @@ public class AdminActivity extends Activity {
             }
             registerUpdateReceiver();
             updateDownloadId = manager.enqueue(request);
+            pendingInstallDownloadId = -1L;
+            prefs().edit().remove(KEY_PENDING_UPDATE_INSTALL_ID).apply();
             installingDownloadId = -1L;
             startUpdateInstallPolling(updateDownloadId, 0);
             setStatus("后台 APK 已开始下载，完成后会自动打开安装确认。");
@@ -359,24 +389,42 @@ public class AdminActivity extends Activity {
             String status = downloadStatus(manager, downloadId);
             if (!"success".equals(status)) {
                 installingDownloadId = -1L;
-                throw new IllegalStateException(status);
+                if (status.startsWith("failed:")) {
+                    throw new IllegalStateException("后台 APK 下载失败，错误码：" + status.substring("failed:".length()));
+                }
+                throw new IllegalStateException("后台 APK 仍在下载中，请稍后再试。");
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
                 pendingInstallDownloadId = downloadId;
+                prefs().edit().putLong(KEY_PENDING_UPDATE_INSTALL_ID, downloadId).apply();
                 installingDownloadId = -1L;
                 setStatus("后台 APK 已下载，请允许本应用安装未知应用后返回安装。");
                 startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
                 return;
             }
-            Uri apkUri = manager.getUriForDownloadedFile(downloadId);
-            if (apkUri == null) {
+            File apkFile = updateApkFile();
+            if (!apkFile.isFile()) {
                 throw new IllegalStateException("无法读取已下载 APK。");
             }
-            Intent install = new Intent(Intent.ACTION_VIEW)
+            Uri apkUri = updateApkUri();
+            Intent install = new Intent(Intent.ACTION_INSTALL_PACKAGE)
                 .setDataAndType(apkUri, "application/vnd.android.package-archive")
                 .putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+                .putExtra(Intent.EXTRA_RETURN_RESULT, false)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            startActivity(install);
+            install.setClipData(ClipData.newRawUri(ADMIN_APK_NAME, apkUri));
+            try {
+                startActivity(install);
+            } catch (Exception firstException) {
+                Intent fallback = new Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(apkUri, "application/vnd.android.package-archive")
+                    .putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                fallback.setClipData(ClipData.newRawUri(ADMIN_APK_NAME, apkUri));
+                startActivity(fallback);
+            }
+            pendingInstallDownloadId = -1L;
+            prefs().edit().remove(KEY_PENDING_UPDATE_INSTALL_ID).apply();
             setStatus("下载完成，请确认安装新版本后台。");
         } catch (Exception exception) {
             installingDownloadId = -1L;
@@ -384,6 +432,28 @@ public class AdminActivity extends Activity {
         }
     }
 
+    private void prepareUpdateApkFile() throws Exception {
+        File apkFile = updateApkFile();
+        File parent = apkFile.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            throw new IllegalStateException("无法创建更新缓存目录。");
+        }
+        if (apkFile.exists() && !apkFile.delete()) {
+            throw new IllegalStateException("无法清理旧更新包，请手动删除后重试。");
+        }
+    }
+
+    private File updateApkFile() {
+        File directory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (directory == null) {
+            directory = new File(getFilesDir(), "updates");
+        }
+        return new File(directory, ADMIN_APK_NAME);
+    }
+
+    private Uri updateApkUri() {
+        return Uri.parse("content://" + getPackageName() + ".apkprovider/" + ADMIN_APK_NAME);
+    }
 
     private String downloadStatus(DownloadManager manager, long downloadId) {
         android.database.Cursor cursor = null;
@@ -417,6 +487,10 @@ public class AdminActivity extends Activity {
     protected void onResume() {
         super.onResume();
         activityForeground = true;
+        long savedPendingInstall = prefs().getLong(KEY_PENDING_UPDATE_INSTALL_ID, -1L);
+        if (pendingInstallDownloadId <= 0 && savedPendingInstall > 0) {
+            pendingInstallDownloadId = savedPendingInstall;
+        }
         if (pendingInstallDownloadId > 0 && (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || getPackageManager().canRequestPackageInstalls())) {
             long downloadId = pendingInstallDownloadId;
             pendingInstallDownloadId = -1L;
@@ -584,6 +658,7 @@ public class AdminActivity extends Activity {
 
     private void showAppChallengeWebView(String challengeUrl, Runnable onBack) {
         LinearLayout card = challengeCard();
+        card.addView(infoPanel("请在下方完成 Cloudflare 质询，完成后后台 App 会自动继续。"), blockParams(10));
         if (!canLoadForegroundWebView()) {
             if (onBack != null) {
                 onBack.run();
@@ -616,7 +691,7 @@ public class AdminActivity extends Activity {
         });
         challengeView.loadUrl(challengeUrl);
         LinearLayout.LayoutParams params = blockParams(10);
-        params.height = dp(430);
+        params.height = dp(120);
         card.addView(challengeView, params);
         Button back = secondaryButton("返回修改密码");
         back.setOnClickListener(view -> {

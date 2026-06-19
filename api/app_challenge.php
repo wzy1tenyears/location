@@ -169,6 +169,7 @@ function render_challenge_page(string $challengeId, string $message): never
     $safeId = htmlspecialchars($challengeId, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
     $safeMessage = htmlspecialchars($message, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
     $safeSiteKey = htmlspecialchars($siteKey, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    $verified = app_challenge_is_verified($challengeId);
 
     header('Content-Type: text/html; charset=utf-8');
     echo <<<HTML
@@ -177,40 +178,49 @@ function render_challenge_page(string $challengeId, string $message): never
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>App 安全验证</title>
+  <title>CF Challenge</title>
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
   <style>
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f8fb; color: #172033; }
-    main { width: min(92vw, 420px); padding: 28px; border-radius: 24px; background: #fff; box-shadow: 0 18px 50px rgba(31, 45, 61, .14); }
-    h1 { margin: 0 0 10px; font-size: 22px; }
-    p { margin: 0 0 18px; line-height: 1.65; color: #5c667a; }
-    .message { margin: 0 0 16px; padding: 12px 14px; border-radius: 14px; background: #eef6ff; color: #1d4ed8; }
-    button { width: 100%; margin-top: 18px; border: 0; border-radius: 999px; padding: 13px 18px; background: #2563eb; color: #fff; font-size: 16px; font-weight: 700; }
+    html, body { margin: 0; width: 100%; min-height: 100%; background: transparent; overflow: hidden; }
+    body { display: grid; place-items: center; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    form { margin: 0; padding: 0; display: grid; place-items: center; }
+    .message { display: none; }
   </style>
 </head>
-<body>
-  <main>
-    <h1>App 安全验证</h1>
-    <p>请完成 Cloudflare 验证。完成后回到 App，App 会自动继续。</p>
+<body data-message="{$safeMessage}">
 HTML;
-    if ($safeMessage !== '') {
-        echo '<div class="message">' . $safeMessage . '</div>';
+    if ($verified) {
+        echo '</body></html>';
+        exit;
     }
     if ($safeSiteKey === '') {
-        echo '<p>服务器未配置 Turnstile Site Key，请联系管理员。</p></main></body></html>';
+        echo '<div class="message">Turnstile Site Key is not configured.</div></body></html>';
         exit;
     }
     echo <<<HTML
-    <form method="post" action="app_challenge.php">
-      <input type="hidden" name="challenge_id" value="{$safeId}">
-      <div class="cf-turnstile" data-sitekey="{$safeSiteKey}"></div>
-      <button type="submit">完成验证</button>
-    </form>
-  </main>
+  <form method="post" action="app_challenge.php">
+    <input type="hidden" name="challenge_id" value="{$safeId}">
+    <div class="cf-turnstile" data-sitekey="{$safeSiteKey}" data-callback="onTurnstileSuccess"></div>
+  </form>
+  <script>
+    function onTurnstileSuccess() { document.forms[0].submit(); }
+  </script>
 </body>
 </html>
 HTML;
     exit;
+}
+
+
+function app_challenge_is_verified(string $challengeId): bool
+{
+    if (!preg_match('/^[a-f0-9]{32}$/i', $challengeId)) {
+        return false;
+    }
+    $stmt = db()->prepare('SELECT verified_at FROM app_challenges WHERE id = ? LIMIT 1');
+    $stmt->execute([$challengeId]);
+    $challenge = $stmt->fetch();
+    return is_array($challenge) && !empty($challenge['verified_at']);
 }
 
 function app_challenge_public_url(string $challengeId): string

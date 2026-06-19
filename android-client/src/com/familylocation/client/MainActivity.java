@@ -7,6 +7,7 @@ import android.app.AlarmManager;
 import android.app.Dialog;
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
 import android.content.Context;
 import android.content.IntentFilter;
 import android.content.Intent;
@@ -83,8 +84,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 52;
-    private static final String APP_VERSION_NAME = "2.0.19";
+    private static final int APP_VERSION_CODE = 54;
+    private static final String APP_VERSION_NAME = "2.0.21";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -94,10 +95,12 @@ public class MainActivity extends Activity {
     private static final String KEY_CROSS_GROUP_SYNC = "cross_group_sync_json";
     private static final String KEY_REPORT_INTERVAL_SECONDS = "report_interval_seconds";
     private static final String KEY_THEME_MODE = "theme_mode";
+    private static final String KEY_PENDING_UPDATE_INSTALL_ID = "pending_update_install_id";
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
     private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String TAG = "FamilyLocationNative";
+    private static final String UPDATE_APK_NAME = "location-release.apk";
     private static final long MAX_CACHE_BYTES = 50L * 1024L * 1024L;
     private static final int TAB_POSITION = 0;
     private static final int TAB_GROUPS = 1;
@@ -572,6 +575,7 @@ public class MainActivity extends Activity {
 
     private void showAppChallengeWebView(String challengeUrl, Runnable onBack) {
         LinearLayout card = challengeCard();
+        card.addView(infoPanel("请在下方完成 Cloudflare 质询，完成后 App 会自动继续。", false), blockParams(10));
         if (!canLoadForegroundWebView()) {
             if (onBack != null) {
                 onBack.run();
@@ -604,7 +608,7 @@ public class MainActivity extends Activity {
         });
         challengeView.loadUrl(challengeUrl);
         LinearLayout.LayoutParams params = blockParams(10);
-        params.height = dp(430);
+        params.height = dp(120);
         card.addView(challengeView, params);
         Button back = secondaryButton("返回修改密码");
         back.setOnClickListener(view -> {
@@ -1064,41 +1068,114 @@ public class MainActivity extends Activity {
         }
 
         String name = location.optString("display_name", location.optString("username", "成员"));
+        String role = location.optString("role_label", "");
         String encryptionMode = location.optString("encryption_mode", "");
         JSONObject diagnostics = location.optJSONObject("address_diagnostics");
         String address = diagnostics == null ? "" : diagnostics.optString("preferred_address", "");
+        boolean unreadable = location.optBoolean("encrypted_unreadable", false);
 
         StringBuilder builder = new StringBuilder()
-            .append(name)
-            .append(" / ")
-            .append(location.optString("role_label", ""))
-            .append("\n时间：")
-            .append(location.optString("created_at", ""));
-
+            .append(name);
+        if (!role.isEmpty()) {
+            builder.append(" / ").append(role);
+        }
+        builder.append("\n时间：").append(location.optString("created_at", ""));
+        String groupName = location.optString("group_name", "");
+        if (!groupName.isEmpty()) {
+            builder.append("\n家庭组：").append(groupName);
+        }
         if (!encryptionMode.isEmpty()) {
             builder.append("\n端到端加密记录：").append(encryptionMode);
-        } else {
+            if (location.optBoolean("p2p_decrypted", false)) {
+                builder.append("（已解密）");
+            }
+            if (unreadable) {
+                builder.append("（当前设备不可读）");
+            }
+        }
+
+        if (!unreadable && hasUsableCoordinates(location)) {
             builder.append("\n坐标：")
                 .append(formatCoordinate(location.optDouble("latitude", 0)))
                 .append(", ")
                 .append(formatCoordinate(location.optDouble("longitude", 0)));
-            if (location.has("accuracy") && !location.isNull("accuracy")) {
-                builder.append("\n精度：").append(formatCoordinate(location.optDouble("accuracy", 0))).append(" 米");
-            }
         }
+        appendHistoryNumeric(builder, location, "altitude", "高度", "m", 0);
+        appendHistoryNumeric(builder, location, "accuracy", "精度", "m", 0);
+        appendHistoryNumeric(builder, location, "heading", "方向", "°", 0);
+        appendHistoryNumeric(builder, location, "speed", "速度", " m/s", 2);
 
         if (!address.isEmpty()) {
             builder.append("\n地址：").append(address);
         }
-        if (location.optBoolean("address_mismatch", false)) {
-            builder.append("\n提示：定位/IP/WebRTC 地址不一致");
+        builder.append("\n地址状态：").append(historyAddressStatus(location, diagnostics));
+        if (diagnostics != null && !diagnostics.optString("checked_at", "").isEmpty()) {
+            builder.append("\n对比时间：").append(diagnostics.optString("checked_at", ""));
         }
+        appendHistoryAddressSources(builder, diagnostics);
 
         TextView row = infoPanel(builder.toString(), true);
         attachMapOpenAction(row, location, name);
         row.setTag("dynamic");
         content.addView(row, blockParams(8));
     }
+
+    private void appendHistoryNumeric(StringBuilder builder, JSONObject location, String key, String label, String suffix, int decimals) {
+        if (!location.has(key) || location.isNull(key)) {
+            return;
+        }
+        double value = location.optDouble(key, Double.NaN);
+        if (!Double.isFinite(value)) {
+            return;
+        }
+        String formatted = decimals <= 0
+            ? String.valueOf(Math.round(value))
+            : String.format(java.util.Locale.US, "%." + decimals + "f", value);
+        builder.append("\n").append(label).append("：").append(formatted).append(suffix);
+    }
+
+    private String historyAddressStatus(JSONObject location, JSONObject diagnostics) {
+        if (diagnostics == null || diagnostics.optJSONArray("sources") == null) {
+            return location != null && location.optBoolean("address_mismatch", false)
+                ? "位置信息不一致"
+                : "位置信息一致或无法完整判断";
+        }
+        if (diagnostics.optBoolean("mismatch", false)) {
+            return "位置信息不一致";
+        }
+        if (diagnostics.optBoolean("mobile_ip_uncertain", false)) {
+            return "移动网络出口省份不一致";
+        }
+        return "位置信息一致或无法完整判断";
+    }
+
+    private void appendHistoryAddressSources(StringBuilder builder, JSONObject diagnostics) {
+        if (diagnostics == null) {
+            return;
+        }
+        JSONArray sources = diagnostics.optJSONArray("sources");
+        if (sources == null || sources.length() == 0) {
+            return;
+        }
+        builder.append("\n地址来源：");
+        for (int index = 0; index < sources.length(); index += 1) {
+            JSONObject source = sources.optJSONObject(index);
+            if (source == null) {
+                continue;
+            }
+            String label = source.optString("name", source.optString("type", "地址"));
+            String sourceAddress = source.optString("address", source.optString("ip", "未知"));
+            String city = source.optString("city", "");
+            builder.append("\n- ").append(label).append("：").append(sourceAddress);
+            if (!city.isEmpty()) {
+                builder.append(" / 城市：").append(city);
+            }
+            if (source.optBoolean("mobile_network_uncertain", false)) {
+                builder.append(" / 移动网络出口省份不一致");
+            }
+        }
+    }
+
 
     private void showAnnouncement() {
         currentTab = TAB_POSITION;
@@ -3497,7 +3574,8 @@ public class MainActivity extends Activity {
             request.setDescription("正在下载 location-release.apk");
             request.setMimeType("application/vnd.android.package-archive");
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "location-release.apk");
+            prepareUpdateApkFile();
+            request.setDestinationUri(Uri.fromFile(updateApkFile()));
             request.addRequestHeader("User-Agent", "loc-app/" + APP_VERSION_NAME);
             DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
             if (manager == null) {
@@ -3505,6 +3583,8 @@ public class MainActivity extends Activity {
             }
             registerUpdateReceiver();
             updateDownloadId = manager.enqueue(request);
+            pendingInstallDownloadId = -1L;
+            prefs().edit().remove(KEY_PENDING_UPDATE_INSTALL_ID).apply();
             installingDownloadId = -1L;
             startUpdateInstallPolling(updateDownloadId, 0);
             setStatus("新版 APK 已开始下载，完成后会自动打开安装确认。");
@@ -3583,25 +3663,64 @@ public class MainActivity extends Activity {
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
                 pendingInstallDownloadId = downloadId;
+                prefs().edit().putLong(KEY_PENDING_UPDATE_INSTALL_ID, downloadId).apply();
                 installingDownloadId = -1L;
                 setStatus("APK 已下载，请允许本应用安装未知应用后返回安装。");
                 startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
                 return;
             }
-            Uri apkUri = manager.getUriForDownloadedFile(downloadId);
-            if (apkUri == null) {
+            File apkFile = updateApkFile();
+            if (!apkFile.isFile()) {
                 throw new IllegalStateException("无法读取已下载 APK。");
             }
-            Intent install = new Intent(Intent.ACTION_VIEW)
+            Uri apkUri = updateApkUri();
+            Intent install = new Intent(Intent.ACTION_INSTALL_PACKAGE)
                 .setDataAndType(apkUri, "application/vnd.android.package-archive")
                 .putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+                .putExtra(Intent.EXTRA_RETURN_RESULT, false)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            startActivity(install);
+            install.setClipData(ClipData.newRawUri(UPDATE_APK_NAME, apkUri));
+            try {
+                startActivity(install);
+            } catch (Exception firstException) {
+                Intent fallback = new Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(apkUri, "application/vnd.android.package-archive")
+                    .putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                fallback.setClipData(ClipData.newRawUri(UPDATE_APK_NAME, apkUri));
+                startActivity(fallback);
+            }
+            pendingInstallDownloadId = -1L;
+            prefs().edit().remove(KEY_PENDING_UPDATE_INSTALL_ID).apply();
             setStatus("下载完成，请确认安装新版本。");
         } catch (Exception exception) {
             installingDownloadId = -1L;
             setStatus("打开安装失败：" + exception.getMessage());
         }
+    }
+
+
+    private void prepareUpdateApkFile() throws Exception {
+        File apkFile = updateApkFile();
+        File parent = apkFile.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            throw new IllegalStateException("无法创建更新缓存目录。");
+        }
+        if (apkFile.exists() && !apkFile.delete()) {
+            throw new IllegalStateException("无法清理旧更新包，请手动删除后重试。");
+        }
+    }
+
+    private File updateApkFile() {
+        File directory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (directory == null) {
+            directory = new File(getFilesDir(), "updates");
+        }
+        return new File(directory, UPDATE_APK_NAME);
+    }
+
+    private Uri updateApkUri() {
+        return Uri.parse("content://" + getPackageName() + ".apkprovider/" + UPDATE_APK_NAME);
     }
 
     private String downloadStatus(DownloadManager manager, long downloadId) {
@@ -3634,6 +3753,10 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         activityForeground = true;
+        long savedPendingInstall = prefs().getLong(KEY_PENDING_UPDATE_INSTALL_ID, -1L);
+        if (pendingInstallDownloadId <= 0 && savedPendingInstall > 0) {
+            pendingInstallDownloadId = savedPendingInstall;
+        }
         if (pendingInstallDownloadId > 0 && (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || getPackageManager().canRequestPackageInstalls())) {
             long downloadId = pendingInstallDownloadId;
             pendingInstallDownloadId = -1L;

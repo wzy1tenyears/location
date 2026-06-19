@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="60"
-    android:versionName="2.0.27"
+    android:versionCode="61"
+    android:versionName="2.0.28"
     package="com.familylocation.client">
 
     <uses-sdk

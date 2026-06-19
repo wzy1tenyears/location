@@ -88,8 +88,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 60;
-    private static final String APP_VERSION_NAME = "2.0.27";
+    private static final int APP_VERSION_CODE = 61;
+    private static final String APP_VERSION_NAME = "2.0.28";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -979,64 +979,43 @@ public class MainActivity extends Activity {
 
     private void renderHistoryControls(JSONObject response) {
         JSONArray members = response.optJSONArray("members");
-        if (members != null && members.length() > 1) {
-            content.addView(dynamicSectionTitle("筛选成员"), blockParams(8));
-            Button all = secondaryButton(historyUserId == 0 ? "✓ 全部成员" : "全部成员");
-            all.setTag("dynamic");
-            all.setOnClickListener(view -> {
-                historyUserId = 0;
-                historyPage = 1;
-                loadHistory();
-            });
-            content.addView(all, blockParams(6));
-            for (int index = 0; index < members.length(); index += 1) {
-                JSONObject member = members.optJSONObject(index);
-                if (member == null) {
-                    continue;
-                }
-                int memberId = member.optInt("user_id", 0);
-                String label = memberLabel(member);
-                Button memberButton = secondaryButton((memberId == historyUserId ? "✓ " : "") + label);
-                memberButton.setTag("dynamic");
-                memberButton.setOnClickListener(view -> {
-                    historyUserId = memberId;
-                    historyPage = 1;
-                    loadHistory();
-                });
-                content.addView(memberButton, blockParams(6));
-            }
-        }
-
-        content.addView(dynamicSectionTitle("每页条数"), blockParams(8));
-        int[] sizes = new int[] {20, 50, 100};
-        for (int size : sizes) {
-            Button sizeButton = secondaryButton((historyPageSize == size ? "✓ " : "") + size + " 条");
-            sizeButton.setTag("dynamic");
-            sizeButton.setOnClickListener(view -> {
-                historyPageSize = size;
-                historyPage = 1;
-                loadHistory();
-            });
-            content.addView(sizeButton, blockParams(6));
-        }
-
-        content.addView(dynamicSectionTitle("地图每人条数"), blockParams(8));
-        for (int size : sizes) {
-            Button mapSizeButton = secondaryButton((historyMapPageSize == size ? "✓ " : "") + size + " 条/人");
-            mapSizeButton.setTag("dynamic");
-            mapSizeButton.setOnClickListener(view -> {
-                historyMapPageSize = size;
-                loadHistory();
-            });
-            content.addView(mapSizeButton, blockParams(6));
-        }
-
         JSONObject pagination = response.optJSONObject("pagination");
         int total = pagination == null ? 0 : pagination.optInt("total", 0);
         int totalPages = pagination == null ? 1 : Math.max(1, pagination.optInt("total_pages", 1));
-        TextView pageInfo = infoPanel("共 " + total + " 条，当前第 " + historyPage + " / " + totalPages + " 页，地图每人 " + historyMapPageSize + " 条", true);
-        pageInfo.setTag("dynamic");
+        String memberText = historyMemberLabel(members, historyUserId);
+
+        content.addView(dynamicSectionTitle("筛选与分页"), blockParams(8));
+        TextView pageInfo = infoPanel(
+            "成员：" + memberText
+                + "\n每页：" + historyPageSize + " 条 / 地图每人：" + historyMapPageSize + " 条"
+                + "\n共 " + total + " 条，当前第 " + historyPage + " / " + totalPages + " 页",
+            true
+        );
         content.addView(pageInfo, blockParams(8));
+
+        Button memberButton = secondaryButton("成员：" + memberText);
+        memberButton.setTag("dynamic");
+        memberButton.setEnabled(members != null && members.length() > 1);
+        memberButton.setOnClickListener(view -> showHistoryMemberPicker(members));
+        Button pageSizeButton = secondaryButton("每页 " + historyPageSize + " 条");
+        pageSizeButton.setTag("dynamic");
+        pageSizeButton.setOnClickListener(view -> showHistorySizePicker("每页历史条数", historyPageSize, size -> {
+            historyPageSize = size;
+            historyPage = 1;
+            loadHistory();
+        }));
+        content.addView(buttonRow(memberButton, pageSizeButton), blockParams(8));
+
+        Button mapSizeButton = secondaryButton("地图每人 " + historyMapPageSize + " 条");
+        mapSizeButton.setTag("dynamic");
+        mapSizeButton.setOnClickListener(view -> showHistorySizePicker("地图每人历史条数", historyMapPageSize, size -> {
+            historyMapPageSize = size;
+            loadHistory();
+        }));
+        Button refresh = secondaryButton("刷新");
+        refresh.setTag("dynamic");
+        refresh.setOnClickListener(view -> loadHistory());
+        content.addView(buttonRow(mapSizeButton, refresh), blockParams(10));
 
         LinearLayout pager = new LinearLayout(this);
         pager.setTag("dynamic");
@@ -1063,7 +1042,6 @@ public class MainActivity extends Activity {
         pager.addView(next, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         content.addView(pager, blockParams(10));
     }
-
     private String memberLabel(JSONObject member) {
         String name = member.optString("display_name", member.optString("username", "成员"));
         String role = member.optString("role_label", "");
@@ -1071,6 +1049,111 @@ public class MainActivity extends Activity {
     }
 
 
+
+
+    private String historyMemberLabel(JSONArray members, int userId) {
+        if (userId <= 0 || members == null) {
+            return "全部成员";
+        }
+        for (int index = 0; index < members.length(); index += 1) {
+            JSONObject member = members.optJSONObject(index);
+            if (member != null && member.optInt("user_id", 0) == userId) {
+                return memberLabel(member);
+            }
+        }
+        return "全部成员";
+    }
+    private interface HistorySizeAction {
+        void apply(int size);
+    }
+
+    private void showHistoryMemberPicker(JSONArray members) {
+        if (members == null || members.length() <= 1) {
+            setStatus("当前只有一个成员，无需筛选。");
+            return;
+        }
+        Dialog dialog = choiceDialog("筛选成员");
+        LinearLayout body = choiceDialogBody(dialog);
+        addHistoryMemberChoice(body, dialog, "全部成员", 0);
+        for (int index = 0; index < members.length(); index += 1) {
+            JSONObject member = members.optJSONObject(index);
+            if (member == null) {
+                continue;
+            }
+            int memberId = member.optInt("user_id", 0);
+            addHistoryMemberChoice(body, dialog, memberLabel(member), memberId);
+        }
+        showChoiceDialog(dialog, body);
+    }
+    private void addHistoryMemberChoice(LinearLayout body, Dialog dialog, String label, int memberId) {
+        Button button = secondaryButton((memberId == historyUserId ? "✓ " : "") + label);
+        button.setOnClickListener(view -> {
+            dialog.dismiss();
+            historyUserId = Math.max(0, memberId);
+            historyPage = 1;
+            loadHistory();
+        });
+        body.addView(button, blockParams(8));
+    }
+    private void showHistorySizePicker(String title, int currentSize, HistorySizeAction action) {
+        Dialog dialog = choiceDialog(title);
+        LinearLayout body = choiceDialogBody(dialog);
+        int[] sizes = new int[] {20, 50, 100};
+        for (int size : sizes) {
+            Button button = secondaryButton((currentSize == size ? "✓ " : "") + size + " 条");
+            button.setOnClickListener(view -> {
+                dialog.dismiss();
+                action.apply(size);
+            });
+            body.addView(button, blockParams(8));
+        }
+        showChoiceDialog(dialog, body);
+    }
+    private Dialog choiceDialog(String title) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout card = new LinearLayout(this);
+        card.setId(0x4c0c001);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(cardBackground());
+        card.setPadding(dp(16), dp(16), dp(16), dp(8));
+        TextView heading = sectionTitle(title);
+        card.addView(heading, blockParams(12));
+        dialog.setContentView(card);
+        return dialog;
+    }
+
+    private LinearLayout choiceDialogBody(Dialog dialog) {
+        LinearLayout card = dialog.findViewById(0x4c0c001);
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        card.addView(body, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return body;
+    }
+
+    private void showChoiceDialog(Dialog dialog, LinearLayout body) {
+        ScrollView scroll = new ScrollView(this);
+        ViewGroup parent = body.getParent() instanceof ViewGroup ? (ViewGroup) body.getParent() : null;
+        if (parent != null) {
+            parent.removeView(body);
+            scroll.addView(body, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            parent.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Math.min(dp(420), (int) (getResources().getDisplayMetrics().heightPixels * 0.56f))));
+            Button close = secondaryButton("关闭");
+            close.setOnClickListener(view -> dialog.dismiss());
+            parent.addView(close, blockParams(0));
+        }
+        dialog.show();
+        Window shownWindow = dialog.getWindow();
+        if (shownWindow != null) {
+            shownWindow.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            shownWindow.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            android.view.WindowManager.LayoutParams params = shownWindow.getAttributes();
+            params.dimAmount = 0.58f;
+            shownWindow.setAttributes(params);
+            int width = Math.min(getResources().getDisplayMetrics().widthPixels - dp(44), dp(520));
+            shownWindow.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+    }
     private void appendHistoryMap(JSONArray mapHistory) {
         JSONArray records = displayableLocations(mapHistory);
         if (records.length() == 0) {

@@ -83,8 +83,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 50;
-    private static final String APP_VERSION_NAME = "2.0.17";
+    private static final int APP_VERSION_CODE = 51;
+    private static final String APP_VERSION_NAME = "2.0.18";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -113,6 +113,7 @@ public class MainActivity extends Activity {
     private String selectedGroupName = "";
     private int historyPage = 1;
     private int historyPageSize = 20;
+    private int historyMapPageSize = 20;
     private int historyUserId = 0;
     private int currentTab = TAB_POSITION;
     private boolean reporting;
@@ -833,11 +834,12 @@ public class MainActivity extends Activity {
 
         final int page = Math.max(1, historyPage);
         final int perPage = normalizedHistoryPageSize(historyPageSize);
+        final int mapPerUser = normalizedHistoryPageSize(historyMapPageSize);
         final int userId = Math.max(0, historyUserId);
         setStatus("正在加载历史记录");
         runBackground(() -> {
             try {
-                String endpoint = "api/history.php?page=" + page + "&per_page=" + perPage;
+                String endpoint = "api/history.php?page=" + page + "&per_page=" + perPage + "&map_per_user=" + mapPerUser;
                 if (userId > 0) {
                     endpoint += "&user_id=" + userId;
                 }
@@ -867,6 +869,7 @@ public class MainActivity extends Activity {
         if (pagination != null) {
             historyPage = Math.max(1, pagination.optInt("page", historyPage));
             historyPageSize = normalizedHistoryPageSize(pagination.optInt("per_page", historyPageSize));
+            historyMapPageSize = normalizedHistoryPageSize(pagination.optInt("map_per_user", historyMapPageSize));
             historyUserId = Math.max(0, pagination.optInt("user_id", historyUserId));
         }
 
@@ -941,10 +944,21 @@ public class MainActivity extends Activity {
             content.addView(sizeButton, blockParams(6));
         }
 
+        content.addView(dynamicSectionTitle("地图每人条数"), blockParams(8));
+        for (int size : sizes) {
+            Button mapSizeButton = secondaryButton((historyMapPageSize == size ? "✓ " : "") + size + " 条/人");
+            mapSizeButton.setTag("dynamic");
+            mapSizeButton.setOnClickListener(view -> {
+                historyMapPageSize = size;
+                loadHistory();
+            });
+            content.addView(mapSizeButton, blockParams(6));
+        }
+
         JSONObject pagination = response.optJSONObject("pagination");
         int total = pagination == null ? 0 : pagination.optInt("total", 0);
         int totalPages = pagination == null ? 1 : Math.max(1, pagination.optInt("total_pages", 1));
-        TextView pageInfo = infoPanel("共 " + total + " 条，当前第 " + historyPage + " / " + totalPages + " 页", true);
+        TextView pageInfo = infoPanel("共 " + total + " 条，当前第 " + historyPage + " / " + totalPages + " 页，地图每人 " + historyMapPageSize + " 条", true);
         pageInfo.setTag("dynamic");
         content.addView(pageInfo, blockParams(8));
 

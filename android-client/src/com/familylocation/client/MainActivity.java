@@ -88,8 +88,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 58;
-    private static final String APP_VERSION_NAME = "2.0.25";
+    private static final int APP_VERSION_CODE = 59;
+    private static final String APP_VERSION_NAME = "2.0.26";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -2075,6 +2075,7 @@ public class MainActivity extends Activity {
         environmentConsent.setText("同意上传环境诊断数据");
         environmentConsent.setTextColor(colorText());
         environmentConsent.setChecked(currentUser != null && currentUser.optBoolean("environment_data_consent", false));
+        boolean guardian = "guardian".equals(currentUserRole());
         CheckBox guardianContinuous = new CheckBox(this);
         guardianContinuous.setText("监护端持续上报当前位置");
         guardianContinuous.setTextColor(colorText());
@@ -2105,8 +2106,10 @@ public class MainActivity extends Activity {
         card.addView(environmentConsent, blockParams(8));
         card.addView(saveEnvironment, blockParams(8));
         card.addView(uploadEnvironment, blockParams(12));
-        card.addView(guardianContinuous, blockParams(8));
-        card.addView(saveContinuous, blockParams(14));
+        if (guardian) {
+            card.addView(guardianContinuous, blockParams(8));
+            card.addView(saveContinuous, blockParams(14));
+        }
         card.addView(sectionTitle("账号安全"), blockParams(8));
         card.addView(compactInfoPanel("验证当前密码后修改，修改成功后继续保持当前登录状态。", false), blockParams(8));
         card.addView(changePassword, blockParams(14));
@@ -2180,6 +2183,10 @@ public class MainActivity extends Activity {
     }
 
     private void saveGuardianContinuous(boolean enabled) {
+        if (!"guardian".equals(currentUserRole())) {
+            setStatus("只有监护端可以开启持续上报。");
+            return;
+        }
         String groupName = selectedGroupName.isEmpty() && currentUser != null ? currentUser.optString("group_name", "") : selectedGroupName;
         SharedPreferences.Editor editor = prefs().edit()
             .putBoolean(KEY_GUARDIAN_CONTINUOUS_REPORTING, enabled);

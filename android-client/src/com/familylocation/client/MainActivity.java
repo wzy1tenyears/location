@@ -83,8 +83,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 49;
-    private static final String APP_VERSION_NAME = "2.0.16";
+    private static final int APP_VERSION_CODE = 50;
+    private static final String APP_VERSION_NAME = "2.0.17";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -93,6 +93,7 @@ public class MainActivity extends Activity {
     private static final String KEY_GROUP_SESSIONS = "group_sessions_json";
     private static final String KEY_CROSS_GROUP_SYNC = "cross_group_sync_json";
     private static final String KEY_REPORT_INTERVAL_SECONDS = "report_interval_seconds";
+    private static final String KEY_THEME_MODE = "theme_mode";
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
     private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
@@ -1830,6 +1831,9 @@ public class MainActivity extends Activity {
 
         card.addView(sectionTitle("账号信息"), blockParams(8));
         card.addView(account, blockParams(14));
+        card.addView(sectionTitle("界面主题"), blockParams(8));
+        card.addView(themeButtonRow("system", "跟随系统", "light", "明亮"), blockParams(8));
+        card.addView(themeButton("dark", "暗色"), blockParams(14));
         card.addView(sectionTitle("隐私与上报"), blockParams(8));
         card.addView(environmentConsent, blockParams(8));
         card.addView(saveEnvironment, blockParams(12));
@@ -1843,6 +1847,47 @@ public class MainActivity extends Activity {
         card.addView(logout, blockParams(0));
         setScreen(card, false);
         setStatus("当前上报间隔：" + prefs().getInt(KEY_REPORT_INTERVAL_SECONDS, 300) + " 秒");
+    }
+
+    private Button themeButton(String mode, String label) {
+        String current = themeMode();
+        Button button = secondaryButton((mode.equals(current) ? "✓ " : "") + label);
+        button.setOnClickListener(view -> applyThemeMode(mode));
+        return button;
+    }
+
+    private LinearLayout themeButtonRow(String leftMode, String leftLabel, String rightMode, String rightLabel) {
+        return buttonRow(themeButton(leftMode, leftLabel), themeButton(rightMode, rightLabel));
+    }
+
+    private void applyThemeMode(String mode) {
+        String normalized = normalizeThemeMode(mode);
+        prefs().edit().putString(KEY_THEME_MODE, normalized).apply();
+        configureWindow();
+        showSettings();
+        setStatus("主题已切换：" + themeModeLabel(normalized));
+    }
+
+    private String themeMode() {
+        return normalizeThemeMode(prefs().getString(KEY_THEME_MODE, "system"));
+    }
+
+    private String normalizeThemeMode(String mode) {
+        String value = mode == null ? "" : mode.trim();
+        if ("light".equals(value) || "dark".equals(value)) {
+            return value;
+        }
+        return "system";
+    }
+
+    private String themeModeLabel(String mode) {
+        if ("light".equals(mode)) {
+            return "明亮";
+        }
+        if ("dark".equals(mode)) {
+            return "暗色";
+        }
+        return "跟随系统";
     }
 
     private void saveEnvironmentConsent(boolean enabled) {
@@ -4140,9 +4185,17 @@ public class MainActivity extends Activity {
     }
 
     private boolean isDarkMode() {
-        int mode = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
-        return mode == Configuration.UI_MODE_NIGHT_YES;
+        String mode = themeMode();
+        if ("dark".equals(mode)) {
+            return true;
+        }
+        if ("light".equals(mode)) {
+            return false;
+        }
+        int systemMode = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        return systemMode == Configuration.UI_MODE_NIGHT_YES;
     }
+
 
     private String formatCoordinate(double value) {
         return String.format(java.util.Locale.US, "%.6f", value);

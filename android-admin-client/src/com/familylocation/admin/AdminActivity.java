@@ -1,6 +1,7 @@
 package com.familylocation.admin;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
@@ -66,8 +67,8 @@ public class AdminActivity extends Activity {
     private static final String KEY_PENDING_UPDATE_INSTALL_ID = "pending_update_install_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "";
-    private static final int APP_VERSION_CODE = 47;
-    private static final String APP_VERSION_NAME = "2.0.14";
+    private static final int APP_VERSION_CODE = 48;
+    private static final String APP_VERSION_NAME = "2.0.15";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
@@ -760,11 +761,11 @@ public class AdminActivity extends Activity {
                 int locationId = location.optInt("id", 0);
                 if (locationId > 0) {
                     Button deleteLocation = secondaryButton("删除这条定位");
-                    deleteLocation.setOnClickListener(view -> {
+                    deleteLocation.setOnClickListener(view -> confirmDanger("确定删除这条定位记录？", () -> {
                         JSONObject payload = adminPayload("delete_location");
                         putJson(payload, "location_id", locationId);
                         postAdminAction(payload, redirectPath);
-                    });
+                    }));
                     card.addView(deleteLocation, blockParams(12));
                 }
             }
@@ -931,11 +932,11 @@ public class AdminActivity extends Activity {
                     postAdminAction(payload, redirectPath);
                 });
                 Button delete = secondaryButton("删除家庭组");
-                delete.setOnClickListener(view -> {
+                delete.setOnClickListener(view -> confirmDanger("确定删除这个家庭组？组内定位记录会一并清除。", () -> {
                     JSONObject payload = adminPayload("delete_family_group");
                     putJson(payload, "group_id", groupId);
                     postAdminAction(payload, redirectPath);
-                });
+                }));
                 card.addView(buttonRow(save, owner), blockParams(8));
                 card.addView(delete, blockParams(12));
             }
@@ -1076,11 +1077,11 @@ public class AdminActivity extends Activity {
                     postAdminAction(payload, redirectPath);
                 });
                 Button delete = secondaryButton("删除邀请码");
-                delete.setOnClickListener(view -> {
+                delete.setOnClickListener(view -> confirmDanger("确定删除这个邀请码？", () -> {
                     JSONObject payload = adminPayload("delete_invite_code");
                     putJson(payload, "invite_id", inviteId);
                     postAdminAction(payload, redirectPath);
-                });
+                }));
                 card.addView(editNote, blockParams(6));
                 card.addView(buttonRow(saveNote, toggle), blockParams(8));
                 card.addView(delete, blockParams(10));
@@ -1186,11 +1187,11 @@ public class AdminActivity extends Activity {
                     postAdminAction(payload, redirectPath);
                 });
                 Button deleteUser = secondaryButton("删除账号");
-                deleteUser.setOnClickListener(view -> {
+                deleteUser.setOnClickListener(view -> confirmDanger("确定删除这个账号？相关设备、定位和工单会随账号清理。", () -> {
                     JSONObject payload = adminPayload("delete_user");
                     putJson(payload, "user_id", userId);
                     postAdminAction(payload, redirectPath);
-                });
+                }));
                 card.addView(buttonRow(save, toggle), blockParams(8));
                 card.addView(newPassword, blockParams(6));
                 card.addView(buttonRow(reset, deleteUser), blockParams(10));
@@ -1241,11 +1242,11 @@ public class AdminActivity extends Activity {
                 postAdminAction(payload, redirectPath);
             });
             Button delete = secondaryButton("删除成员关系");
-            delete.setOnClickListener(view -> {
+            delete.setOnClickListener(view -> confirmDanger("确定删除这条成员关系？", () -> {
                 JSONObject payload = adminPayload("delete_membership");
                 putJson(payload, "membership_id", membershipId);
                 postAdminAction(payload, redirectPath);
-            });
+            }));
             card.addView(infoPanel("成员关系 #" + membershipId + "：" + membership.optString("group_name", "") + " / " + membership.optString("role_label", "")), blockParams(6));
             card.addView(groupName, blockParams(6));
             card.addView(monitor, blockParams(6));
@@ -1272,11 +1273,11 @@ public class AdminActivity extends Activity {
                 + "\n首次：" + device.optString("first_seen_at", "")
                 + " / 最近：" + device.optString("last_seen_at", "")), blockParams(6));
             Button delete = secondaryButton("解绑设备");
-            delete.setOnClickListener(view -> {
+            delete.setOnClickListener(view -> confirmDanger("确定解绑这台设备？", () -> {
                 JSONObject payload = adminPayload("delete_user_device");
                 putJson(payload, "device_id", deviceId);
                 postAdminAction(payload, redirectPath);
-            });
+            }));
             card.addView(delete, blockParams(8));
             shown += 1;
             if (shown >= 3) {
@@ -1369,6 +1370,19 @@ public class AdminActivity extends Activity {
         card.addView(back, blockParams(0));
         setScreen(card, false);
         setStatus("");
+    }
+
+
+    private void confirmDanger(String message, Runnable action) {
+        if (action == null) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("确认操作")
+            .setMessage(message)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("确认", (dialog, which) -> action.run())
+            .show();
     }
 
     private void postAdminAction(JSONObject payload, String redirectPath) {

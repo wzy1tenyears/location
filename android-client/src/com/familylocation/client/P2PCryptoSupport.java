@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.util.Base64;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.math.BigInteger;
@@ -15,6 +16,7 @@ import java.security.SecureRandom;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.RSAPublicKeySpec;
 import java.util.Arrays;
 
 import javax.crypto.Cipher;
@@ -55,6 +57,67 @@ final class P2PCryptoSupport {
             .put("action", "consent")
             .put("group_name", groupName)
             .put("consent", consent));
+    }
+
+    static JSONObject enableGroup(JsonTransport transport, Context context, String groupName) throws Exception {
+        publishKey(transport, context, groupName);
+        JSONObject current = status(transport, groupName);
+        if (!current.optBoolean("is_owner", false)) {
+            throw new IllegalStateException("只有家庭组管理员可以开启端到端加密。");
+        }
+        if (current.optBoolean("enabled", false)) {
+            throw new IllegalStateException("该家庭组已经开启端到端加密。");
+        }
+        JSONArray members = current.optJSONArray("members");
+        if (members == null || members.length() == 0) {
+            throw new IllegalStateException("家庭组成员为空，无法开启端到端加密。");
+        }
+        for (int index = 0; index < members.length(); index += 1) {
+            JSONObject member = members.optJSONObject(index);
+            if (member == null || !member.optBoolean("consented", false) || member.optJSONObject("public_key_jwk") == null) {
+                throw new IllegalStateException("需要组内所有成员先同意并发布公钥。");
+            }
+        }
+        byte[] rawGroupKey = new byte[32];
+        RANDOM.nextBytes(rawGroupKey);
+        int keyVersion = (int) (System.currentTimeMillis() / 1000L);
+        return transport.postJson("api/p2p_crypto.php", new JSONObject()
+            .put("action", "enable_group")
+            .put("group_name", groupName)
+            .put("key_version", keyVersion)
+            .put("wrapped_keys", wrappedKeysForMembers(members, rawGroupKey)));
+    }
+
+    static JSONObject distributeGroupKey(JsonTransport transport, Context context, String groupName) throws Exception {
+        JSONObject current = status(transport, groupName);
+        if (!current.optBoolean("is_owner", false)) {
+            throw new IllegalStateException("只有家庭组管理员可以补发端到端加密组密钥。");
+        }
+        if (!current.optBoolean("enabled", false)) {
+            throw new IllegalStateException("当前家庭组尚未开启端到端加密。");
+        }
+        JSONArray members = current.optJSONArray("members");
+        JSONArray targets = new JSONArray();
+        if (members != null) {
+            for (int index = 0; index < members.length(); index += 1) {
+                JSONObject member = members.optJSONObject(index);
+                if (member != null
+                    && member.optBoolean("needs_key_distribution", false)
+                    && member.optBoolean("consented", false)
+                    && member.optJSONObject("public_key_jwk") != null) {
+                    targets.put(member);
+                }
+            }
+        }
+        if (targets.length() == 0) {
+            return current;
+        }
+        byte[] rawGroupKey = groupKey(transport, context, groupName);
+        return transport.postJson("api/p2p_crypto.php", new JSONObject()
+            .put("action", "distribute_group_key")
+            .put("group_name", groupName)
+            .put("key_version", current.optInt("key_version", 0))
+            .put("wrapped_keys", wrappedKeysForMembers(targets, rawGroupKey)));
     }
 
     static JSONObject encryptedReportOrNull(JsonTransport transport, Context context, String groupName, JSONObject plainPayload) throws Exception {
@@ -138,6 +201,40 @@ final class P2PCryptoSupport {
             .put("alg", "AES-GCM")
             .put("iv", base64(iv))
             .put("ciphertext", base64(ciphertext));
+    }
+
+    private static JSONObject wrappedKeysForMembers(JSONArray members, byte[] rawGroupKey) throws Exception {
+        JSONObject wrappedKeys = new JSONObject();
+        for (int index = 0; index < members.length(); index += 1) {
+            JSONObject member = members.optJSONObject(index);
+            if (member == null) {
+                continue;
+            }
+            JSONObject publicJwk = member.optJSONObject("public_key_jwk");
+            if (publicJwk == null) {
+                continue;
+            }
+            int userId = member.optInt("user_id", 0);
+            if (userId <= 0) {
+                continue;
+            }
+            wrappedKeys.put(String.valueOf(userId), wrapGroupKey(publicJwk, rawGroupKey));
+        }
+        return wrappedKeys;
+    }
+
+    private static String wrapGroupKey(JSONObject publicJwk, byte[] rawGroupKey) throws Exception {
+        byte[] modulus = Base64.decode(publicJwk.optString("n", ""), Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+        byte[] exponent = Base64.decode(publicJwk.optString("e", ""), Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+        RSAPublicKeySpec spec = new RSAPublicKeySpec(new BigInteger(1, modulus), new BigInteger(1, exponent));
+        java.security.PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(spec);
+        Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");
+        cipher.init(
+            Cipher.ENCRYPT_MODE,
+            publicKey,
+            new OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT)
+        );
+        return base64(cipher.doFinal(rawGroupKey));
     }
 
     private static byte[] unwrapGroupKey(Context context, String wrappedKey) throws Exception {

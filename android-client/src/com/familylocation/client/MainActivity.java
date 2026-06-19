@@ -83,8 +83,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 48;
-    private static final String APP_VERSION_NAME = "2.0.15";
+    private static final int APP_VERSION_CODE = 49;
+    private static final String APP_VERSION_NAME = "2.0.16";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -1714,6 +1714,7 @@ public class MainActivity extends Activity {
         content.addView(summary, blockParams(10));
 
         JSONArray members = response.optJSONArray("members");
+        boolean allMembersReady = members != null && members.length() > 0;
         if (members != null && members.length() > 0) {
             content.addView(dynamicSectionTitle("成员准备状态"), blockParams(8));
             for (int index = 0; index < members.length(); index += 1) {
@@ -1721,6 +1722,8 @@ public class MainActivity extends Activity {
                 if (member == null) {
                     continue;
                 }
+                boolean memberReady = member.optBoolean("consented", false) && member.optBoolean("has_public_key", false);
+                allMembersReady = allMembersReady && memberReady;
                 TextView row = infoPanel(
                     member.optString("display_name", member.optString("username", "成员"))
                         + " / " + member.optString("role_label", "")
@@ -1733,14 +1736,59 @@ public class MainActivity extends Activity {
                 content.addView(row, blockParams(8));
             }
         }
+
+        if (response.optBoolean("is_owner", false) && !response.optBoolean("enabled", false)) {
+            if (allMembersReady) {
+                Button enable = primaryButton("开启端到端加密");
+                enable.setTag("dynamic");
+                enable.setOnClickListener(view -> enableP2PGroup(groupName));
+                content.addView(enable, blockParams(10));
+            } else {
+                TextView hint = infoPanel("等待所有成员同意并发布公钥后，组主即可开启端到端加密。", true);
+                hint.setTag("dynamic");
+                content.addView(hint, blockParams(10));
+            }
+        }
+        if (response.optBoolean("is_owner", false) && response.optBoolean("needs_key_distribution", false)) {
+            Button distribute = primaryButton("补发组密钥");
+            distribute.setTag("dynamic");
+            distribute.setOnClickListener(view -> distributeP2PGroupKey(groupName));
+            content.addView(distribute, blockParams(10));
+        }
         setStatus("端到端加密状态已加载");
     }
+
+
 
     private void consentP2P(String groupName) {
         setStatus("正在发布本机公钥");
         runBackground(() -> {
             try {
                 JSONObject response = P2PCryptoSupport.setConsent(this::postJson, this, groupName, true);
+                runUi(() -> renderP2PStatus(groupName, response));
+            } catch (Exception exception) {
+                runUi(() -> setStatus(exception.getMessage()));
+            }
+        });
+    }
+
+    private void enableP2PGroup(String groupName) {
+        setStatus("正在开启端到端加密");
+        runBackground(() -> {
+            try {
+                JSONObject response = P2PCryptoSupport.enableGroup(this::postJson, this, groupName);
+                runUi(() -> renderP2PStatus(groupName, response));
+            } catch (Exception exception) {
+                runUi(() -> setStatus(exception.getMessage()));
+            }
+        });
+    }
+
+    private void distributeP2PGroupKey(String groupName) {
+        setStatus("正在补发组密钥");
+        runBackground(() -> {
+            try {
+                JSONObject response = P2PCryptoSupport.distributeGroupKey(this::postJson, this, groupName);
                 runUi(() -> renderP2PStatus(groupName, response));
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));

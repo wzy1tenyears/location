@@ -84,8 +84,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 55;
-    private static final String APP_VERSION_NAME = "2.0.22";
+    private static final int APP_VERSION_CODE = 56;
+    private static final String APP_VERSION_NAME = "2.0.23";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -1417,10 +1417,44 @@ public class MainActivity extends Activity {
             Button submit = primaryButton("发送回复");
             submit.setTag("dynamic");
             submit.setOnClickListener(view -> replyTicket(ticketId, reply.getText().toString()));
+            Button close = secondaryButton("关闭工单");
+            close.setTag("dynamic");
+            close.setOnClickListener(view -> confirmCloseTicket(ticketId));
             content.addView(reply, blockParams(10));
-            content.addView(submit, blockParams(8));
+            content.addView(buttonRow(submit, close), blockParams(8));
         }
         setStatus("工单详情已加载");
+    }
+
+    private void confirmCloseTicket(int ticketId) {
+        showPopupDialog(
+            "关闭工单",
+            new String[][] {
+                new String[] {"确认操作", "确定关闭这个工单？关闭后不能继续回复，如需处理请新建工单。"}
+            },
+            "确认关闭",
+            () -> closeTicket(ticketId),
+            "取消"
+        );
+    }
+
+    private void closeTicket(int ticketId) {
+        if (ticketId <= 0) {
+            setStatus("工单信息不完整。");
+            return;
+        }
+        setStatus("正在关闭工单");
+        runBackground(() -> {
+            try {
+                JSONObject payload = new JSONObject()
+                    .put("action", "close")
+                    .put("ticket_id", ticketId);
+                postJson("api/tickets.php", payload);
+                runUi(() -> showTicketThread(ticketId));
+            } catch (Exception exception) {
+                runUi(() -> setStatus(exception.getMessage()));
+            }
+        });
     }
 
     private void replyTicket(int ticketId, String message) {
@@ -1454,7 +1488,7 @@ public class MainActivity extends Activity {
 
         join.setOnClickListener(view -> joinGroupByCode(joinCode.getText().toString()));
         refresh.setOnClickListener(view -> renderGroups());
-        leave.setOnClickListener(view -> leaveCurrentGroup());
+        leave.setOnClickListener(view -> confirmLeaveCurrentGroup());
 
         card.addView(joinCode, blockParams(10));
         card.addView(join, blockParams(10));
@@ -1557,9 +1591,25 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void leaveCurrentGroup() {
+    private void confirmLeaveCurrentGroup() {
         String groupName = selectedGroupName.isEmpty() && currentUser != null ? currentUser.optString("group_name", "") : selectedGroupName;
         if (groupName.isEmpty()) {
+            setStatus("当前没有可退出的家庭组。");
+            return;
+        }
+        showPopupDialog(
+            "退出家庭组",
+            new String[][] {
+                new String[] {"确认操作", "确定退出当前家庭组？退出后将无法继续查看该家庭组位置，除非重新通过组号加入。"}
+            },
+            "确认退出",
+            () -> leaveCurrentGroup(groupName),
+            "取消"
+        );
+    }
+
+    private void leaveCurrentGroup(String groupName) {
+        if (groupName == null || groupName.trim().isEmpty()) {
             setStatus("当前没有可退出的家庭组。");
             return;
         }
@@ -1569,7 +1619,7 @@ public class MainActivity extends Activity {
             try {
                 JSONObject response = postJson("api/groups.php", new JSONObject()
                     .put("action", "leave_group")
-                    .put("group_name", groupName));
+                    .put("group_name", groupName.trim()));
                 applyUserResponse(response);
                 runUi(() -> {
                     renderGroups();

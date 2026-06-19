@@ -12,3 +12,5 @@
 -keep class com.familylocation.admin.R$* { *; }
 
 -dontwarn org.json.**
+-keep public class com.familylocation.admin.AdminApkProvider { public <init>(); }
+-keep public class * extends android.content.ContentProvider

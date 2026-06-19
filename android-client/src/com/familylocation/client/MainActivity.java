@@ -84,8 +84,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 54;
-    private static final String APP_VERSION_NAME = "2.0.21";
+    private static final int APP_VERSION_CODE = 55;
+    private static final String APP_VERSION_NAME = "2.0.22";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";

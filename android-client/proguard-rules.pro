@@ -16,3 +16,6 @@
 }
 
 -dontwarn org.json.**
+
+-keep public class com.familylocation.client.LocalApkProvider { public <init>(); }
+-keep public class * extends android.content.ContentProvider

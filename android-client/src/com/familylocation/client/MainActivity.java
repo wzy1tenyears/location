@@ -88,8 +88,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 57;
-    private static final String APP_VERSION_NAME = "2.0.24";
+    private static final int APP_VERSION_CODE = 58;
+    private static final String APP_VERSION_NAME = "2.0.25";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -2079,13 +2079,6 @@ public class MainActivity extends Activity {
         guardianContinuous.setText("监护端持续上报当前位置");
         guardianContinuous.setTextColor(colorText());
         guardianContinuous.setChecked(guardianContinuousEnabled(selectedGroupName));
-        EditText currentPassword = input("当前密码");
-        currentPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        EditText newPassword = input("新密码");
-        newPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        EditText newPasswordConfirm = input("再次输入新密码");
-        newPasswordConfirm.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-
         Button saveEnvironment = primaryButton("保存环境数据设置");
         saveEnvironment.setOnClickListener(view -> saveEnvironmentConsent(environmentConsent.isChecked()));
         Button uploadEnvironment = secondaryButton("立即上报环境信息");
@@ -2099,11 +2092,7 @@ public class MainActivity extends Activity {
         Button saveContinuous = secondaryButton("保存持续上报设置");
         saveContinuous.setOnClickListener(view -> saveGuardianContinuous(guardianContinuous.isChecked()));
         Button changePassword = secondaryButton("修改密码");
-        changePassword.setOnClickListener(view -> changePassword(
-            currentPassword.getText().toString(),
-            newPassword.getText().toString(),
-            newPasswordConfirm.getText().toString()
-        ));
+        changePassword.setOnClickListener(view -> showPasswordChange());
         Button logout = secondaryButton("退出登录");
         logout.setOnClickListener(view -> logout());
 
@@ -2119,9 +2108,7 @@ public class MainActivity extends Activity {
         card.addView(guardianContinuous, blockParams(8));
         card.addView(saveContinuous, blockParams(14));
         card.addView(sectionTitle("账号安全"), blockParams(8));
-        card.addView(currentPassword, blockParams(10));
-        card.addView(newPassword, blockParams(10));
-        card.addView(newPasswordConfirm, blockParams(10));
+        card.addView(compactInfoPanel("验证当前密码后修改，修改成功后继续保持当前登录状态。", false), blockParams(8));
         card.addView(changePassword, blockParams(14));
         card.addView(logout, blockParams(0));
         setScreen(card, false);
@@ -2204,6 +2191,34 @@ public class MainActivity extends Activity {
         setStatus(enabled ? "监护端持续上报已开启" : "监护端持续上报已关闭");
     }
 
+    private void showPasswordChange() {
+        currentTab = TAB_MINE;
+        LinearLayout card = screen("修改密码");
+        TextView help = compactInfoPanel("请输入当前密码，并设置至少 6 位的新密码。", false);
+        EditText currentPassword = input("当前密码");
+        currentPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        EditText newPassword = input("新密码");
+        newPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        EditText newPasswordConfirm = input("再次输入新密码");
+        newPasswordConfirm.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        Button save = primaryButton("保存新密码");
+        save.setOnClickListener(view -> changePassword(
+            currentPassword.getText().toString(),
+            newPassword.getText().toString(),
+            newPasswordConfirm.getText().toString()
+        ));
+        Button back = secondaryButton("返回我的");
+        back.setOnClickListener(view -> showSettings());
+        card.addView(help, blockParams(12));
+        card.addView(currentPassword, blockParams(10));
+        card.addView(newPassword, blockParams(10));
+        card.addView(newPasswordConfirm, blockParams(12));
+        card.addView(save, blockParams(10));
+        card.addView(back, blockParams(0));
+        setScreen(card, true);
+        setStatus("");
+    }
+
     private void changePassword(String currentPassword, String newPassword, String newPasswordConfirm) {
         if (currentPassword.isEmpty() || newPassword.isEmpty() || newPasswordConfirm.isEmpty()) {
             setStatus("请填写完整密码信息。");
@@ -2225,7 +2240,10 @@ public class MainActivity extends Activity {
                     currentUser = user;
                     persistUserSession(user, response.optInt("report_interval_seconds", prefs().getInt(KEY_REPORT_INTERVAL_SECONDS, 300)));
                 }
-                runUi(() -> setStatus("密码已修改"));
+                runUi(() -> {
+                    showSettings();
+                    setStatus("密码已修改");
+                });
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }

@@ -88,8 +88,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 59;
-    private static final String APP_VERSION_NAME = "2.0.26";
+    private static final int APP_VERSION_CODE = 60;
+    private static final String APP_VERSION_NAME = "2.0.27";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -143,7 +143,6 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         configureWindow();
-        runStartupMaintenance();
 
         String serverUrl = getStoredServerUrl();
         if (serverUrl.isEmpty()) {
@@ -648,7 +647,6 @@ public class MainActivity extends Activity {
 
     private void showAppChallengeWebView(String challengeUrl, Runnable onBack) {
         LinearLayout card = challengeCard();
-        card.addView(infoPanel("请在下方完成 Cloudflare 质询，完成后 App 会自动继续。", false), blockParams(10));
         if (!canLoadForegroundWebView()) {
             if (onBack != null) {
                 onBack.run();
@@ -681,7 +679,7 @@ public class MainActivity extends Activity {
         });
         challengeView.loadUrl(challengeUrl);
         LinearLayout.LayoutParams params = blockParams(10);
-        params.height = dp(120);
+        params.height = dp(220);
         card.addView(challengeView, params);
         Button back = secondaryButton("返回修改密码");
         back.setOnClickListener(view -> {
@@ -3851,6 +3849,17 @@ public class MainActivity extends Activity {
         installDownloadedUpdate(downloadId);
     }
 
+    private void safelyInstallPendingUpdate(long downloadId) {
+        try {
+            installDownloadedUpdate(downloadId);
+        } catch (Exception exception) {
+            pendingInstallDownloadId = -1L;
+            installingDownloadId = -1L;
+            prefs().edit().remove(KEY_PENDING_UPDATE_INSTALL_ID).apply();
+            setStatus("自动拉起安装失败：" + exception.getMessage());
+        }
+    }
+
     private void installDownloadedUpdate(long downloadId) {
         try {
             DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
@@ -3965,7 +3974,7 @@ public class MainActivity extends Activity {
             long downloadId = pendingInstallDownloadId;
             pendingInstallDownloadId = -1L;
             installingDownloadId = -1L;
-            installDownloadedUpdate(downloadId);
+            safelyInstallPendingUpdate(downloadId);
         }
     }
 
@@ -4001,9 +4010,6 @@ public class MainActivity extends Activity {
     private void trimAppCaches() {
         try {
             trimDirectoryToLimit(getCacheDir(), MAX_CACHE_BYTES);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                trimDirectoryToLimit(getCodeCacheDir(), MAX_CACHE_BYTES / 4L);
-            }
         } catch (Exception exception) {
             Log.w(TAG, "Cache trim failed: " + exception.getMessage());
         }

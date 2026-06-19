@@ -67,8 +67,8 @@ public class AdminActivity extends Activity {
     private static final String KEY_PENDING_UPDATE_INSTALL_ID = "pending_update_install_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "";
-    private static final int APP_VERSION_CODE = 49;
-    private static final String APP_VERSION_NAME = "2.0.16";
+    private static final int APP_VERSION_CODE = 50;
+    private static final String APP_VERSION_NAME = "2.0.17";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
@@ -92,7 +92,6 @@ public class AdminActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         configureWindow();
-        runStartupMaintenance();
         String serverUrl = storedServerUrl();
         if (serverUrl.isEmpty()) {
             serverUrl = readAssetServerUrl();
@@ -381,6 +380,17 @@ public class AdminActivity extends Activity {
         installDownloadedUpdate(downloadId);
     }
 
+    private void safelyInstallPendingUpdate(long downloadId) {
+        try {
+            installDownloadedUpdate(downloadId);
+        } catch (Exception exception) {
+            pendingInstallDownloadId = -1L;
+            installingDownloadId = -1L;
+            prefs().edit().remove(KEY_PENDING_UPDATE_INSTALL_ID).apply();
+            setStatus("自动拉起后台安装失败：" + exception.getMessage());
+        }
+    }
+
     private void installDownloadedUpdate(long downloadId) {
         try {
             DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
@@ -496,7 +506,7 @@ public class AdminActivity extends Activity {
             long downloadId = pendingInstallDownloadId;
             pendingInstallDownloadId = -1L;
             installingDownloadId = -1L;
-            installDownloadedUpdate(downloadId);
+            safelyInstallPendingUpdate(downloadId);
         }
     }
 
@@ -532,9 +542,6 @@ public class AdminActivity extends Activity {
     private void trimAppCaches() {
         try {
             trimDirectoryToLimit(getCacheDir(), MAX_CACHE_BYTES);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                trimDirectoryToLimit(getCodeCacheDir(), MAX_CACHE_BYTES / 4L);
-            }
         } catch (Exception exception) {
             android.util.Log.w(TAG, "Cache trim failed: " + exception.getMessage());
         }
@@ -659,7 +666,6 @@ public class AdminActivity extends Activity {
 
     private void showAppChallengeWebView(String challengeUrl, Runnable onBack) {
         LinearLayout card = challengeCard();
-        card.addView(infoPanel("请在下方完成 Cloudflare 质询，完成后后台 App 会自动继续。"), blockParams(10));
         if (!canLoadForegroundWebView()) {
             if (onBack != null) {
                 onBack.run();
@@ -692,7 +698,7 @@ public class AdminActivity extends Activity {
         });
         challengeView.loadUrl(challengeUrl);
         LinearLayout.LayoutParams params = blockParams(10);
-        params.height = dp(120);
+        params.height = dp(220);
         card.addView(challengeView, params);
         Button back = secondaryButton("返回修改密码");
         back.setOnClickListener(view -> {

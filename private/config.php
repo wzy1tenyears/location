@@ -3,11 +3,11 @@
 declare(strict_types=1);
 
 const APP_NAME = '位置';
-const ANDROID_VERSION_CODE = 59;
-const ANDROID_VERSION_NAME = '2.0.26';
+const ANDROID_VERSION_CODE = 60;
+const ANDROID_VERSION_NAME = '2.0.27';
 const ANDROID_APK_FILENAME = 'location-release.apk';
-const ANDROID_ADMIN_VERSION_CODE = 49;
-const ANDROID_ADMIN_VERSION_NAME = '2.0.16';
+const ANDROID_ADMIN_VERSION_CODE = 50;
+const ANDROID_ADMIN_VERSION_NAME = '2.0.17';
 const ANDROID_ADMIN_APK_FILENAME = 'location-admin-release.apk';
 const ANDROID_ADMIN_FORCE_UPDATE = true;
 const ANDROID_FORCE_UPDATE = true;

@@ -88,8 +88,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 62;
-    private static final String APP_VERSION_NAME = "2.0.29";
+    private static final int APP_VERSION_CODE = 63;
+    private static final String APP_VERSION_NAME = "2.0.30";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -1491,26 +1491,24 @@ public class MainActivity extends Activity {
             if (ticket == null) {
                 continue;
             }
-            Button item = secondaryButton(
-                "#" + ticket.optInt("id", 0)
-                    + " " + ticket.optString("subject", "工单")
-                    + " / " + ticket.optString("status_label", "")
-            );
-            item.setTag("dynamic");
             int ticketId = ticket.optInt("id", 0);
-            item.setOnClickListener(view -> showTicketThread(ticketId));
-            content.addView(item, blockParams(8));
-            TextView summary = infoPanel(
-                "更新时间：" + ticket.optString("updated_at", "")
-                    + "\n最后消息：" + ticket.optString("last_message", "暂无回复"),
+            String updatedAt = ticket.optString("updated_at", ticket.optString("created_at", ""));
+            String lastMessage = ticket.optString("last_message", "暂无回复");
+            TextView item = infoPanel(
+                "#" + ticketId + " " + ticket.optString("subject", "工单")
+                    + "\n状态：" + ticket.optString("status_label", "")
+                    + (updatedAt.isEmpty() ? "" : " / " + updatedAt)
+                    + "\n" + lastMessage,
                 true
             );
-            summary.setTag("dynamic");
-            content.addView(summary, blockParams(10));
+            item.setTag("dynamic");
+            item.setClickable(true);
+            item.setFocusable(true);
+            item.setOnClickListener(view -> showTicketThread(ticketId));
+            content.addView(item, blockParams(8));
         }
         setStatus("工单已加载：" + tickets.length());
     }
-
     private void showCreateTicket() {
         currentTab = TAB_HELP;
         LinearLayout card = screen("新建工单");
@@ -1632,10 +1630,13 @@ public class MainActivity extends Activity {
             close.setOnClickListener(view -> confirmCloseTicket(ticketId));
             content.addView(reply, blockParams(10));
             content.addView(buttonRow(submit, close), blockParams(8));
+        } else {
+            TextView closed = infoPanel("工单已关闭，不能继续回复。如需继续处理，请新建工单。", true);
+            closed.setTag("dynamic");
+            content.addView(closed, blockParams(8));
         }
         setStatus("工单详情已加载");
     }
-
     private void confirmCloseTicket(int ticketId) {
         showPopupDialog(
             "关闭工单",

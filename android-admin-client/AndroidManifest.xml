@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="44"
-    android:versionName="2.0.11"
+    android:versionCode="45"
+    android:versionName="2.0.12"
     package="com.familylocation.admin">
 
     <uses-sdk

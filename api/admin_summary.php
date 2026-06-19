@@ -133,6 +133,31 @@ try {
         return $payload;
     }, $locationsStmt->fetchAll());
 
+    $membershipsStmt = $pdo->query('
+        SELECT
+            ug.id,
+            ug.user_id,
+            ug.group_name,
+            ug.role,
+            u.username,
+            u.display_name
+        FROM user_groups ug
+        INNER JOIN users u ON u.id = ug.user_id
+        ORDER BY ug.group_name ASC, u.username ASC
+        LIMIT 500
+    ');
+    $memberships = array_map(static function (array $membership): array {
+        return [
+            'id' => (int) $membership['id'],
+            'user_id' => (int) $membership['user_id'],
+            'group_name' => (string) $membership['group_name'],
+            'role' => normalize_role((string) $membership['role']),
+            'role_label' => role_label((string) $membership['role']),
+            'username' => (string) $membership['username'],
+            'display_name' => (string) $membership['display_name'],
+        ];
+    }, $membershipsStmt->fetchAll());
+
     $announcementStmt = $pdo->query('SELECT * FROM announcements ORDER BY id DESC LIMIT 1');
     $announcement = $announcementStmt->fetch() ?: null;
     $announcementPayload = $announcement ? [
@@ -202,6 +227,8 @@ try {
         'ok' => true,
         'stats' => $stats,
         'groups' => $groups,
+        'memberships' => $memberships,
+        'security_settings' => security_policy_settings(),
         'users' => $users,
         'locations' => $locations,
         'announcement' => $announcementPayload,

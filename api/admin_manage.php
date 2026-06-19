@@ -32,7 +32,88 @@ try {
     $action = admin_manage_string($data, 'action', 64);
     $message = '';
 
-    if ($action === 'save_announcement') {
+    if ($action === 'update_security_settings') {
+        foreach (app_setting_keys() as $settingKey) {
+            set_app_setting($settingKey, !empty($data[$settingKey]) ? '1' : '0');
+        }
+        $message = '安全策略已保存。';
+    } elseif ($action === 'add_family_group') {
+        $groupName = admin_manage_string($data, 'group_name', 100);
+        if ($groupName === '') {
+            throw new RuntimeException('家庭组名称不能为空。');
+        }
+        create_family_group_record($pdo, $groupName);
+        $message = '家庭组已添加。';
+    } elseif ($action === 'update_family_group') {
+        $groupId = (int) ($data['group_id'] ?? 0);
+        $groupName = admin_manage_string($data, 'group_name', 100);
+        if ($groupId <= 0 || $groupName === '') {
+            throw new RuntimeException('家庭组不存在或名称为空。');
+        }
+        $stmt = $pdo->prepare('SELECT id FROM family_groups WHERE id = ? LIMIT 1');
+        $stmt->execute([$groupId]);
+        if (!$stmt->fetch()) {
+            throw new RuntimeException('家庭组不存在。');
+        }
+        $stmt = $pdo->prepare('UPDATE family_groups SET display_name = ? WHERE id = ?');
+        $stmt->execute([$groupName, $groupId]);
+        $message = '家庭组已更新。';
+    } elseif ($action === 'update_group_owner') {
+        $groupId = (int) ($data['group_id'] ?? 0);
+        $ownerUserId = (int) ($data['owner_user_id'] ?? 0);
+        $stmt = $pdo->prepare('SELECT * FROM family_groups WHERE id = ? LIMIT 1');
+        $stmt->execute([$groupId]);
+        $group = $stmt->fetch();
+        if (!$group) {
+            throw new RuntimeException('家庭组不存在。');
+        }
+        if ($ownerUserId > 0) {
+            $stmt = $pdo->prepare('SELECT id FROM user_groups WHERE user_id = ? AND group_name = ? LIMIT 1');
+            $stmt->execute([$ownerUserId, (string) $group['group_name']]);
+            if (!$stmt->fetch()) {
+                throw new RuntimeException('只能设置组内成员为管理员。');
+            }
+        }
+        $stmt = $pdo->prepare('UPDATE family_groups SET owner_user_id = ? WHERE id = ?');
+        $stmt->execute([$ownerUserId > 0 ? $ownerUserId : null, $groupId]);
+        record_user_log($ownerUserId > 0 ? $ownerUserId : null, (string) $group['group_name'], 'group_owner_update', '后台更改家庭组管理员');
+        $message = '家庭组管理员已更新。';
+    } elseif ($action === 'delete_family_group') {
+        $groupId = (int) ($data['group_id'] ?? 0);
+        $stmt = $pdo->prepare('SELECT * FROM family_groups WHERE id = ? LIMIT 1');
+        $stmt->execute([$groupId]);
+        $group = $stmt->fetch();
+        if (!$group) {
+            throw new RuntimeException('家庭组不存在。');
+        }
+        $groupName = (string) $group['group_name'];
+        $stmt = $pdo->prepare('SELECT DISTINCT user_id FROM user_groups WHERE group_name = ?');
+        $stmt->execute([$groupName]);
+        $affectedUserIds = array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN));
+        $pdo->beginTransaction();
+        $stmt = $pdo->prepare('DELETE FROM latest_group_locations WHERE group_name = ?');
+        $stmt->execute([$groupName]);
+        $stmt = $pdo->prepare('DELETE FROM locations WHERE group_name = ?');
+        $stmt->execute([$groupName]);
+        $stmt = $pdo->prepare('DELETE FROM user_groups WHERE group_name = ?');
+        $stmt->execute([$groupName]);
+        $stmt = $pdo->prepare('DELETE FROM family_groups WHERE id = ?');
+        $stmt->execute([$groupId]);
+        foreach ($affectedUserIds as $affectedUserId) {
+            $stmt = $pdo->prepare('SELECT group_name, role FROM user_groups WHERE user_id = ? ORDER BY group_name ASC, id ASC LIMIT 1');
+            $stmt->execute([$affectedUserId]);
+            $fallbackMembership = $stmt->fetch();
+            if ($fallbackMembership) {
+                $stmt = $pdo->prepare('UPDATE users SET group_name = ?, role = ? WHERE id = ? AND group_name = ?');
+                $stmt->execute([(string) $fallbackMembership['group_name'], (string) $fallbackMembership['role'], $affectedUserId, $groupName]);
+                continue;
+            }
+            $stmt = $pdo->prepare("UPDATE users SET group_name = '', role = 'guardian' WHERE id = ? AND group_name = ?");
+            $stmt->execute([$affectedUserId, $groupName]);
+        }
+        $pdo->commit();
+        $message = '家庭组已删除，组内定位记录已清除。';
+    } elseif ($action === 'save_announcement') {
         $title = admin_manage_string($data, 'title', 120);
         $body = trim((string) ($data['body'] ?? ''));
         $isActive = !empty($data['is_active']) ? 1 : 0;
@@ -67,6 +148,23 @@ try {
         $stmt = $pdo->prepare('INSERT INTO invite_codes (code, note, invite_type, allow_group_owner, max_uses) VALUES (?, ?, ?, ?, ?)');
         $stmt->execute([$code, $note, $inviteType, $allowGroupOwner, $maxUses]);
         $message = '邀请码已添加：' . $code;
+    } elseif ($action === 'update_invite_note') {
+        $inviteId = (int) ($data['invite_id'] ?? 0);
+        $note = admin_manage_string($data, 'note', 120);
+        if ($inviteId <= 0) {
+            throw new RuntimeException('邀请码不存在。');
+        }
+        $stmt = $pdo->prepare('UPDATE invite_codes SET note = ? WHERE id = ?');
+        $stmt->execute([$note, $inviteId]);
+        $message = '邀请码备注已保存。';
+    } elseif ($action === 'delete_invite_code') {
+        $inviteId = (int) ($data['invite_id'] ?? 0);
+        if ($inviteId <= 0) {
+            throw new RuntimeException('邀请码不存在。');
+        }
+        $stmt = $pdo->prepare('DELETE FROM invite_codes WHERE id = ?');
+        $stmt->execute([$inviteId]);
+        $message = '邀请码已删除。';
     } elseif ($action === 'toggle_invite_code') {
         $inviteId = (int) ($data['invite_id'] ?? 0);
         $next = !empty($data['next']) ? 1 : 0;

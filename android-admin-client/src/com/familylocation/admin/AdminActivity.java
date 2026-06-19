@@ -66,8 +66,8 @@ public class AdminActivity extends Activity {
     private static final String KEY_PENDING_UPDATE_INSTALL_ID = "pending_update_install_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "";
-    private static final int APP_VERSION_CODE = 44;
-    private static final String APP_VERSION_NAME = "2.0.11";
+    private static final int APP_VERSION_CODE = 45;
+    private static final String APP_VERSION_NAME = "2.0.12";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
@@ -799,6 +799,10 @@ public class AdminActivity extends Activity {
 
         Button usersManage = primaryButton("账号管理");
         usersManage.setOnClickListener(view -> showUserManager(response, redirectPath));
+        Button groupManage = secondaryButton("家庭组管理");
+        groupManage.setOnClickListener(view -> showGroupManager(response, redirectPath));
+        Button securityManage = secondaryButton("安全策略");
+        securityManage.setOnClickListener(view -> showSecurityManager(response, redirectPath));
         Button announcementManage = secondaryButton("公告管理");
         announcementManage.setOnClickListener(view -> showAnnouncementManager(response, redirectPath));
         Button inviteManage = secondaryButton("邀请码管理");
@@ -812,6 +816,7 @@ public class AdminActivity extends Activity {
         Button relogin = secondaryButton("重新登录");
         relogin.setOnClickListener(view -> showLogin(""));
         card.addView(usersManage, blockParams(10));
+        card.addView(buttonRow(groupManage, securityManage), blockParams(10));
         card.addView(buttonRow(announcementManage, inviteManage), blockParams(10));
         card.addView(buttonRow(ticketManage, checkUpdate), blockParams(10));
         card.addView(refresh, blockParams(10));
@@ -820,6 +825,143 @@ public class AdminActivity extends Activity {
         setStatus("后台数据已加载：" + response.optString("server_time", ""));
     }
 
+
+
+    private void showSecurityManager(JSONObject response, String redirectPath) {
+        LinearLayout card = screen("安全策略");
+        JSONObject settings = response.optJSONObject("security_settings");
+        if (settings == null) {
+            settings = new JSONObject();
+        }
+        CheckBox banRoot = policyCheckBox("拦截 Root 环境", settings.optBoolean("ban_root_users", false));
+        CheckBox banAdb = policyCheckBox("拦截 ADB 调试", settings.optBoolean("ban_adb_users", false));
+        CheckBox banMock = policyCheckBox("拦截模拟定位", settings.optBoolean("ban_fake_location_users", false));
+        CheckBox banAccessibility = policyCheckBox("拦截无障碍风险", settings.optBoolean("ban_accessibility_users", false));
+        CheckBox banCapture = policyCheckBox("拦截抓包环境", settings.optBoolean("ban_packet_capture_users", false));
+        Button save = primaryButton("保存安全策略");
+        save.setOnClickListener(view -> {
+            JSONObject payload = adminPayload("update_security_settings");
+            putJson(payload, "ban_root_users", banRoot.isChecked());
+            putJson(payload, "ban_adb_users", banAdb.isChecked());
+            putJson(payload, "ban_fake_location_users", banMock.isChecked());
+            putJson(payload, "ban_accessibility_users", banAccessibility.isChecked());
+            putJson(payload, "ban_packet_capture_users", banCapture.isChecked());
+            postAdminAction(payload, redirectPath);
+        });
+        Button back = secondaryButton("返回概览");
+        back.setOnClickListener(view -> showAdminDashboard(response, redirectPath));
+        card.addView(infoPanel("安全策略开启后，命中风险的用户会按服务端规则限制登录或上报。调试模式账号不受拦截影响。"), blockParams(12));
+        card.addView(banRoot, blockParams(6));
+        card.addView(banAdb, blockParams(6));
+        card.addView(banMock, blockParams(6));
+        card.addView(banAccessibility, blockParams(6));
+        card.addView(banCapture, blockParams(12));
+        card.addView(save, blockParams(10));
+        card.addView(back, blockParams(0));
+        setScreen(card, false);
+        setStatus("");
+    }
+
+    private CheckBox policyCheckBox(String text, boolean checked) {
+        CheckBox box = new CheckBox(this);
+        box.setText(text);
+        box.setTextColor(colorText());
+        box.setChecked(checked);
+        return box;
+    }
+
+    private void showGroupManager(JSONObject response, String redirectPath) {
+        LinearLayout card = screen("家庭组管理");
+        EditText newGroupName = input("新家庭组显示名称");
+        Button add = primaryButton("添加家庭组");
+        add.setOnClickListener(view -> {
+            JSONObject payload = adminPayload("add_family_group");
+            putJson(payload, "group_name", newGroupName.getText().toString());
+            postAdminAction(payload, redirectPath);
+        });
+        card.addView(newGroupName, blockParams(8));
+        card.addView(add, blockParams(14));
+        JSONArray groups = response.optJSONArray("groups");
+        JSONArray memberships = response.optJSONArray("memberships");
+        card.addView(sectionTitle("现有家庭组"), blockParams(8));
+        if (groups == null || groups.length() == 0) {
+            card.addView(infoPanel("暂无家庭组。"), blockParams(12));
+        } else {
+            for (int index = 0; index < groups.length(); index += 1) {
+                JSONObject group = groups.optJSONObject(index);
+                if (group == null) {
+                    continue;
+                }
+                int groupId = group.optInt("id", 0);
+                String groupName = group.optString("group_name", "");
+                EditText displayName = input("显示名称");
+                displayName.setText(group.optString("display_name", groupName));
+                EditText ownerUserId = input("管理员用户 ID，0 为不指定");
+                ownerUserId.setInputType(InputType.TYPE_CLASS_NUMBER);
+                ownerUserId.setText(String.valueOf(Math.max(0, group.optInt("owner_user_id", 0))));
+                card.addView(sectionTitle(group.optString("display_name", groupName)), blockParams(8));
+                card.addView(infoPanel("标识：" + groupName
+                    + "\n成员：" + group.optInt("member_count")
+                    + " / 邀请码：" + (group.optString("group_code", "").isEmpty() ? "未生成" : group.optString("group_code", ""))
+                    + "\n可选管理员：" + groupMemberSummary(memberships, groupName)), blockParams(8));
+                card.addView(displayName, blockParams(6));
+                card.addView(ownerUserId, blockParams(6));
+                Button save = secondaryButton("保存家庭组");
+                save.setOnClickListener(view -> {
+                    JSONObject payload = adminPayload("update_family_group");
+                    putJson(payload, "group_id", groupId);
+                    putJson(payload, "group_name", displayName.getText().toString());
+                    postAdminAction(payload, redirectPath);
+                });
+                Button owner = secondaryButton("保存管理员");
+                owner.setOnClickListener(view -> {
+                    JSONObject payload = adminPayload("update_group_owner");
+                    putJson(payload, "group_id", groupId);
+                    putJson(payload, "owner_user_id", parseInt(ownerUserId.getText().toString(), 0));
+                    postAdminAction(payload, redirectPath);
+                });
+                Button delete = secondaryButton("删除家庭组");
+                delete.setOnClickListener(view -> {
+                    JSONObject payload = adminPayload("delete_family_group");
+                    putJson(payload, "group_id", groupId);
+                    postAdminAction(payload, redirectPath);
+                });
+                card.addView(buttonRow(save, owner), blockParams(8));
+                card.addView(delete, blockParams(12));
+            }
+        }
+        Button back = secondaryButton("返回概览");
+        back.setOnClickListener(view -> showAdminDashboard(response, redirectPath));
+        card.addView(back, blockParams(0));
+        setScreen(card, false);
+        setStatus("");
+    }
+
+    private String groupMemberSummary(JSONArray memberships, String groupName) {
+        if (memberships == null || groupName == null || groupName.isEmpty()) {
+            return "无";
+        }
+        StringBuilder builder = new StringBuilder();
+        int count = 0;
+        for (int index = 0; index < memberships.length(); index += 1) {
+            JSONObject membership = memberships.optJSONObject(index);
+            if (membership == null || !groupName.equals(membership.optString("group_name", ""))) {
+                continue;
+            }
+            if (builder.length() > 0) {
+                builder.append("；");
+            }
+            builder.append(membership.optInt("user_id"))
+                .append("=")
+                .append(displayName(membership));
+            count += 1;
+            if (count >= 8) {
+                builder.append("；…");
+                break;
+            }
+        }
+        return builder.length() == 0 ? "无" : builder.toString();
+    }
 
     private void showAnnouncementManager(JSONObject response, String redirectPath) {
         LinearLayout card = screen("公告管理");
@@ -907,6 +1049,15 @@ public class AdminActivity extends Activity {
                     + "\n备注：" + invite.optString("note", "")
                     + "\n绑定家庭组：" + (invite.optString("assigned_group_name", "").isEmpty() ? "无" : invite.optString("assigned_group_name", ""));
                 card.addView(infoPanel(line), blockParams(6));
+                EditText editNote = input("编辑备注");
+                editNote.setText(invite.optString("note", ""));
+                Button saveNote = secondaryButton("保存备注");
+                saveNote.setOnClickListener(view -> {
+                    JSONObject payload = adminPayload("update_invite_note");
+                    putJson(payload, "invite_id", inviteId);
+                    putJson(payload, "note", editNote.getText().toString());
+                    postAdminAction(payload, redirectPath);
+                });
                 Button toggle = secondaryButton(enabled ? "停用邀请码" : "启用邀请码");
                 toggle.setOnClickListener(view -> {
                     JSONObject payload = adminPayload("toggle_invite_code");
@@ -914,7 +1065,15 @@ public class AdminActivity extends Activity {
                     putJson(payload, "next", !enabled);
                     postAdminAction(payload, redirectPath);
                 });
-                card.addView(toggle, blockParams(10));
+                Button delete = secondaryButton("删除邀请码");
+                delete.setOnClickListener(view -> {
+                    JSONObject payload = adminPayload("delete_invite_code");
+                    putJson(payload, "invite_id", inviteId);
+                    postAdminAction(payload, redirectPath);
+                });
+                card.addView(editNote, blockParams(6));
+                card.addView(buttonRow(saveNote, toggle), blockParams(8));
+                card.addView(delete, blockParams(10));
             }
         }
         card.addView(back, blockParams(0));

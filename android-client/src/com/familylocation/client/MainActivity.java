@@ -88,8 +88,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 61;
-    private static final String APP_VERSION_NAME = "2.0.28";
+    private static final int APP_VERSION_CODE = 62;
+    private static final String APP_VERSION_NAME = "2.0.29";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -1733,6 +1733,7 @@ public class MainActivity extends Activity {
             String displayName = group.optString("display_name", groupName);
             String groupCode = group.optString("group_code", "");
             boolean selected = groupName.equals(selectedGroupName) || (selectedGroupName.isEmpty() && groupName.equals(currentUser.optString("group_name", "")));
+            boolean owner = group.optInt("owner_user_id", 0) == currentUserId;
             StringBuilder builder = new StringBuilder()
                 .append(selected ? "当前：" : "")
                 .append(displayName)
@@ -1742,11 +1743,14 @@ public class MainActivity extends Activity {
             if (group.optBoolean("p2p_enabled", false)) {
                 builder.append("\n端到端加密：已开启");
             }
+            if (owner) {
+                builder.append("\n管理：可改名、管理成员和端到端加密");
+            }
             TextView row = infoPanel(builder.toString(), true);
             row.setTag("dynamic");
             content.addView(row, blockParams(8));
 
-            Button select = secondaryButton("切换到 " + displayName);
+            Button select = secondaryButton(selected ? "查看当前组" : "切换到 " + displayName);
             select.setTag("dynamic");
             select.setOnClickListener(view -> {
                 selectedGroupName = groupName;
@@ -1754,29 +1758,51 @@ public class MainActivity extends Activity {
                 showHome();
                 refreshLocations();
             });
-            content.addView(select, blockParams(8));
 
-            Button p2p = secondaryButton("端到端加密状态");
-            p2p.setTag("dynamic");
-            p2p.setOnClickListener(view -> showP2PStatus(groupName));
-            content.addView(p2p, blockParams(8));
-
-            if (group.optInt("owner_user_id", 0) == currentUserId) {
-                EditText rename = input("新的家庭组显示名");
-                rename.setText(displayName);
-                rename.setTag("dynamic");
-                Button save = secondaryButton("保存“" + displayName + "”名称");
-                save.setTag("dynamic");
-                int groupId = group.optInt("id", 0);
-                save.setOnClickListener(view -> renameGroup(groupId, rename.getText().toString()));
-                content.addView(rename, blockParams(8));
-                content.addView(save, blockParams(10));
-                appendOwnedGroupMembers(group);
+            Button action = secondaryButton(owner ? "更多操作" : "端到端加密状态");
+            action.setTag("dynamic");
+            if (owner) {
+                action.setOnClickListener(view -> showGroupMoreActions(group));
+            } else {
+                action.setOnClickListener(view -> showP2PStatus(groupName));
             }
+            content.addView(buttonRow(select, action), blockParams(10));
         }
         setStatus("家庭组已加载：" + groups.length());
     }
+    private void showGroupMoreActions(JSONObject group) {
+        currentTab = TAB_GROUPS;
+        String groupName = group.optString("group_name", "");
+        String displayName = group.optString("display_name", groupName);
+        int groupId = group.optInt("id", 0);
+        LinearLayout card = screen(displayName + " 更多操作");
+        String groupCode = group.optString("group_code", "");
+        card.addView(infoPanel(
+            "组名：" + groupName
+                + "\n组号：" + (groupCode.isEmpty() ? "未生成" : groupCode)
+                + "\n身份：" + group.optString("role_label", ""),
+            false
+        ), blockParams(12));
 
+        card.addView(sectionTitle("家庭组名称"), blockParams(8));
+        EditText rename = input("新的家庭组显示名");
+        rename.setText(displayName);
+        Button save = primaryButton("保存名称");
+        save.setOnClickListener(view -> renameGroup(groupId, rename.getText().toString()));
+        card.addView(rename, blockParams(8));
+        card.addView(save, blockParams(12));
+
+        Button p2p = secondaryButton("端到端加密状态");
+        p2p.setOnClickListener(view -> showP2PStatus(groupName));
+        card.addView(p2p, blockParams(14));
+
+        setScreen(card, false);
+        appendOwnedGroupMembers(group);
+        Button back = secondaryButton("返回家庭组管理");
+        back.setOnClickListener(view -> showGroups());
+        card.addView(back, blockParams(0));
+        setStatus("正在管理：" + displayName);
+    }
     private void joinGroupByCode(String groupCode) {
         String code = groupCode.trim().toLowerCase(java.util.Locale.US);
         if (!code.matches("^[0-9a-z]{6}$")) {
@@ -1857,7 +1883,7 @@ public class MainActivity extends Activity {
                     .put("group_name", value));
                 applyUserResponse(response);
                 runUi(() -> {
-                    renderGroups();
+                    showGroups();
                     setStatus("家庭组名称已保存");
                 });
             } catch (Exception exception) {
@@ -1931,7 +1957,7 @@ public class MainActivity extends Activity {
                     .put("target_user_id", memberId));
                 applyUserResponse(response);
                 runUi(() -> {
-                    renderGroups();
+                    showGroups();
                     setStatus("\u6210\u5458\u5df2\u79fb\u51fa\u5bb6\u5ead\u7ec4");
                 });
             } catch (Exception exception) {

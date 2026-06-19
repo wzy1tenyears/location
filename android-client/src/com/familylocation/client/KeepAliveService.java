@@ -51,7 +51,7 @@ public class KeepAliveService extends Service {
     private static final int DEFAULT_REPORT_INTERVAL_SECONDS = 300;
     private static final int NOTIFICATION_ID = 10001;
     private static final String TAG = "位置服务";
-    private static final String USER_AGENT = "loc-app/2.0.0";
+    private static final String USER_AGENT = "loc-app/2.0.15";
 
     private Handler handler;
     private HandlerThread workerThread;
@@ -437,6 +437,20 @@ public class KeepAliveService extends Service {
 
                     if (location.hasSpeed()) {
                         body.put("speed", location.getSpeed());
+                    }
+
+                    body.put("location_provider", location.getProvider());
+                    body.put("location_time", String.valueOf(location.getTime()));
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        if (location.hasVerticalAccuracy()) {
+                            body.put("vertical_accuracy", location.getVerticalAccuracyMeters());
+                        }
+                        if (location.hasBearingAccuracy()) {
+                            body.put("bearing_accuracy", location.getBearingAccuracyDegrees());
+                        }
+                        if (location.hasSpeedAccuracy()) {
+                            body.put("speed_accuracy", location.getSpeedAccuracyMetersPerSecond());
+                        }
                     }
 
                     JSONObject encryptedBody = P2PCryptoSupport.encryptedReportOrNull(

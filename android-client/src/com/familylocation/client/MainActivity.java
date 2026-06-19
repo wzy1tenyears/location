@@ -2,11 +2,17 @@ package com.familylocation.client;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.ActivityManager;
+import android.app.AlarmManager;
 import android.app.Dialog;
 import android.app.DownloadManager;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.IntentFilter;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
@@ -22,6 +28,8 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.os.StatFs;
 import android.provider.Settings;
 import android.text.InputType;
 import android.text.SpannableString;
@@ -33,6 +41,14 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.view.Window;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -55,24 +71,37 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class MainActivity extends Activity {
+    private static final class ChallengeCancelledException extends Exception {
+    }
+
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 33;
-    private static final String APP_VERSION_NAME = "2.0.0";
+    private static final int APP_VERSION_CODE = 48;
+    private static final String APP_VERSION_NAME = "2.0.15";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
     private static final String KEY_GROUP_NAME = "group_name";
     private static final String KEY_GUARDIAN_CONTINUOUS_REPORTING = "guardian_continuous_reporting";
     private static final String KEY_GROUP_SESSIONS = "group_sessions_json";
+    private static final String KEY_CROSS_GROUP_SYNC = "cross_group_sync_json";
     private static final String KEY_REPORT_INTERVAL_SECONDS = "report_interval_seconds";
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
     private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String TAG = "FamilyLocationNative";
+    private static final long MAX_CACHE_BYTES = 50L * 1024L * 1024L;
+    private static final int TAB_POSITION = 0;
+    private static final int TAB_GROUPS = 1;
+    private static final int TAB_HELP = 2;
+    private static final int TAB_MINE = 3;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private LinearLayout content;
     private TextView statusView;
@@ -84,12 +113,27 @@ public class MainActivity extends Activity {
     private int historyPage = 1;
     private int historyPageSize = 20;
     private int historyUserId = 0;
+    private int currentTab = TAB_POSITION;
     private boolean reporting;
+    private long updateDownloadId = -1L;
+    private long pendingInstallDownloadId = -1L;
+    private long installingDownloadId = -1L;
+    private BroadcastReceiver updateReceiver;
+    private final List<WebView> managedWebViews = new ArrayList<>();
+    private volatile boolean activityForeground;
+    private boolean batteryOptimizationPromptShown;
+    private boolean exactAlarmPromptShown;
+    private volatile int challengeGeneration;
+    private volatile boolean challengeCancelled;
+    private String loginDraftUsername = "";
+    private String loginDraftPassword = "";
+    private boolean loginDraftTerms;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         configureWindow();
+        runStartupMaintenance();
 
         String serverUrl = getStoredServerUrl();
         if (serverUrl.isEmpty()) {
@@ -148,6 +192,7 @@ public class MainActivity extends Activity {
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
                 runUi(this::showHome);
+                uploadEnvironmentReport(false, false);
                 refreshLocations();
             } catch (Exception exception) {
                 runUi(this::showLogin);
@@ -187,6 +232,9 @@ public class MainActivity extends Activity {
         EditText password = input("密码");
         password.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         CheckBox terms = termsCheckBox();
+        username.setText(loginDraftUsername);
+        password.setText(loginDraftPassword);
+        terms.setChecked(loginDraftTerms);
 
         Button login = primaryButton("登录");
         login.setOnClickListener(view -> login(username.getText().toString(), password.getText().toString(), terms.isChecked()));
@@ -260,7 +308,6 @@ public class MainActivity extends Activity {
         terms.setHighlightColor(Color.TRANSPARENT);
         terms.setLinkTextColor(Color.rgb(13, 95, 84));
         terms.setTextColor(colorText());
-        terms.setChecked(true);
         return terms;
     }
 
@@ -409,6 +456,7 @@ public class MainActivity extends Activity {
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
                 runUi(this::showHome);
+                uploadEnvironmentReport(false, false);
                 refreshLocations();
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
@@ -426,6 +474,9 @@ public class MainActivity extends Activity {
             return;
         }
 
+        loginDraftUsername = username.trim();
+        loginDraftPassword = password;
+        loginDraftTerms = termsAccepted;
         setStatus("正在登录");
         runBackground(() -> {
             try {
@@ -446,7 +497,10 @@ public class MainActivity extends Activity {
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
                 runUi(this::showHome);
+                uploadEnvironmentReport(false, false);
                 refreshLocations();
+            } catch (ChallengeCancelledException exception) {
+                runUi(() -> setStatus(""));
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }
@@ -466,14 +520,17 @@ public class MainActivity extends Activity {
             throw new IllegalStateException("Cloudflare 质询初始化失败。");
         }
 
-        runUi(() -> {
-            setStatus("请在打开的浏览器完成 Cloudflare 质询，完成后回到 App。");
-            openExternalUrl(challengeUrl);
-        });
+        int generation = challengeGeneration + 1;
+        challengeGeneration = generation;
+        challengeCancelled = false;
+        runUi(() -> showAppChallengeWebView(challengeUrl, () -> cancelAppChallenge(generation)));
 
         long deadline = System.currentTimeMillis() + 300000L;
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(2500L);
+            if (isChallengeCancelled(generation)) {
+                throw new ChallengeCancelledException();
+            }
             JSONObject poll = getJson("api/app_challenge.php?id=" + urlEncode(challengeId) + "&secret=" + urlEncode(challengeSecret));
             if (poll.optBoolean("verified", false)) {
                 String token = poll.optString("app_challenge_token", "");
@@ -481,56 +538,277 @@ public class MainActivity extends Activity {
                     return token;
                 }
             }
-            runUi(() -> setStatus("等待 Cloudflare 质询完成……"));
         }
 
         throw new IllegalStateException("Cloudflare 质询超时，请重新登录。");
     }
 
-    private void openExternalUrl(String url) {
-        try {
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-        } catch (Exception exception) {
-            setStatus("无法打开浏览器完成 Cloudflare 质询：" + exception.getMessage());
+    private void cancelAppChallenge(int generation) {
+        challengeCancelled = true;
+        if (challengeGeneration == generation) {
+            challengeGeneration += 1;
         }
+        destroyManagedWebViews();
+        showLoginWithMessage("");
     }
 
+    private boolean isChallengeCancelled(int generation) {
+        return challengeCancelled || challengeGeneration != generation;
+    }
+
+    private LinearLayout challengeCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(10), dp(10), dp(10), dp(10));
+        card.setBackground(cardBackground());
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            card.setElevation(dp(4));
+        }
+        statusView = null;
+        return card;
+    }
+
+    private void showAppChallengeWebView(String challengeUrl, Runnable onBack) {
+        LinearLayout card = challengeCard();
+        if (!canLoadForegroundWebView()) {
+            if (onBack != null) {
+                onBack.run();
+            }
+            return;
+        }
+        WebView challengeView = managedWebView();
+        WebSettings settings = challengeView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setUserAgentString(settings.getUserAgentString() + " loc-app/" + APP_VERSION_NAME);
+        challengeView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return false;
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+            }
+
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                return handleWebViewRendererGone(view, "");
+            }
+        });
+        challengeView.loadUrl(challengeUrl);
+        LinearLayout.LayoutParams params = blockParams(10);
+        params.height = dp(430);
+        card.addView(challengeView, params);
+        Button back = secondaryButton("返回修改密码");
+        back.setOnClickListener(view -> {
+            if (onBack != null) {
+                onBack.run();
+            }
+        });
+        card.addView(back, blockParams(0));
+        setScreen(card, true);
+    }
+
+
     private void showHome() {
-        LinearLayout card = screen("位置看板");
-        TextView userLine = infoPanel(userDisplayName(currentUser), false);
-        reportButton = primaryButton("上报当前位置");
-        refreshButton = secondaryButton("刷新位置");
-        Button historyButton = secondaryButton("历史记录");
-        Button settingsButton = secondaryButton("设置");
-        Button groupsButton = secondaryButton("家庭组");
+        currentTab = TAB_POSITION;
+        LinearLayout card = screen("位置");
+        TextView userLine = compactInfoPanel(compactUserDisplayName(currentUser), false);
+        reportButton = primaryButton("上报位置");
+        refreshButton = secondaryButton("刷新");
+        Button historyButton = secondaryButton("历史位置");
         Button announcementButton = secondaryButton("公告");
-        Button ticketsButton = secondaryButton("工单");
-        Button logoutButton = secondaryButton("退出登录");
+        Button crossGroupSyncButton = secondaryButton("跨组同步");
+        Button continuousReportButton = secondaryButton(continuousReportButtonText());
 
         reportButton.setOnClickListener(view -> reportCurrentLocation());
         refreshButton.setOnClickListener(view -> refreshLocations());
         historyButton.setOnClickListener(view -> showHistory());
-        settingsButton.setOnClickListener(view -> showSettings());
-        groupsButton.setOnClickListener(view -> showGroups());
         announcementButton.setOnClickListener(view -> showAnnouncement());
-        ticketsButton.setOnClickListener(view -> showTickets());
-        logoutButton.setOnClickListener(view -> logout());
+        crossGroupSyncButton.setOnClickListener(view -> showCrossGroupSync());
+        continuousReportButton.setOnClickListener(view -> toggleGuardianContinuousReport());
 
-        card.addView(userLine, blockParams(16));
-        card.addView(reportButton, blockParams(10));
-        card.addView(refreshButton, blockParams(10));
-        card.addView(historyButton, blockParams(10));
-        card.addView(settingsButton, blockParams(10));
-        card.addView(groupsButton, blockParams(10));
-        card.addView(announcementButton, blockParams(10));
-        card.addView(ticketsButton, blockParams(10));
-        card.addView(logoutButton, blockParams(16));
+        boolean guardian = "guardian".equals(currentUserRole());
+        card.addView(userLine, blockParams(10));
+        card.addView(reportButton, blockParams(8));
+        card.addView(buttonRow(refreshButton, historyButton), blockParams(8));
+        if (guardian && userGroupCount() > 1) {
+            card.addView(buttonRow(continuousReportButton, crossGroupSyncButton), blockParams(8));
+            card.addView(announcementButton, blockParams(12));
+        } else if (guardian) {
+            card.addView(buttonRow(continuousReportButton, announcementButton), blockParams(12));
+        } else if (userGroupCount() > 1) {
+            card.addView(buttonRow(crossGroupSyncButton, announcementButton), blockParams(12));
+        } else {
+            card.addView(announcementButton, blockParams(12));
+        }
         setScreen(card, false);
         requestStartupPermissions();
         syncKeepAliveService();
     }
 
+    private String currentUserRole() {
+        if (currentUser == null) {
+            return "";
+        }
+        return normalizeRole(currentUser.optString("role", prefs().getString(KEY_USER_ROLE, "")));
+    }
+
+    private String continuousReportButtonText() {
+        return guardianContinuousEnabled(currentGroupName()) ? "关闭持续上报" : "持续上报";
+    }
+
+    private void toggleGuardianContinuousReport() {
+        if (!"guardian".equals(currentUserRole())) {
+            setStatus("只有监护端需要手动开启持续上报。");
+            return;
+        }
+        boolean enabled = !guardianContinuousEnabled(currentGroupName());
+        saveGuardianContinuous(enabled);
+        showHome();
+        refreshLocations();
+    }
+
+    private int userGroupCount() {
+        JSONArray groups = currentUser == null ? null : currentUser.optJSONArray("groups");
+        return groups == null ? 0 : groups.length();
+    }
+
+    private JSONArray userGroups() {
+        JSONArray groups = currentUser == null ? null : currentUser.optJSONArray("groups");
+        return groups == null ? new JSONArray() : groups;
+    }
+
+    private String currentGroupName() {
+        return selectedGroupName.isEmpty() && currentUser != null
+            ? currentUser.optString("group_name", "")
+            : selectedGroupName;
+    }
+
+    private String crossGroupSyncStorageKey() {
+        int userId = currentUser == null ? 0 : currentUser.optInt("id", 0);
+        return KEY_CROSS_GROUP_SYNC + "_" + userId;
+    }
+
+    private List<String> selectedCrossSyncGroups() {
+        List<String> result = new ArrayList<>();
+        JSONArray groups = userGroups();
+        if (groups.length() == 0) {
+            return result;
+        }
+
+        List<String> available = new ArrayList<>();
+        for (int index = 0; index < groups.length(); index += 1) {
+            JSONObject group = groups.optJSONObject(index);
+            if (group != null) {
+                String groupName = group.optString("group_name", "");
+                if (!groupName.isEmpty()) {
+                    available.add(groupName);
+                }
+            }
+        }
+
+        String saved = prefs().getString(crossGroupSyncStorageKey(), "[]");
+        try {
+            JSONArray values = new JSONArray(saved == null || saved.trim().isEmpty() ? "[]" : saved);
+            for (int index = 0; index < values.length(); index += 1) {
+                String groupName = values.optString(index, "");
+                if (!groupName.isEmpty() && available.contains(groupName) && !result.contains(groupName)) {
+                    result.add(groupName);
+                }
+            }
+        } catch (Exception ignored) {
+            return result;
+        }
+        return result;
+    }
+
+    private void saveSelectedCrossSyncGroups(List<String> groupNames) {
+        JSONArray values = new JSONArray();
+        for (String groupName : groupNames) {
+            if (groupName != null && !groupName.trim().isEmpty()) {
+                values.put(groupName.trim());
+            }
+        }
+        prefs().edit().putString(crossGroupSyncStorageKey(), values.toString()).apply();
+    }
+
+    private void showCrossGroupSync() {
+        currentTab = TAB_POSITION;
+        JSONArray groups = userGroups();
+        String currentGroup = currentGroupName();
+        if (groups.length() <= 1) {
+            showPopupDialog(
+                "跨组同步",
+                new String[][] {new String[] {"提示", "当前账号没有其他家庭组。"}},
+                "关闭",
+                null,
+                null
+            );
+            return;
+        }
+
+        LinearLayout card = screen("跨组同步");
+        TextView description = infoPanel("手动上报时，可把同一定位同时同步到勾选的其他家庭组；自动/持续上报不会跨组同步。", false);
+        card.addView(description, blockParams(14));
+
+        List<CheckBox> checks = new ArrayList<>();
+        List<String> selected = selectedCrossSyncGroups();
+        for (int index = 0; index < groups.length(); index += 1) {
+            JSONObject group = groups.optJSONObject(index);
+            if (group == null) {
+                continue;
+            }
+            String groupName = group.optString("group_name", "");
+            if (groupName.isEmpty() || groupName.equals(currentGroup)) {
+                continue;
+            }
+            CheckBox check = new CheckBox(this);
+            check.setText(group.optString("display_name", groupName) + " / " + group.optString("role_label", ""));
+            check.setTag(groupName);
+            check.setTextColor(colorText());
+            check.setChecked(selected.contains(groupName));
+            checks.add(check);
+            card.addView(check, blockParams(8));
+        }
+
+        if (checks.isEmpty()) {
+            TextView empty = infoPanel("当前账号没有其他可同步家庭组。", true);
+            card.addView(empty, blockParams(12));
+        }
+
+        Button save = primaryButton("保存跨组同步设置");
+        Button back = secondaryButton("返回位置看板");
+        save.setOnClickListener(view -> {
+            List<String> next = new ArrayList<>();
+            for (CheckBox check : checks) {
+                if (check.isChecked()) {
+                    Object tag = check.getTag();
+                    if (tag != null) {
+                        next.add(String.valueOf(tag));
+                    }
+                }
+            }
+            saveSelectedCrossSyncGroups(next);
+            setStatus("跨组同步设置已保存：" + next.size() + " 个家庭组");
+        });
+        back.setOnClickListener(view -> {
+            showHome();
+            refreshLocations();
+        });
+        card.addView(save, blockParams(10));
+        card.addView(back, blockParams(0));
+        setScreen(card, false);
+        setStatus("请选择需要同步的家庭组。");
+    }
+
     private void showHistory() {
+        currentTab = TAB_POSITION;
         historyPage = 1;
         historyUserId = 0;
         LinearLayout card = screen("历史定位");
@@ -599,11 +877,12 @@ public class MainActivity extends Activity {
         }
 
         renderHistoryControls(response);
+        appendHistoryMap(response.optJSONArray("map_history"));
 
         JSONArray history = response.optJSONArray("history");
         int total = pagination == null ? (history == null ? 0 : history.length()) : pagination.optInt("total", history == null ? 0 : history.length());
         int totalPages = pagination == null ? 1 : Math.max(1, pagination.optInt("total_pages", 1));
-        content.addView(sectionTitle("历史记录（第 " + historyPage + " / " + totalPages + " 页）"), blockParams(8));
+        content.addView(dynamicSectionTitle("历史记录（第 " + historyPage + " / " + totalPages + " 页）"), blockParams(8));
         if (history == null || history.length() == 0) {
             TextView empty = infoPanel("暂无历史定位记录。", true);
             empty.setTag("dynamic");
@@ -621,7 +900,7 @@ public class MainActivity extends Activity {
     private void renderHistoryControls(JSONObject response) {
         JSONArray members = response.optJSONArray("members");
         if (members != null && members.length() > 1) {
-            content.addView(sectionTitle("筛选成员"), blockParams(8));
+            content.addView(dynamicSectionTitle("筛选成员"), blockParams(8));
             Button all = secondaryButton(historyUserId == 0 ? "✓ 全部成员" : "全部成员");
             all.setTag("dynamic");
             all.setOnClickListener(view -> {
@@ -648,7 +927,7 @@ public class MainActivity extends Activity {
             }
         }
 
-        content.addView(sectionTitle("每页条数"), blockParams(8));
+        content.addView(dynamicSectionTitle("每页条数"), blockParams(8));
         int[] sizes = new int[] {20, 50, 100};
         for (int size : sizes) {
             Button sizeButton = secondaryButton((historyPageSize == size ? "✓ " : "") + size + " 条");
@@ -700,6 +979,70 @@ public class MainActivity extends Activity {
         return role.isEmpty() ? name : name + " / " + role;
     }
 
+
+    private void appendHistoryMap(JSONArray mapHistory) {
+        JSONArray records = displayableLocations(mapHistory);
+        if (records.length() == 0) {
+            return;
+        }
+        content.addView(dynamicSectionTitle("历史轨迹"), blockParams(8));
+        WebView map = locationMapWebView(records);
+        LinearLayout.LayoutParams params = blockParams(12);
+        params.height = dp(300);
+        content.addView(map, params);
+    }
+
+    private WebView locationMapWebView(JSONArray records) {
+        WebView map = managedWebView();
+        map.setTag("dynamic");
+        WebSettings settings = map.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setLoadWithOverviewMode(true);
+        settings.setUseWideViewPort(true);
+        settings.setUserAgentString(settings.getUserAgentString() + " loc-app/" + APP_VERSION_NAME);
+        map.setBackgroundColor(isDarkMode() ? Color.rgb(17, 29, 26) : Color.WHITE);
+        CookieManager cookieManager = CookieManager.getInstance();
+        cookieManager.setAcceptCookie(true);
+        String baseUrl = serverUrl();
+        cookieManager.setCookie(baseUrl, cookieHeader());
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            cookieManager.flush();
+        }
+        String recordsJson = records.toString();
+        map.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                    view.evaluateJavascript("window.renderLocHistoryMap(" + recordsJson + ")", null);
+                } else {
+                    view.loadUrl("javascript:window.renderLocHistoryMap(" + Uri.encode(recordsJson) + ")");
+                }
+            }
+
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                return handleWebViewRendererGone(view, "地图 WebView 已释放，请刷新后重试。");
+            }
+        });
+        map.loadUrl(baseUrl + "api/history_map_webview.php");
+        return map;
+    }
+
+    private JSONArray displayableLocations(JSONArray locations) {
+        JSONArray records = new JSONArray();
+        if (locations == null) {
+            return records;
+        }
+        for (int index = 0; index < locations.length(); index += 1) {
+            JSONObject location = locations.optJSONObject(index);
+            if (hasUsableCoordinates(location)) {
+                records.put(location);
+            }
+        }
+        return records;
+    }
+
     private void appendHistoryRow(JSONObject location) {
         if (location == null) {
             return;
@@ -737,11 +1080,13 @@ public class MainActivity extends Activity {
         }
 
         TextView row = infoPanel(builder.toString(), true);
+        attachMapOpenAction(row, location, name);
         row.setTag("dynamic");
-        content.addView(row, blockParams(10));
+        content.addView(row, blockParams(8));
     }
 
     private void showAnnouncement() {
+        currentTab = TAB_POSITION;
         LinearLayout card = screen("公告");
         Button refresh = primaryButton("刷新公告");
         Button back = secondaryButton("返回位置看板");
@@ -798,19 +1143,15 @@ public class MainActivity extends Activity {
     }
 
     private void showTickets() {
-        LinearLayout card = screen("工单");
+        currentTab = TAB_HELP;
+        LinearLayout card = screen("帮助");
+        TextView intro = compactInfoPanel("遇到账号、家庭组、位置异常或后台操作问题，可以在这里提交工单。", false);
         Button refresh = primaryButton("刷新工单");
         Button create = secondaryButton("新建工单");
-        Button back = secondaryButton("返回位置看板");
         refresh.setOnClickListener(view -> loadTickets());
         create.setOnClickListener(view -> showCreateTicket());
-        back.setOnClickListener(view -> {
-            showHome();
-            refreshLocations();
-        });
-        card.addView(refresh, blockParams(10));
-        card.addView(create, blockParams(10));
-        card.addView(back, blockParams(16));
+        card.addView(intro, blockParams(10));
+        card.addView(buttonRow(refresh, create), blockParams(16));
         setScreen(card, false);
         loadTickets();
     }
@@ -842,7 +1183,7 @@ public class MainActivity extends Activity {
             return;
         }
 
-        content.addView(sectionTitle("最近工单"), blockParams(8));
+        content.addView(dynamicSectionTitle("最近工单"), blockParams(8));
         for (int index = 0; index < tickets.length(); index += 1) {
             JSONObject ticket = tickets.optJSONObject(index);
             if (ticket == null) {
@@ -869,6 +1210,7 @@ public class MainActivity extends Activity {
     }
 
     private void showCreateTicket() {
+        currentTab = TAB_HELP;
         LinearLayout card = screen("新建工单");
         EditText subject = input("标题");
         EditText message = multiLineInput("内容");
@@ -960,7 +1302,7 @@ public class MainActivity extends Activity {
 
         JSONArray messages = response.optJSONArray("messages");
         if (messages != null) {
-            content.addView(sectionTitle("消息"), blockParams(8));
+            content.addView(dynamicSectionTitle("消息"), blockParams(8));
             for (int index = 0; index < messages.length(); index += 1) {
                 JSONObject message = messages.optJSONObject(index);
                 if (message == null) {
@@ -1011,26 +1353,20 @@ public class MainActivity extends Activity {
     }
 
     private void showGroups() {
-        LinearLayout card = screen("家庭组");
+        currentTab = TAB_GROUPS;
+        LinearLayout card = screen("家庭组管理");
         EditText joinCode = input("输入 6 位家庭组号");
         Button join = primaryButton("加入家庭组");
         Button refresh = secondaryButton("刷新家庭组");
         Button leave = secondaryButton("退出当前家庭组");
-        Button back = secondaryButton("返回位置看板");
 
         join.setOnClickListener(view -> joinGroupByCode(joinCode.getText().toString()));
         refresh.setOnClickListener(view -> renderGroups());
         leave.setOnClickListener(view -> leaveCurrentGroup());
-        back.setOnClickListener(view -> {
-            showHome();
-            refreshLocations();
-        });
 
         card.addView(joinCode, blockParams(10));
         card.addView(join, blockParams(10));
-        card.addView(refresh, blockParams(10));
-        card.addView(leave, blockParams(16));
-        card.addView(back, blockParams(16));
+        card.addView(buttonRow(refresh, leave), blockParams(16));
         setScreen(card, false);
         renderGroups();
     }
@@ -1050,7 +1386,7 @@ public class MainActivity extends Activity {
             return;
         }
 
-        content.addView(sectionTitle("我的家庭组"), blockParams(8));
+        content.addView(dynamicSectionTitle("我的家庭组"), blockParams(8));
         int currentUserId = currentUser == null ? 0 : currentUser.optInt("id", 0);
         for (int index = 0; index < groups.length(); index += 1) {
             JSONObject group = groups.optJSONObject(index);
@@ -1185,7 +1521,7 @@ public class MainActivity extends Activity {
         }
 
         String groupName = group.optString("group_name", "");
-        content.addView(sectionTitle("\u6210\u5458\u7ba1\u7406"), blockParams(6));
+        content.addView(dynamicSectionTitle("\u6210\u5458\u7ba1\u7406"), blockParams(6));
         int currentUserId = currentUser == null ? 0 : currentUser.optInt("id", 0);
         for (int index = 0; index < members.length(); index += 1) {
             JSONObject member = members.optJSONObject(index);
@@ -1379,7 +1715,7 @@ public class MainActivity extends Activity {
 
         JSONArray members = response.optJSONArray("members");
         if (members != null && members.length() > 0) {
-            content.addView(sectionTitle("成员准备状态"), blockParams(8));
+            content.addView(dynamicSectionTitle("成员准备状态"), blockParams(8));
             for (int index = 0; index < members.length(); index += 1) {
                 JSONObject member = members.optJSONObject(index);
                 if (member == null) {
@@ -1413,7 +1749,8 @@ public class MainActivity extends Activity {
     }
 
     private void showSettings() {
-        LinearLayout card = screen("设置");
+        currentTab = TAB_MINE;
+        LinearLayout card = screen("我的");
         TextView account = infoPanel(userDisplayName(currentUser), false);
         CheckBox environmentConsent = new CheckBox(this);
         environmentConsent.setText("同意上传环境诊断数据");
@@ -1440,23 +1777,22 @@ public class MainActivity extends Activity {
             newPassword.getText().toString(),
             newPasswordConfirm.getText().toString()
         ));
-        Button back = secondaryButton("返回位置看板");
-        back.setOnClickListener(view -> {
-            showHome();
-            refreshLocations();
-        });
+        Button logout = secondaryButton("退出登录");
+        logout.setOnClickListener(view -> logout());
 
+        card.addView(sectionTitle("账号信息"), blockParams(8));
         card.addView(account, blockParams(14));
+        card.addView(sectionTitle("隐私与上报"), blockParams(8));
         card.addView(environmentConsent, blockParams(8));
-        card.addView(saveEnvironment, blockParams(14));
+        card.addView(saveEnvironment, blockParams(12));
         card.addView(guardianContinuous, blockParams(8));
         card.addView(saveContinuous, blockParams(14));
-        card.addView(sectionTitle("修改密码"), blockParams(8));
+        card.addView(sectionTitle("账号安全"), blockParams(8));
         card.addView(currentPassword, blockParams(10));
         card.addView(newPassword, blockParams(10));
         card.addView(newPasswordConfirm, blockParams(10));
         card.addView(changePassword, blockParams(14));
-        card.addView(back, blockParams(0));
+        card.addView(logout, blockParams(0));
         setScreen(card, false);
         setStatus("当前上报间隔：" + prefs().getInt(KEY_REPORT_INTERVAL_SECONDS, 300) + " 秒");
     }
@@ -1474,7 +1810,10 @@ public class MainActivity extends Activity {
                     currentUser = user;
                     persistUserSession(user, response.optInt("report_interval_seconds", prefs().getInt(KEY_REPORT_INTERVAL_SECONDS, 300)));
                 }
-                runUi(() -> setStatus("环境数据设置已保存"));
+                if (enabled) {
+                    uploadEnvironmentReport(true, true);
+                }
+                runUi(() -> setStatus(enabled ? "环境数据设置已保存，正在上传诊断。" : "环境数据设置已保存"));
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }
@@ -1560,7 +1899,7 @@ public class MainActivity extends Activity {
         removeDynamicRows();
         JSONArray groups = currentUser == null ? new JSONArray() : currentUser.optJSONArray("groups");
         if (groups != null && groups.length() > 1) {
-            content.addView(sectionTitle("家庭组"), blockParams(6));
+            content.addView(dynamicSectionTitle("家庭组"), blockParams(6));
             for (int index = 0; index < groups.length(); index += 1) {
                 JSONObject group = groups.optJSONObject(index);
                 if (group == null) {
@@ -1577,11 +1916,90 @@ public class MainActivity extends Activity {
             }
         }
 
-        content.addView(sectionTitle("最新位置"), blockParams(8));
-        appendLocationSection("我", response.optJSONObject("mine"));
-        appendLocationArray("监测端", response.optJSONArray("monitors"));
-        appendLocationArray("监护端", response.optJSONArray("guardians"));
+        appendMapPreview(response);
+        content.addView(dynamicSectionTitle("最新位置"), blockParams(8));
+        appendLocationSection("我的云端位置", response.optJSONObject("mine"));
+        appendLocationArray("监测端云端位置", response.optJSONArray("monitors"));
+        appendLocationArray("监护端云端位置", response.optJSONArray("guardians"));
+        appendAddressDiagnostics(response.optJSONObject("mine"));
         setStatus("已刷新：" + response.optString("server_time", ""));
+    }
+
+    private void appendMapPreview(JSONObject response) {
+        JSONArray records = latestMapLocations(response);
+        if (records.length() == 0) {
+            TextView empty = compactInfoPanel("暂无云端位置", true);
+            empty.setTag("dynamic");
+            content.addView(empty, blockParams(12));
+            return;
+        }
+
+        content.addView(dynamicSectionTitle("位置地图"), blockParams(8));
+        WebView map = locationMapWebView(records);
+        LinearLayout.LayoutParams params = blockParams(12);
+        params.height = dp(260);
+        content.addView(map, params);
+    }
+
+    private JSONArray latestMapLocations(JSONObject response) {
+        JSONArray records = new JSONArray();
+        if (response == null) {
+            return records;
+        }
+        appendLatestMapLocation(records, response.optJSONObject("mine"));
+        appendLatestMapLocations(records, response.optJSONArray("monitors"));
+        appendLatestMapLocations(records, response.optJSONArray("guardians"));
+        return records;
+    }
+
+    private void appendLatestMapLocations(JSONArray target, JSONArray locations) {
+        if (locations == null) {
+            return;
+        }
+        for (int index = 0; index < locations.length(); index += 1) {
+            appendLatestMapLocation(target, locations.optJSONObject(index));
+        }
+    }
+
+    private void appendLatestMapLocation(JSONArray target, JSONObject location) {
+        if (hasUsableCoordinates(location)) {
+            target.put(location);
+        }
+    }
+
+    private void appendAddressDiagnostics(JSONObject location) {
+        if (location == null) {
+            return;
+        }
+        JSONObject diagnostics = location.optJSONObject("address_diagnostics");
+        if (diagnostics == null) {
+            return;
+        }
+        StringBuilder builder = new StringBuilder("地址对比");
+        String preferred = diagnostics.optString("preferred_address", "");
+        if (!preferred.isEmpty()) {
+            builder.append("\n首选地址：").append(preferred);
+        }
+        JSONArray sources = diagnostics.optJSONArray("sources");
+        if (sources != null) {
+            for (int index = 0; index < sources.length(); index += 1) {
+                JSONObject source = sources.optJSONObject(index);
+                if (source == null) {
+                    continue;
+                }
+                String sourceName = source.optString("name", source.optString("type", "地址"));
+                String address = source.optString("address", source.optString("ip", ""));
+                if (!address.isEmpty()) {
+                    builder.append("\n").append(sourceName).append("：").append(address);
+                }
+            }
+        }
+        if (builder.length() > "地址对比".length()) {
+            TextView panel = compactInfoPanel(builder.toString(), true);
+            panel.setTag("dynamic");
+            content.addView(dynamicSectionTitle("地址对比"), blockParams(6));
+            content.addView(panel, blockParams(12));
+        }
     }
 
     private void decryptLocationsResponse(JSONObject response) {
@@ -1629,7 +2047,7 @@ public class MainActivity extends Activity {
             return;
         }
 
-        content.addView(sectionTitle(title), blockParams(6));
+        content.addView(dynamicSectionTitle(title), blockParams(6));
         for (int index = 0; index < locations.length(); index += 1) {
             appendLocationSection("", locations.optJSONObject(index));
         }
@@ -1670,8 +2088,55 @@ public class MainActivity extends Activity {
         }
 
         TextView row = infoPanel(builder.toString(), true);
+        attachMapOpenAction(row, location, name);
         row.setTag("dynamic");
-        content.addView(row, blockParams(10));
+        content.addView(row, blockParams(8));
+    }
+
+    private void attachMapOpenAction(TextView row, JSONObject location, String label) {
+        if (!hasUsableCoordinates(location)) {
+            return;
+        }
+        double latitude = location.optDouble("latitude", 0);
+        double longitude = location.optDouble("longitude", 0);
+        row.setClickable(true);
+        row.setOnClickListener(view -> openMapLocation(latitude, longitude, label));
+    }
+
+    private boolean hasUsableCoordinates(JSONObject location) {
+        if (location == null || !location.has("latitude") || !location.has("longitude") || location.isNull("latitude") || location.isNull("longitude")) {
+            return false;
+        }
+        double latitude = location.optDouble("latitude", 0);
+        double longitude = location.optDouble("longitude", 0);
+        return latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180 && !(latitude == 0 && longitude == 0);
+    }
+
+    private void openMapLocation(double latitude, double longitude, String label) {
+        String safeLabel = label == null || label.trim().isEmpty() ? "位置" : label.trim();
+        try {
+            JSONObject record = new JSONObject()
+                .put("latitude", latitude)
+                .put("longitude", longitude)
+                .put("display_name", safeLabel)
+                .put("updated_at", "坐标：" + formatCoordinate(latitude) + ", " + formatCoordinate(longitude));
+            JSONArray records = new JSONArray().put(record);
+            LinearLayout card = screen(safeLabel);
+            Button back = secondaryButton("返回位置看板");
+            back.setOnClickListener(view -> {
+                showHome();
+                refreshLocations();
+            });
+            card.addView(back, blockParams(10));
+            WebView map = locationMapWebView(records);
+            LinearLayout.LayoutParams params = blockParams(0);
+            params.height = dp(420);
+            card.addView(map, params);
+            setScreen(card, false);
+            setStatus("已打开位置地图：" + safeLabel);
+        } catch (Exception exception) {
+            setStatus("打开地图失败：" + exception.getMessage());
+        }
     }
 
     private void removeDynamicRows() {
@@ -1679,6 +2144,9 @@ public class MainActivity extends Activity {
             View child = content.getChildAt(index);
             if ("dynamic".equals(child.getTag())) {
                 content.removeViewAt(index);
+                if (child instanceof WebView) {
+                    destroyManagedWebView((WebView) child);
+                }
             }
         }
     }
@@ -1765,27 +2233,776 @@ public class MainActivity extends Activity {
         setStatus("正在上报位置");
         runBackground(() -> {
             try {
-                String reportGroupName = selectedGroupName.isEmpty() && currentUser != null ? currentUser.optString("group_name", "") : selectedGroupName;
-                JSONObject payload = new JSONObject()
-                    .put("group_name", reportGroupName)
-                    .put("latitude", location.getLatitude())
-                    .put("longitude", location.getLongitude())
-                    .put("accuracy", location.hasAccuracy() ? location.getAccuracy() : JSONObject.NULL)
-                    .put("altitude", location.hasAltitude() ? location.getAltitude() : JSONObject.NULL)
-                    .put("heading", location.hasBearing() ? location.getBearing() : JSONObject.NULL)
-                    .put("speed", location.hasSpeed() ? location.getSpeed() : JSONObject.NULL)
-                    .put("location_provider", location.getProvider())
-                    .put("location_time", String.valueOf(location.getTime()));
-                JSONObject encryptedPayload = P2PCryptoSupport.encryptedReportOrNull(this::postJson, this, reportGroupName, payload);
-                JSONObject response = postJson("api/report_location.php", encryptedPayload == null ? payload : encryptedPayload);
+                String reportGroupName = currentGroupName();
+                JSONObject addressDiagnostics = buildAddressDiagnostics(location);
+                JSONObject payload = locationReportPayload(reportGroupName, location, addressDiagnostics);
+                JSONObject response = postLocationReport(reportGroupName, payload);
+                List<String> extraGroupNames = selectedCrossSyncGroups();
+                extraGroupNames.remove(reportGroupName);
+                int synced = 0;
+                List<String> failed = new ArrayList<>();
+                for (String groupName : extraGroupNames) {
+                    try {
+                        postLocationReport(groupName, locationReportPayload(groupName, location, addressDiagnostics));
+                        synced += 1;
+                    } catch (Exception syncException) {
+                        failed.add(groupName);
+                    }
+                }
+                final int syncedCount = synced;
+                final int failedCount = failed.size();
                 runUi(() -> {
-                    finishReport(response.optString("message", "位置已上报。"));
+                    String message = response.optString("message", "位置已上报。");
+                    if (syncedCount > 0) {
+                        message += " 跨组同步 " + syncedCount + " 个家庭组。";
+                    }
+                    if (failedCount > 0) {
+                        message += " " + failedCount + " 个家庭组同步失败，请检查端到端加密密钥或权限。";
+                    }
+                    finishReport(message);
                     refreshLocations();
                 });
             } catch (Exception exception) {
                 runUi(() -> finishReport(exception.getMessage()));
             }
         });
+    }
+
+    private JSONObject locationReportPayload(String groupName, android.location.Location location, JSONObject addressDiagnostics) throws Exception {
+        JSONObject payload = new JSONObject()
+            .put("group_name", groupName)
+            .put("latitude", location.getLatitude())
+            .put("longitude", location.getLongitude())
+            .put("accuracy", location.hasAccuracy() ? location.getAccuracy() : JSONObject.NULL)
+            .put("altitude", location.hasAltitude() ? location.getAltitude() : JSONObject.NULL)
+            .put("heading", location.hasBearing() ? location.getBearing() : JSONObject.NULL)
+            .put("speed", location.hasSpeed() ? location.getSpeed() : JSONObject.NULL)
+            .put("location_provider", location.getProvider())
+            .put("location_time", String.valueOf(location.getTime()));
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            payload.put("vertical_accuracy", location.hasVerticalAccuracy() ? location.getVerticalAccuracyMeters() : JSONObject.NULL);
+            payload.put("bearing_accuracy", location.hasBearingAccuracy() ? location.getBearingAccuracyDegrees() : JSONObject.NULL);
+            payload.put("speed_accuracy", location.hasSpeedAccuracy() ? location.getSpeedAccuracyMetersPerSecond() : JSONObject.NULL);
+        }
+        if (addressDiagnostics != null) {
+            payload.put("address_diagnostics", addressDiagnostics);
+        }
+        if (currentUser != null && currentUser.optBoolean("environment_data_consent", false)) {
+            payload.put("device_report", buildDeviceEnvironmentReport(false));
+        }
+        return payload;
+    }
+
+    private JSONObject buildAddressDiagnostics(android.location.Location location) {
+        double latitude = location.getLatitude();
+        double longitude = location.getLongitude();
+        JSONObject fallback;
+        try {
+            fallback = addressSource("gps", "定位地址", "坐标", "", formatCoordinate(latitude) + ", " + formatCoordinate(longitude), "", "", "", latitude, longitude);
+        } catch (Exception exception) {
+            return null;
+        }
+        List<JSONObject> addressCandidates = new ArrayList<>();
+        addressCandidates.add(reverseAddressByAmapWebView(latitude, longitude));
+        addressCandidates.add(reverseAddressByMeituan(latitude, longitude));
+        addressCandidates.add(reverseAddressByBigDataCloud(latitude, longitude));
+
+        JSONArray sources = new JSONArray();
+        JSONObject best = fallback;
+        int bestScore = 0;
+        int bestPriority = Integer.MAX_VALUE;
+        for (JSONObject candidate : addressCandidates) {
+            if (!isUsefulAddressSource(candidate, fallback)) {
+                continue;
+            }
+            sources.put(candidate);
+            int score = addressPrecisionScore(candidate);
+            int priority = addressProviderPriority(candidate.optString("provider", ""));
+            if (score > bestScore || (score == bestScore && priority < bestPriority)) {
+                best = candidate;
+                bestScore = score;
+                bestPriority = priority;
+            }
+        }
+
+        JSONObject ipSource = probeIpAddressSource();
+        if (ipSource != null) {
+            sources.put(ipSource);
+        }
+        JSONObject webRtcSource = probeWebRtcAddressSource();
+        if (webRtcSource != null) {
+            sources.put(webRtcSource);
+        }
+        if (sources.length() == 0) {
+            sources.put(fallback);
+        }
+
+        JSONObject diagnostics = new JSONObject();
+        try {
+            diagnostics.put("complete", true)
+                .put("mismatch", false)
+                .put("preferred_source", "gps")
+                .put("preferred_address", best.optString("address", fallback.optString("address", "")))
+                .put("preferred_latitude", latitude)
+                .put("preferred_longitude", longitude)
+                .put("sources", sources);
+        } catch (Exception ignored) {
+            return null;
+        }
+        return diagnostics;
+    }
+
+    private JSONObject reverseAddressByAmapWebView(double latitude, double longitude) {
+        String base = serverUrl();
+        if (base.isEmpty()) {
+            return null;
+        }
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<JSONObject> result = new AtomicReference<>();
+        AtomicReference<WebView> webViewRef = new AtomicReference<>();
+        AtomicBoolean done = new AtomicBoolean(false);
+        String url;
+        try {
+            url = base + "api/amap_reverse_webview.php?lat=" + urlEncode(formatCoordinate(latitude)) + "&lng=" + urlEncode(formatCoordinate(longitude));
+        } catch (Exception exception) {
+            return null;
+        }
+
+        runUi(() -> {
+            if (!canLoadForegroundWebView()) {
+                done.set(true);
+                latch.countDown();
+                return;
+            }
+            WebView webView = managedWebView();
+            webViewRef.set(webView);
+            WebSettings settings = webView.getSettings();
+            settings.setJavaScriptEnabled(true);
+            settings.setDomStorageEnabled(true);
+            settings.setUserAgentString(settings.getUserAgentString() + " loc-app/" + APP_VERSION_NAME);
+            webView.addJavascriptInterface(new Object() {
+                @JavascriptInterface
+                public void onAmapReverse(String json) {
+                    if (done.compareAndSet(false, true)) {
+                        try {
+                            result.set(new JSONObject(json));
+                        } catch (Exception ignored) {
+                            result.set(null);
+                        }
+                        latch.countDown();
+                    }
+                }
+
+                @JavascriptInterface
+                public void onAmapReverseError(String message) {
+                    if (done.compareAndSet(false, true)) {
+                        latch.countDown();
+                    }
+                }
+            }, "locApp");
+            webView.setWebViewClient(new WebViewClient() {
+                @Override
+                public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                    if ((Build.VERSION.SDK_INT < Build.VERSION_CODES.M || request == null || request.isForMainFrame()) && done.compareAndSet(false, true)) {
+                        latch.countDown();
+                    }
+                }
+
+                @Override
+                public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                    if (done.compareAndSet(false, true)) {
+                        latch.countDown();
+                    }
+                    return handleWebViewRendererGone(view, "");
+                }
+            });
+            webView.loadUrl(url);
+        });
+
+        try {
+            latch.await(12000L, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        } finally {
+            runUi(() -> {
+                WebView webView = webViewRef.get();
+                if (webView != null) {
+                    destroyManagedWebView(webView);
+                }
+            });
+        }
+        return result.get();
+    }
+
+    private JSONObject reverseAddressByMeituan(double latitude, double longitude) {
+        try {
+            String url = "https://apimobile.meituan.com/group/v1/city/latlng/"
+                + urlEncode(formatMeituanCoordinate(latitude)) + "," + urlEncode(formatMeituanCoordinate(longitude)) + "?tag=0";
+            JSONObject response = requestOpenJson(url);
+            JSONObject data = response.optJSONObject("data");
+            if (data == null) {
+                return null;
+            }
+            String country = firstText(data.optString("country", "中国"), "中国");
+            String region = data.optString("province", "");
+            String city = firstText(data.optString("city", ""), data.optString("openCityName", ""));
+            String district = data.optString("district", "");
+            String street = firstText(data.optString("street", ""), data.optString("township", ""), data.optString("areaName", ""));
+            String detail = firstText(data.optString("detail", ""), data.optString("name", ""), data.optString("address", ""));
+            String address = composeAddress(country, region, city, district, street, detail);
+            return addressSource("gps", "定位地址", "美团", "meituan", address, city, region, country, latitude, longitude)
+                .put("district", district)
+                .put("street", street)
+                .put("detail", detail);
+        } catch (Exception exception) {
+            return null;
+        }
+    }
+
+    private JSONObject reverseAddressByBigDataCloud(double latitude, double longitude) {
+        try {
+            String url = "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude="
+                + urlEncode(formatCoordinate(latitude)) + "&longitude=" + urlEncode(formatCoordinate(longitude)) + "&localityLanguage=zh";
+            JSONObject data = requestOpenJson(url);
+            String country = data.optString("countryName", "");
+            String region = data.optString("principalSubdivision", "");
+            String city = firstText(data.optString("city", ""), data.optString("locality", ""));
+            String district = data.optString("locality", "");
+            String detail = "";
+            JSONObject localityInfo = data.optJSONObject("localityInfo");
+            if (localityInfo != null) {
+                JSONArray informative = localityInfo.optJSONArray("informative");
+                if (informative != null && informative.length() > 0) {
+                    JSONObject first = informative.optJSONObject(0);
+                    detail = first == null ? "" : first.optString("name", "");
+                }
+            }
+            String address = composeAddress(country, region, city, district, detail);
+            return addressSource("gps", "定位地址", "BigDataCloud", "bigdatacloud", address, city, region, country, latitude, longitude)
+                .put("district", district)
+                .put("detail", detail);
+        } catch (Exception exception) {
+            return null;
+        }
+    }
+
+
+    private JSONObject probeIpAddressSource() {
+        try {
+            JSONObject probe = getJson("api/ip_probe.php");
+            String ip = firstText(probe.optString("ip", ""));
+            if (ip.isEmpty()) {
+                JSONObject cloudflare = getJson("api/cloudflare_location.php");
+                ip = firstText(cloudflare.optString("ip", ""), cloudflare.optString("ipv6", ""));
+            }
+            if (ip.isEmpty()) {
+                return null;
+            }
+
+            JSONObject geo = geocodeIpAddress(ip);
+            String address = geo == null ? ip : firstText(geo.optString("address", ""), ip);
+            String city = geo == null ? "" : geo.optString("city", "");
+            String region = geo == null ? "" : geo.optString("region", "");
+            String country = geo == null ? "" : geo.optString("country", "");
+            String provider = geo == null ? "服务端 IP" : firstText(geo.optString("provider", ""), "IP 探测");
+            double latitude = geo == null ? 0 : geo.optDouble("latitude", 0);
+            double longitude = geo == null ? 0 : geo.optDouble("longitude", 0);
+            JSONObject source = addressSource("ip", "IP 探测", provider, "server", address, city, region, country, latitude, longitude)
+                .put("ip", ip)
+                .put("server_ip", ip);
+            JSONArray variants = new JSONArray();
+            JSONObject variant = new JSONObject()
+                .put("label", "服务端")
+                .put("ip", ip)
+                .put("address", address)
+                .put("city", city)
+                .put("region", region)
+                .put("country", country)
+                .put("provider", provider)
+                .put("source", "server");
+            if (latitude != 0 || longitude != 0) {
+                variant.put("latitude", latitude).put("longitude", longitude);
+            }
+            variants.put(variant);
+            source.put("variants", variants);
+            return source;
+        } catch (Exception exception) {
+            Log.w(TAG, "IP probe failed: " + exception.getMessage());
+            return null;
+        }
+    }
+
+    private JSONObject probeWebRtcAddressSource() {
+        String base = serverUrl();
+        if (base.isEmpty()) {
+            return null;
+        }
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<JSONObject> result = new AtomicReference<>();
+        AtomicReference<WebView> webViewRef = new AtomicReference<>();
+        AtomicBoolean done = new AtomicBoolean(false);
+        String url = base + "api/webrtc_probe_webview.php";
+
+        runUi(() -> {
+            if (!canLoadForegroundWebView()) {
+                done.set(true);
+                latch.countDown();
+                return;
+            }
+            WebView webView = managedWebView();
+            webViewRef.set(webView);
+            WebSettings settings = webView.getSettings();
+            settings.setJavaScriptEnabled(true);
+            settings.setDomStorageEnabled(true);
+            settings.setUserAgentString(settings.getUserAgentString() + " loc-app/" + APP_VERSION_NAME);
+            webView.addJavascriptInterface(new Object() {
+                @JavascriptInterface
+                public void onWebRtcProbe(String json) {
+                    if (done.compareAndSet(false, true)) {
+                        try {
+                            result.set(new JSONObject(json));
+                        } catch (Exception ignored) {
+                            result.set(null);
+                        }
+                        latch.countDown();
+                    }
+                }
+            }, "locApp");
+            webView.setWebViewClient(new WebViewClient() {
+                @Override
+                public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                    if ((Build.VERSION.SDK_INT < Build.VERSION_CODES.M || request == null || request.isForMainFrame()) && done.compareAndSet(false, true)) {
+                        latch.countDown();
+                    }
+                }
+
+                @Override
+                public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                    if (done.compareAndSet(false, true)) {
+                        latch.countDown();
+                    }
+                    return handleWebViewRendererGone(view, "");
+                }
+            });
+            webView.loadUrl(url);
+        });
+
+        try {
+            latch.await(9000L, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        } finally {
+            runUi(() -> {
+                WebView webView = webViewRef.get();
+                if (webView != null) {
+                    destroyManagedWebView(webView);
+                }
+            });
+        }
+
+        JSONObject payload = result.get();
+        if (payload == null || !payload.optBoolean("ok", false)) {
+            return null;
+        }
+        JSONObject selected = payload.optJSONObject("selected");
+        String ip = selected == null ? "" : selected.optString("ip", "");
+        if (ip.isEmpty()) {
+            return null;
+        }
+        try {
+            JSONObject geo = geocodeIpAddress(ip);
+            String address = geo == null ? ip : firstText(geo.optString("address", ""), ip);
+            String city = geo == null ? "" : geo.optString("city", "");
+            String region = geo == null ? "" : geo.optString("region", "");
+            String country = geo == null ? "" : geo.optString("country", "");
+            double latitude = geo == null ? 0 : geo.optDouble("latitude", 0);
+            double longitude = geo == null ? 0 : geo.optDouble("longitude", 0);
+            String provider = geo == null ? selected.optString("stun_label", "WebRTC") : firstText(geo.optString("provider", ""), selected.optString("stun_label", "WebRTC"));
+            JSONObject source = addressSource("webrtc", "WebRTC 探测", provider, selected.optString("stun_server", ""), address, city, region, country, latitude, longitude)
+                .put("ip", ip)
+                .put("stun_server", selected.optString("stun_server", ""))
+                .put("stun_label", selected.optString("stun_label", ""))
+                .put("stun_scope", selected.optString("stun_scope", ""))
+                .put("candidate_type", selected.optString("candidate_type", ""));
+            JSONArray candidates = payload.optJSONArray("candidates");
+            if (candidates != null) {
+                source.put("candidates", candidates);
+            }
+            return source;
+        } catch (Exception exception) {
+            Log.w(TAG, "WebRTC probe normalize failed: " + exception.getMessage());
+            return null;
+        }
+    }
+
+    private JSONObject geocodeIpAddress(String ip) {
+        JSONObject meituan = geocodeIpByMeituan(ip);
+        if (meituan != null) {
+            return meituan;
+        }
+        return geocodeIpByIpInfo(ip);
+    }
+
+    private JSONObject geocodeIpByMeituan(String ip) {
+        try {
+            String url = "https://apimobile.meituan.com/locate/v2/ip/loc?rgeo=true&ip=" + urlEncode(ip);
+            JSONObject response = requestOpenJson(url);
+            JSONObject data = response.optJSONObject("data");
+            if (data == null) {
+                data = response;
+            }
+            String country = firstText(data.optString("country", ""), "中国");
+            String region = firstText(data.optString("province", ""), data.optString("region", ""));
+            String city = firstText(data.optString("city", ""), data.optString("openCityName", ""));
+            String district = data.optString("district", "");
+            String detail = firstText(data.optString("detail", ""), data.optString("address", ""), data.optString("name", ""));
+            String address = composeAddress(country, region, city, district, detail);
+            if (address.isEmpty() || "中国".equals(address)) {
+                return null;
+            }
+            JSONObject geo = new JSONObject()
+                .put("provider", "美团")
+                .put("address", address)
+                .put("country", country)
+                .put("region", region)
+                .put("city", city)
+                .put("district", district)
+                .put("detail", detail);
+            if (data.has("lat") && data.has("lng")) {
+                geo.put("latitude", data.optDouble("lat", 0)).put("longitude", data.optDouble("lng", 0));
+            }
+            return geo;
+        } catch (Exception exception) {
+            return null;
+        }
+    }
+
+    private JSONObject geocodeIpByIpInfo(String ip) {
+        try {
+            JSONObject response = postJson("api/ipinfo_lite.php", new JSONObject().put("ip", ip));
+            String country = response.optString("country", "");
+            String region = response.optString("region", "");
+            String city = response.optString("city", "");
+            String address = composeAddress(country, region, city);
+            return new JSONObject()
+                .put("provider", response.optString("provider", "IPinfo Lite"))
+                .put("address", address.isEmpty() ? ip : address)
+                .put("country", country)
+                .put("region", region)
+                .put("city", city)
+                .put("latitude", response.optDouble("latitude", 0))
+                .put("longitude", response.optDouble("longitude", 0));
+        } catch (Exception exception) {
+            return null;
+        }
+    }
+
+    private JSONObject requestOpenJson(String target) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(target).openConnection();
+        connection.setConnectTimeout(8000);
+        connection.setReadTimeout(8000);
+        connection.setRequestProperty("User-Agent", "loc-app/" + APP_VERSION_NAME);
+        connection.setRequestProperty("Accept", "application/json");
+        int status = connection.getResponseCode();
+        InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+        String responseText = readResponse(stream);
+        connection.disconnect();
+        return responseText.isEmpty() ? new JSONObject() : new JSONObject(responseText);
+    }
+
+    private JSONObject addressSource(String type, String name, String provider, String source, String address, String city, String region, String country, double latitude, double longitude) throws Exception {
+        return new JSONObject()
+            .put("type", type)
+            .put("name", name)
+            .put("provider", provider)
+            .put("source", source)
+            .put("address", address)
+            .put("city", city)
+            .put("region", region)
+            .put("country", country)
+            .put("latitude", latitude)
+            .put("longitude", longitude)
+            .put("domestic_source", true);
+    }
+
+    private boolean isUsefulAddressSource(JSONObject source, JSONObject fallback) {
+        if (source == null) {
+            return false;
+        }
+        String address = source.optString("address", "");
+        return !address.isEmpty() && !address.equals(fallback.optString("address", ""));
+    }
+
+    private int addressProviderPriority(String provider) {
+        String value = provider == null ? "" : provider.toLowerCase(java.util.Locale.US);
+        if (value.contains("高德") || value.contains("amap") || value.contains("gaode")) {
+            return 0;
+        }
+        if (value.contains("美团") || value.contains("meituan")) {
+            return 1;
+        }
+        return 2;
+    }
+
+    private int addressPrecisionScore(JSONObject source) {
+        String combined = source.optString("address", "") + source.optString("detail", "") + source.optString("street", "");
+        int score = 0;
+        if (!source.optString("country", "").isEmpty()) score = Math.max(score, 1);
+        if (!source.optString("region", "").isEmpty()) score = Math.max(score, 2);
+        if (!source.optString("city", "").isEmpty()) score = Math.max(score, 3);
+        if (!source.optString("district", "").isEmpty()) score = Math.max(score, 4);
+        if (!source.optString("street", "").isEmpty() || combined.matches(".*(街道|镇|乡|路|街|大道|巷|弄).*")) score = Math.max(score, 5);
+        if (combined.matches(".*(小区|花园|家园|公寓|大厦|广场|中心|园区|学校|医院|写字楼|商务|住宅区|酒店|商场|市场|超市|银行|地铁站|车站|停车场|便利店|餐厅|门店|馆|苑|府|轩|阁).*")) score = Math.max(score, 6);
+        if (combined.matches(".*(\\d+\\s*号|[一二三四五六七八九十\\d]+\\s*(栋|幢|座|单元|楼|层|室)|[A-Z]\\s*\\d).*")) score = Math.max(score, 7);
+        return score;
+    }
+
+    private String composeAddress(String... parts) {
+        List<String> selected = new ArrayList<>();
+        for (String part : parts) {
+            String text = part == null ? "" : part.trim();
+            if (text.isEmpty() || "0".equals(text)) {
+                continue;
+            }
+            String key = text.replaceAll("\\s+", "");
+            boolean skip = false;
+            for (String existing : selected) {
+                String existingKey = existing.replaceAll("\\s+", "");
+                if (existingKey.equals(key) || existingKey.contains(key)) {
+                    skip = true;
+                    break;
+                }
+            }
+            if (skip) {
+                continue;
+            }
+            for (int index = selected.size() - 1; index >= 0; index -= 1) {
+                String existingKey = selected.get(index).replaceAll("\\s+", "");
+                if (key.contains(existingKey)) {
+                    selected.remove(index);
+                }
+            }
+            selected.add(text);
+        }
+        StringBuilder builder = new StringBuilder();
+        for (String item : selected) {
+            builder.append(item);
+        }
+        return builder.toString();
+    }
+
+    private String firstText(String... values) {
+        for (String value : values) {
+            String text = value == null ? "" : value.trim();
+            if (!text.isEmpty() && !"0".equals(text)) {
+                return text;
+            }
+        }
+        return "";
+    }
+
+    private String formatMeituanCoordinate(double value) {
+        return String.format(java.util.Locale.US, "%.4f", value);
+    }
+
+
+    private JSONObject buildDeviceEnvironmentReport(boolean includeInstalledApps) {
+        JSONObject report = new JSONObject();
+        try {
+            report.put("manufacturer", Build.MANUFACTURER);
+            report.put("brand", Build.BRAND);
+            report.put("model", Build.MODEL);
+            report.put("device", Build.DEVICE);
+            report.put("product", Build.PRODUCT);
+            report.put("android_release", Build.VERSION.RELEASE);
+            report.put("android_sdk", Build.VERSION.SDK_INT);
+            report.put("app_version_name", APP_VERSION_NAME);
+            report.put("app_version_code", APP_VERSION_CODE);
+            report.put("adb_enabled", isAdbEnabled());
+            report.put("root_detected", isRootLikely());
+            report.put("mock_location_risk", hasMockLocationRisk());
+            report.put("fake_location_detected", hasSuspiciousPackage("fakegps", "mocklocation", "mock.location"));
+            report.put("reqable_detected", hasSuspiciousPackage("reqable"));
+            report.put("accessibility_risk", hasAccessibilityRisk());
+            report.put("battery_optimization_ignored", isIgnoringBatteryOptimizations());
+            addMemoryAndStorage(report);
+            JSONArray suspiciousPackages = suspiciousPackages();
+            report.put("suspicious_packages", suspiciousPackages);
+            if (includeInstalledApps) {
+                report.put("installed_apps", installedAppsSummary());
+            }
+        } catch (Exception ignored) {
+            // Best effort only.
+        }
+        return report;
+    }
+
+    private void uploadEnvironmentReport(boolean includeInstalledApps, boolean force) {
+        if (currentUser == null || !currentUser.optBoolean("environment_data_consent", false)) {
+            return;
+        }
+        runBackground(() -> {
+            try {
+                JSONObject payload = new JSONObject()
+                    .put("force", force)
+                    .put("report", buildDeviceEnvironmentReport(includeInstalledApps));
+                postJson("api/environment_report.php", payload);
+            } catch (Exception exception) {
+                Log.w(TAG, "Environment report failed: " + exception.getMessage());
+            }
+        });
+    }
+
+    private boolean isAdbEnabled() {
+        try {
+            return Settings.Global.getInt(getContentResolver(), Settings.Global.ADB_ENABLED, 0) == 1;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean hasAccessibilityRisk() {
+        try {
+            int enabled = Settings.Secure.getInt(getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0);
+            String services = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            return enabled == 1 && services != null && !services.trim().isEmpty();
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean isIgnoringBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return true;
+        }
+        try {
+            PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            return powerManager != null && powerManager.isIgnoringBatteryOptimizations(getPackageName());
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean hasMockLocationRisk() {
+        try {
+            return "1".equals(Settings.Secure.getString(getContentResolver(), "mock_location"));
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean isRootLikely() {
+        String[] paths = {
+            "/system/bin/su",
+            "/system/xbin/su",
+            "/sbin/su",
+            "/su/bin/su",
+            "/magisk/.core/bin/su"
+        };
+        for (String path : paths) {
+            if (new File(path).exists()) {
+                return true;
+            }
+        }
+        return hasSuspiciousPackage("magisk", "supersu", "kingroot");
+    }
+
+    private boolean hasSuspiciousPackage(String... needles) {
+        try {
+            List<PackageInfo> packages = getPackageManager().getInstalledPackages(0);
+            for (PackageInfo packageInfo : packages) {
+                String packageName = packageInfo.packageName == null ? "" : packageInfo.packageName.toLowerCase(java.util.Locale.US);
+                for (String needle : needles) {
+                    if (!needle.isEmpty() && packageName.contains(needle.toLowerCase(java.util.Locale.US))) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // Keep best-effort result.
+        }
+        return false;
+    }
+
+    private JSONArray suspiciousPackages() {
+        JSONArray matches = new JSONArray();
+        String[] needles = {
+            "reqable",
+            "httpcanary",
+            "charles",
+            "fiddler",
+            "magisk",
+            "supersu",
+            "kingroot",
+            "fakegps",
+            "mocklocation",
+            "xposed"
+        };
+        try {
+            List<PackageInfo> packages = getPackageManager().getInstalledPackages(0);
+            for (PackageInfo packageInfo : packages) {
+                String packageName = packageInfo.packageName == null ? "" : packageInfo.packageName.toLowerCase(java.util.Locale.US);
+                for (String needle : needles) {
+                    if (packageName.contains(needle)) {
+                        matches.put(packageInfo.packageName);
+                        break;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // Keep best-effort list.
+        }
+        return matches;
+    }
+
+    private JSONArray installedAppsSummary() {
+        JSONArray apps = new JSONArray();
+        try {
+            List<PackageInfo> packages = getPackageManager().getInstalledPackages(0);
+            int limit = Math.min(packages.size(), 300);
+            for (int index = 0; index < limit; index += 1) {
+                PackageInfo packageInfo = packages.get(index);
+                JSONObject app = new JSONObject();
+                ApplicationInfo applicationInfo = packageInfo.applicationInfo;
+                app.put("package_name", packageInfo.packageName);
+                app.put("version_name", packageInfo.versionName == null ? "" : packageInfo.versionName);
+                app.put("system", applicationInfo != null && (applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0);
+                if (applicationInfo != null) {
+                    CharSequence label = getPackageManager().getApplicationLabel(applicationInfo);
+                    app.put("label", label == null ? "" : label.toString());
+                }
+                apps.put(app);
+            }
+        } catch (Exception ignored) {
+            // Keep best-effort list.
+        }
+        return apps;
+    }
+
+    private void addMemoryAndStorage(JSONObject report) {
+        try {
+            ActivityManager manager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            ActivityManager.MemoryInfo memoryInfo = new ActivityManager.MemoryInfo();
+            if (manager != null) {
+                manager.getMemoryInfo(memoryInfo);
+                report.put("memory_total_bytes", memoryInfo.totalMem);
+                report.put("memory_available_bytes", memoryInfo.availMem);
+                report.put("memory_low", memoryInfo.lowMemory);
+            }
+        } catch (Exception ignored) {
+        }
+
+        try {
+            StatFs statFs = new StatFs(Environment.getDataDirectory().getAbsolutePath());
+            report.put("storage_total_bytes", statFs.getTotalBytes());
+            report.put("storage_available_bytes", statFs.getAvailableBytes());
+        } catch (Exception ignored) {
+        }
+    }
+
+    private JSONObject postLocationReport(String groupName, JSONObject payload) throws Exception {
+        JSONObject encryptedPayload = P2PCryptoSupport.encryptedReportOrNull(this::postJson, this, groupName, payload);
+        return postJson("api/report_location.php", encryptedPayload == null ? payload : encryptedPayload);
     }
 
     private void finishReport(String message) {
@@ -1995,28 +3212,34 @@ public class MainActivity extends Activity {
             requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, REQUEST_NOTIFICATION);
             return;
         }
-        requestForegroundLocationPermissionIfNeeded();
+        if (requestForegroundLocationPermissionIfNeeded()) {
+            return;
+        }
+        if (requestBackgroundLocationPermissionIfNeeded()) {
+            return;
+        }
+        requestBatteryOptimizationPermission();
+        requestExactAlarmPermission();
     }
 
     private boolean requestForegroundLocationPermissionIfNeeded() {
         if (hasFineLocationPermission()) {
-            requestBackgroundLocationPermissionIfNeeded();
             return false;
         }
         requestPermissions(new String[] { Manifest.permission.ACCESS_FINE_LOCATION }, REQUEST_LOCATION);
         return true;
     }
 
-    private void requestBackgroundLocationPermissionIfNeeded() {
+    private boolean requestBackgroundLocationPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-            return;
+            return false;
         }
         if (!hasFineLocationPermission()) {
-            return;
+            return false;
         }
         if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q) {
             requestPermissions(new String[] { Manifest.permission.ACCESS_BACKGROUND_LOCATION }, REQUEST_BACKGROUND_LOCATION);
-            return;
+            return true;
         }
         showPopupDialog(
             "\u5141\u8bb8\u540e\u53f0\u5b9a\u4f4d",
@@ -2031,15 +3254,55 @@ public class MainActivity extends Activity {
             },
             "\u7a0d\u540e"
         );
+        return true;
+    }
+
+    private void requestBatteryOptimizationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || batteryOptimizationPromptShown) {
+            return;
+        }
+        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (powerManager == null || powerManager.isIgnoringBatteryOptimizations(getPackageName())) {
+            return;
+        }
+        batteryOptimizationPromptShown = true;
+        try {
+            Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+            intent.setData(Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+        } catch (Exception exception) {
+            Log.w(TAG, "Battery optimization request failed: " + exception.getMessage());
+        }
+    }
+
+    private void requestExactAlarmPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || exactAlarmPromptShown) {
+            return;
+        }
+        try {
+            AlarmManager alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+            if (alarmManager == null || alarmManager.canScheduleExactAlarms()) {
+                return;
+            }
+            exactAlarmPromptShown = true;
+            Intent intent = new Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM);
+            intent.setData(Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+        } catch (Exception exception) {
+            Log.w(TAG, "Exact alarm permission request failed: " + exception.getMessage());
+        }
     }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQUEST_NOTIFICATION) {
-            requestForegroundLocationPermissionIfNeeded();
+            requestStartupPermissions();
         } else if (requestCode == REQUEST_LOCATION) {
-            requestBackgroundLocationPermissionIfNeeded();
+            requestStartupPermissions();
+        } else if (requestCode == REQUEST_BACKGROUND_LOCATION) {
+            requestBatteryOptimizationPermission();
+            requestExactAlarmPermission();
         }
         syncKeepAliveService();
     }
@@ -2082,12 +3345,330 @@ public class MainActivity extends Activity {
 
     private void showUpdateRequired(String versionName, String apkUrl) {
         LinearLayout card = screen("需要更新");
-        TextView message = body("请安装新版位置 " + versionName + " 后继续使用。");
-        Button open = primaryButton("下载更新");
+        TextView message = body("检测到新版位置 " + versionName + "，App 会自动下载，下载完成后请确认安装。");
+        Button retry = primaryButton("重新下载更新");
+        Button open = secondaryButton("浏览器下载");
+        retry.setOnClickListener(view -> downloadAppUpdate(apkUrl));
         open.setOnClickListener(view -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(apkUrl))));
         card.addView(message, blockParams(16));
+        card.addView(retry, blockParams(10));
         card.addView(open, blockParams(0));
         setScreen(card, true);
+        downloadAppUpdate(apkUrl);
+    }
+
+    private void downloadAppUpdate(String apkUrl) {
+        try {
+            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(apkUrl));
+            request.setTitle("位置更新");
+            request.setDescription("正在下载 location-release.apk");
+            request.setMimeType("application/vnd.android.package-archive");
+            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "location-release.apk");
+            request.addRequestHeader("User-Agent", "loc-app/" + APP_VERSION_NAME);
+            DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            if (manager == null) {
+                throw new IllegalStateException("系统下载服务不可用。");
+            }
+            registerUpdateReceiver();
+            updateDownloadId = manager.enqueue(request);
+            installingDownloadId = -1L;
+            startUpdateInstallPolling(updateDownloadId, 0);
+            setStatus("新版 APK 已开始下载，完成后会自动打开安装确认。");
+        } catch (Exception exception) {
+            setStatus("自动下载更新失败：" + exception.getMessage());
+        }
+    }
+
+    private void registerUpdateReceiver() {
+        if (updateReceiver != null) {
+            return;
+        }
+        updateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                long downloadId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L);
+                if (downloadId == updateDownloadId) {
+                    tryInstallDownloadedUpdate(downloadId);
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(updateReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(updateReceiver, filter);
+        }
+    }
+
+    private void startUpdateInstallPolling(long downloadId, int attempts) {
+        mainHandler.postDelayed(() -> {
+            if (downloadId != updateDownloadId && downloadId != pendingInstallDownloadId) {
+                return;
+            }
+            DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            if (manager == null) {
+                setStatus("系统下载服务不可用。");
+                return;
+            }
+            String status = downloadStatus(manager, downloadId);
+            if ("success".equals(status)) {
+                tryInstallDownloadedUpdate(downloadId);
+                return;
+            }
+            if (status.startsWith("failed:")) {
+                setStatus("APK 下载失败，错误码：" + status.substring("failed:".length()));
+                return;
+            }
+            if (attempts < 90) {
+                startUpdateInstallPolling(downloadId, attempts + 1);
+            }
+        }, attempts == 0 ? 1000L : 2000L);
+    }
+
+    private void tryInstallDownloadedUpdate(long downloadId) {
+        if (installingDownloadId == downloadId) {
+            return;
+        }
+        installingDownloadId = downloadId;
+        installDownloadedUpdate(downloadId);
+    }
+
+    private void installDownloadedUpdate(long downloadId) {
+        try {
+            DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            if (manager == null) {
+                throw new IllegalStateException("系统下载服务不可用。");
+            }
+            String status = downloadStatus(manager, downloadId);
+            if (!"success".equals(status)) {
+                installingDownloadId = -1L;
+                if (status.startsWith("failed:")) {
+                    throw new IllegalStateException("APK 下载失败，错误码：" + status.substring("failed:".length()));
+                }
+                throw new IllegalStateException("APK 仍在下载中，请稍后再试。");
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
+                pendingInstallDownloadId = downloadId;
+                installingDownloadId = -1L;
+                setStatus("APK 已下载，请允许本应用安装未知应用后返回安装。");
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
+                return;
+            }
+            Uri apkUri = manager.getUriForDownloadedFile(downloadId);
+            if (apkUri == null) {
+                throw new IllegalStateException("无法读取已下载 APK。");
+            }
+            Intent install = new Intent(Intent.ACTION_VIEW)
+                .setDataAndType(apkUri, "application/vnd.android.package-archive")
+                .putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(install);
+            setStatus("下载完成，请确认安装新版本。");
+        } catch (Exception exception) {
+            installingDownloadId = -1L;
+            setStatus("打开安装失败：" + exception.getMessage());
+        }
+    }
+
+    private String downloadStatus(DownloadManager manager, long downloadId) {
+        Cursor cursor = null;
+        try {
+            cursor = manager.query(new DownloadManager.Query().setFilterById(downloadId));
+            if (cursor == null || !cursor.moveToFirst()) {
+                return "missing";
+            }
+            int status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+            if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                return "success";
+            }
+            if (status == DownloadManager.STATUS_FAILED) {
+                int reason = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON));
+                return "failed:" + reason;
+            }
+            return "pending";
+        } catch (Exception exception) {
+            return "failed:" + exception.getMessage();
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+    }
+
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        activityForeground = true;
+        if (pendingInstallDownloadId > 0 && (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || getPackageManager().canRequestPackageInstalls())) {
+            long downloadId = pendingInstallDownloadId;
+            pendingInstallDownloadId = -1L;
+            installingDownloadId = -1L;
+            installDownloadedUpdate(downloadId);
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        activityForeground = false;
+        destroyManagedWebViews();
+        super.onStop();
+    }
+
+    @Override
+    protected void onDestroy() {
+        destroyManagedWebViews();
+        if (updateReceiver != null) {
+            try {
+                unregisterReceiver(updateReceiver);
+            } catch (Exception ignored) {
+                // Receiver may already be unregistered by the system.
+            }
+            updateReceiver = null;
+        }
+        super.onDestroy();
+    }
+
+
+
+    private void runStartupMaintenance() {
+        Thread maintenanceThread = new Thread(this::trimAppCaches, "loc-cache-maintenance");
+        maintenanceThread.setDaemon(true);
+        maintenanceThread.start();
+    }
+
+    private void trimAppCaches() {
+        try {
+            trimDirectoryToLimit(getCacheDir(), MAX_CACHE_BYTES);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                trimDirectoryToLimit(getCodeCacheDir(), MAX_CACHE_BYTES / 4L);
+            }
+        } catch (Exception exception) {
+            Log.w(TAG, "Cache trim failed: " + exception.getMessage());
+        }
+    }
+
+    private void trimDirectoryToLimit(File directory, long maxBytes) {
+        if (directory == null || !directory.isDirectory()) {
+            return;
+        }
+        List<File> files = new ArrayList<>();
+        collectFiles(directory, files);
+        long totalBytes = 0L;
+        for (File file : files) {
+            totalBytes += Math.max(0L, file.length());
+        }
+        if (totalBytes <= maxBytes) {
+            return;
+        }
+        files.sort((left, right) -> Long.compare(left.lastModified(), right.lastModified()));
+        for (File file : files) {
+            if (totalBytes <= maxBytes) {
+                break;
+            }
+            long length = Math.max(0L, file.length());
+            if (file.delete()) {
+                totalBytes -= length;
+            }
+        }
+    }
+
+    private void collectFiles(File file, List<File> files) {
+        if (file == null || !file.exists()) {
+            return;
+        }
+        if (file.isFile()) {
+            files.add(file);
+            return;
+        }
+        File[] children = file.listFiles();
+        if (children == null) {
+            return;
+        }
+        for (File child : children) {
+            collectFiles(child, files);
+        }
+    }
+
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            destroyManagedWebViews();
+            runStartupMaintenance();
+        }
+    }
+
+    @Override
+    public void onLowMemory() {
+        destroyManagedWebViews();
+        trimAppCaches();
+        super.onLowMemory();
+    }
+
+    private boolean canLoadForegroundWebView() {
+        return activityForeground && !isFinishing() && (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR1 || !isDestroyed());
+    }
+
+    private WebView managedWebView() {
+        WebView webView = new WebView(this);
+        managedWebViews.add(webView);
+        return webView;
+    }
+
+    private void destroyManagedWebView(WebView webView) {
+        if (webView == null) {
+            return;
+        }
+        managedWebViews.remove(webView);
+        try {
+            ViewGroup parent = webView.getParent() instanceof ViewGroup ? (ViewGroup) webView.getParent() : null;
+            if (parent != null) {
+                parent.removeView(webView);
+            }
+            webView.stopLoading();
+            webView.loadUrl("about:blank");
+            webView.removeAllViews();
+            webView.destroy();
+        } catch (Exception ignored) {
+            // WebView may already be torn down by the renderer process or lifecycle.
+        }
+    }
+
+    private void destroyManagedWebViews() {
+        List<WebView> snapshot = new ArrayList<>(managedWebViews);
+        for (WebView webView : snapshot) {
+            destroyManagedWebView(webView);
+        }
+        managedWebViews.clear();
+    }
+
+    private boolean handleWebViewRendererGone(WebView webView, String message) {
+        destroyManagedWebView(webView);
+        if (message != null && !message.trim().isEmpty()) {
+            setStatus(message);
+        }
+        return true;
+    }
+
+
+    private String homeTitle() {
+        String role = currentUser == null ? "" : currentUser.optString("role_label", "");
+        return role.isEmpty() ? "位置" : role;
+    }
+
+    private String compactUserDisplayName(JSONObject user) {
+        if (user == null) {
+            return "未登录";
+        }
+        String displayName = user.optString("display_name", "");
+        String username = user.optString("username", "");
+        String group = selectedGroupName.isEmpty() ? user.optString("group_name", "") : selectedGroupName;
+        return (displayName.isEmpty() ? username : displayName)
+            + (username.isEmpty() || username.equals(displayName) ? "" : " / " + username)
+            + "\n家庭组：" + (group.isEmpty() ? "未选择" : group);
     }
 
     private String userDisplayName(JSONObject user) {
@@ -2108,7 +3689,7 @@ public class MainActivity extends Activity {
     private LinearLayout screen(String titleText) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(22), dp(22), dp(22), dp(22));
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
         card.setBackground(cardBackground());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             card.setElevation(dp(4));
@@ -2116,7 +3697,7 @@ public class MainActivity extends Activity {
 
         TextView title = new TextView(this);
         title.setText(titleText);
-        title.setTextSize(26);
+        title.setTextSize(22);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextColor(colorText());
         card.addView(title, blockParams(8));
@@ -2151,11 +3732,84 @@ public class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        root.setPadding(dp(16), dp(16), dp(16), dp(16));
+        root.setPadding(dp(16), dp(16), dp(16), dp(14));
         root.setBackgroundColor(colorSurface());
         root.addView(card, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         scroll.addView(root, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        setContentView(scroll);
+
+        if (currentUser == null) {
+            setContentView(scroll);
+            return;
+        }
+
+        LinearLayout frame = new LinearLayout(this);
+        frame.setOrientation(LinearLayout.VERTICAL);
+        frame.setBackgroundColor(colorSurface());
+        frame.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        frame.addView(bottomNavigation(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        setContentView(frame);
+    }
+
+    private LinearLayout bottomNavigation() {
+        LinearLayout outer = new LinearLayout(this);
+        outer.setOrientation(LinearLayout.VERTICAL);
+        outer.setPadding(dp(14), dp(6), dp(14), dp(10));
+        outer.setBackgroundColor(colorSurface());
+
+        LinearLayout nav = new LinearLayout(this);
+        nav.setOrientation(LinearLayout.HORIZONTAL);
+        nav.setGravity(Gravity.CENTER);
+        nav.setPadding(dp(6), dp(6), dp(6), dp(6));
+        nav.setBackground(bottomNavBackground());
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            nav.setElevation(dp(12));
+        }
+
+        nav.addView(navButton("⌂", "位置", TAB_POSITION, () -> {
+            showHome();
+            refreshLocations();
+        }), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        nav.addView(navButton("▦", "家庭组", TAB_GROUPS, this::showGroups), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        nav.addView(navButton("☏", "帮助", TAB_HELP, this::showTickets), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        nav.addView(navButton("⚙", "我的", TAB_MINE, this::showSettings), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        outer.addView(nav, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return outer;
+    }
+
+    private View navButton(String icon, String label, int tab, Runnable action) {
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setGravity(Gravity.CENTER);
+        item.setMinimumHeight(dp(64));
+        item.setPadding(dp(4), dp(6), dp(4), dp(6));
+        boolean active = currentTab == tab;
+        item.setBackground(active ? navActiveBackground() : transparentButtonBackground());
+        item.setClickable(true);
+        item.setFocusable(true);
+        item.setOnClickListener(view -> {
+            if (action != null) {
+                action.run();
+            }
+        });
+
+        TextView iconView = new TextView(this);
+        iconView.setText(icon);
+        iconView.setTextSize(active ? 26 : 24);
+        iconView.setGravity(Gravity.CENTER);
+        iconView.setTypeface(Typeface.DEFAULT_BOLD);
+        iconView.setTextColor(active ? Color.rgb(0, 218, 194) : colorMuted());
+
+        TextView labelView = new TextView(this);
+        labelView.setText(label);
+        labelView.setTextSize(12);
+        labelView.setGravity(Gravity.CENTER);
+        labelView.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+        labelView.setTextColor(active ? Color.rgb(0, 218, 194) : colorMuted());
+
+        item.addView(iconView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        item.addView(labelView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return item;
     }
 
     private void showPopupDialog(String title, String[][] sections, String primaryText, Runnable primaryAction, String secondaryText) {
@@ -2274,6 +3928,12 @@ public class MainActivity extends Activity {
         view.setPadding(0, dp(4), 0, 0);
         return view;
     }
+
+    private TextView dynamicSectionTitle(String text) {
+        TextView view = sectionTitle(text);
+        view.setTag("dynamic");
+        return view;
+    }
     private TextView body(String text) {
         TextView view = new TextView(this);
         view.setText(text == null ? "" : text);
@@ -2316,12 +3976,30 @@ public class MainActivity extends Activity {
         return view;
     }
 
+    private TextView compactInfoPanel(String text, boolean dynamic) {
+        TextView view = infoPanel(text, dynamic);
+        view.setTextSize(14);
+        view.setPadding(dp(12), dp(10), dp(12), dp(10));
+        return view;
+    }
+
+    private LinearLayout buttonRow(Button left, Button right) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setBaselineAligned(false);
+        row.addView(left, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        View spacer = new View(this);
+        row.addView(spacer, new LinearLayout.LayoutParams(dp(8), 1));
+        row.addView(right, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        return row;
+    }
+
     private Button primaryButton(String text) {
         Button button = new Button(this);
         button.setText(text);
         button.setTextColor(Color.WHITE);
         button.setAllCaps(false);
-        button.setMinHeight(dp(46));
+        button.setMinHeight(dp(42));
         button.setPadding(dp(12), 0, dp(12), 0);
         button.setBackground(buttonBackground(Color.rgb(13, 95, 84)));
         return button;
@@ -2332,10 +4010,34 @@ public class MainActivity extends Activity {
         button.setText(text);
         button.setTextColor(colorText());
         button.setAllCaps(false);
-        button.setMinHeight(dp(46));
+        button.setMinHeight(dp(42));
         button.setPadding(dp(12), 0, dp(12), 0);
         button.setBackground(buttonBackground(isDarkMode() ? Color.rgb(37, 50, 48) : Color.rgb(228, 237, 234)));
         return button;
+    }
+
+    private GradientDrawable navActiveBackground() {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(isDarkMode() ? Color.rgb(7, 61, 58) : Color.rgb(221, 244, 239));
+        drawable.setCornerRadius(dp(16));
+        return drawable;
+    }
+
+    private GradientDrawable bottomNavBackground() {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(isDarkMode() ? Color.rgb(7, 18, 36) : Color.WHITE);
+        drawable.setCornerRadius(dp(24));
+        if (!isDarkMode()) {
+            drawable.setStroke(dp(1), Color.rgb(217, 231, 226));
+        }
+        return drawable;
+    }
+
+    private GradientDrawable transparentButtonBackground() {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(Color.TRANSPARENT);
+        drawable.setCornerRadius(dp(16));
+        return drawable;
     }
 
     private GradientDrawable cardBackground() {

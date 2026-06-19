@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="33"
-    android:versionName="2.0.0"
+    android:versionCode="43"
+    android:versionName="2.0.10"
     package="com.familylocation.admin">
 
     <uses-sdk
@@ -8,6 +8,7 @@
         android:targetSdkVersion="35" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="false"

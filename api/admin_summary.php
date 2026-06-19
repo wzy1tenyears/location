@@ -133,12 +133,80 @@ try {
         return $payload;
     }, $locationsStmt->fetchAll());
 
+    $announcementStmt = $pdo->query('SELECT * FROM announcements ORDER BY id DESC LIMIT 1');
+    $announcement = $announcementStmt->fetch() ?: null;
+    $announcementPayload = $announcement ? [
+        'id' => (int) $announcement['id'],
+        'title' => (string) $announcement['title'],
+        'body' => (string) $announcement['body'],
+        'is_active' => (int) $announcement['is_active'] === 1,
+        'version' => (int) $announcement['version'],
+        'updated_at' => format_datetime((string) $announcement['updated_at']),
+    ] : null;
+
+    $invitesStmt = $pdo->query('
+        SELECT *
+        FROM invite_codes
+        ORDER BY id DESC
+        LIMIT 50
+    ');
+    $invites = array_map(static function (array $invite): array {
+        return [
+            'id' => (int) $invite['id'],
+            'code' => (string) $invite['code'],
+            'note' => (string) ($invite['note'] ?? ''),
+            'invite_type' => (string) ($invite['invite_type'] ?? 'invite'),
+            'invite_type_label' => (string) ($invite['invite_type'] ?? 'invite') === 'group_create' ? '组创建' : '纯邀请',
+            'allow_group_owner' => (int) ($invite['allow_group_owner'] ?? 0) === 1,
+            'max_uses' => (int) ($invite['max_uses'] ?? 1),
+            'used_count' => (int) ($invite['used_count'] ?? 0),
+            'is_active' => (int) ($invite['is_active'] ?? 0) === 1,
+            'assigned_group_name' => (string) ($invite['assigned_group_name'] ?? ''),
+            'created_at' => format_datetime((string) $invite['created_at']),
+        ];
+    }, $invitesStmt->fetchAll());
+
+    $ticketsStmt = $pdo->query('
+        SELECT
+            t.*,
+            u.username,
+            u.display_name,
+            latest.message AS last_message,
+            latest.created_at AS last_message_at
+        FROM support_tickets t
+        INNER JOIN users u ON u.id = t.user_id
+        LEFT JOIN support_ticket_messages latest ON latest.id = (
+            SELECT id FROM support_ticket_messages WHERE ticket_id = t.id ORDER BY id DESC LIMIT 1
+        )
+        ORDER BY t.updated_at DESC, t.id DESC
+        LIMIT 50
+    ');
+    $tickets = array_map(static function (array $ticket): array {
+        return [
+            'id' => (int) $ticket['id'],
+            'user_id' => (int) $ticket['user_id'],
+            'username' => (string) $ticket['username'],
+            'display_name' => (string) $ticket['display_name'],
+            'group_name' => (string) $ticket['group_name'],
+            'subject' => (string) $ticket['subject'],
+            'status' => (string) $ticket['status'],
+            'status_label' => (string) $ticket['status'] === 'closed' ? '已关闭' : '处理中',
+            'last_message' => (string) ($ticket['last_message'] ?? ''),
+            'last_message_at' => format_datetime((string) ($ticket['last_message_at'] ?? '')),
+            'created_at' => format_datetime((string) $ticket['created_at']),
+            'updated_at' => format_datetime((string) $ticket['updated_at']),
+        ];
+    }, $ticketsStmt->fetchAll());
+
     json_response([
         'ok' => true,
         'stats' => $stats,
         'groups' => $groups,
         'users' => $users,
         'locations' => $locations,
+        'announcement' => $announcementPayload,
+        'invites' => $invites,
+        'tickets' => $tickets,
         'server_time' => date('Y-m-d H:i:s'),
     ]);
 } catch (Throwable $th) {

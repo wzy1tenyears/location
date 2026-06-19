@@ -1069,7 +1069,7 @@ function is_admin_logged_in(): bool
 function require_admin(): void
 {
     if (!is_admin_logged_in()) {
-        redirect('/');
+        redirect('/' . admin_url_path() . 'login.php');
     }
 }
 

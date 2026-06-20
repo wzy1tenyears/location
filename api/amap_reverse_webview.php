@@ -6,8 +6,23 @@ require_once __DIR__ . '/../private/lib/bootstrap.php';
 
 require_app_user_agent();
 
-$latitude = input_float('lat');
-$longitude = input_float('lng');
+function amap_query_float(string $key): ?float
+{
+    $value = $_GET[$key] ?? null;
+    if (is_array($value)) {
+        return null;
+    }
+
+    $value = trim((string) $value);
+    if ($value === '' || !is_numeric($value)) {
+        return null;
+    }
+
+    return (float) $value;
+}
+
+$latitude = amap_query_float('lat');
+$longitude = amap_query_float('lng');
 if ($latitude === null || $longitude === null || $latitude < -90 || $latitude > 90 || $longitude < -180 || $longitude > 180) {
     http_response_code(422);
     header('Content-Type: text/html; charset=utf-8');

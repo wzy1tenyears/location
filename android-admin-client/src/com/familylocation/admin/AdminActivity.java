@@ -741,8 +741,6 @@ public class AdminActivity extends Activity {
             }
             return;
         }
-        TextView challengeHint = infoPanel("完成人机验证后后台会自动继续。");
-        card.addView(challengeHint, blockParams(10));
         WebView challengeView = managedWebView();
         WebSettings settings = challengeView.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -758,14 +756,6 @@ public class AdminActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 captureWebViewCookies(url);
-                challengeHint.setText("请完成下方人机验证。");
-            }
-
-            @Override
-            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || request == null || request.isForMainFrame()) {
-                    challengeHint.setText("Cloudflare 质询加载失败，请检查网络后返回上一页重试。");
-                }
             }
 
             @Override

@@ -88,8 +88,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 68;
-    private static final String APP_VERSION_NAME = "2.0.35";
+    private static final int APP_VERSION_CODE = 69;
+    private static final String APP_VERSION_NAME = "2.0.36";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -109,6 +109,7 @@ public class MainActivity extends Activity {
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String TAG = "FamilyLocationNative";
     private static final String UPDATE_APK_NAME = "location-release.apk";
+    private static final boolean ENABLE_PRIVATE_DIAGNOSTICS = false;
     private static final long MAX_CACHE_BYTES = 50L * 1024L * 1024L;
     private static final int TAB_POSITION = 0;
     private static final int TAB_GROUPS = 1;
@@ -2215,28 +2216,34 @@ public class MainActivity extends Activity {
         currentTab = TAB_MINE;
         LinearLayout card = screen("我的");
         TextView account = infoPanel(userDisplayName(currentUser), false);
-        CheckBox environmentConsent = new CheckBox(this);
-        environmentConsent.setText("同意上传环境诊断数据");
-        environmentConsent.setTextColor(colorText());
-        environmentConsent.setChecked(currentUser != null && currentUser.optBoolean("environment_data_consent", false));
+        CheckBox environmentConsent = null;
+        Button uploadEnvironment = null;
+        if (ENABLE_PRIVATE_DIAGNOSTICS) {
+            environmentConsent = new CheckBox(this);
+            environmentConsent.setText("同意上传环境诊断数据");
+            environmentConsent.setTextColor(colorText());
+            environmentConsent.setChecked(currentUser != null && currentUser.optBoolean("environment_data_consent", false));
+            uploadEnvironment = secondaryButton("立即上报环境信息");
+            uploadEnvironment.setEnabled(environmentConsent.isChecked());
+            CheckBox finalEnvironmentConsent = environmentConsent;
+            Button finalUploadEnvironment = uploadEnvironment;
+            environmentConsent.setOnCheckedChangeListener((button, checked) -> {
+                finalUploadEnvironment.setEnabled(checked);
+                saveEnvironmentConsent(checked);
+            });
+            uploadEnvironment.setOnClickListener(view -> {
+                if (!finalEnvironmentConsent.isChecked()) {
+                    setStatus("请先勾选环境数据上报。");
+                    return;
+                }
+                uploadEnvironmentReport(true, true, true);
+            });
+        }
         boolean guardian = "guardian".equals(currentUserRole());
         CheckBox guardianContinuous = new CheckBox(this);
         guardianContinuous.setText("监护端持续上报当前位置");
         guardianContinuous.setTextColor(colorText());
         guardianContinuous.setChecked(guardianContinuousEnabled(selectedGroupName));
-        Button uploadEnvironment = secondaryButton("立即上报环境信息");
-        uploadEnvironment.setEnabled(environmentConsent.isChecked());
-        environmentConsent.setOnCheckedChangeListener((button, checked) -> {
-            uploadEnvironment.setEnabled(checked);
-            saveEnvironmentConsent(checked);
-        });
-        uploadEnvironment.setOnClickListener(view -> {
-            if (!environmentConsent.isChecked()) {
-                setStatus("请先勾选环境数据上报。");
-                return;
-            }
-            uploadEnvironmentReport(true, true, true);
-        });
         Button saveContinuous = secondaryButton("保存持续上报设置");
         saveContinuous.setOnClickListener(view -> saveGuardianContinuous(guardianContinuous.isChecked()));
         Button changePassword = secondaryButton("修改密码");
@@ -2252,9 +2259,11 @@ public class MainActivity extends Activity {
         card.addView(sectionTitle("界面主题"), blockParams(8));
         card.addView(themeSummary, blockParams(8));
         card.addView(changeTheme, blockParams(14));
-        card.addView(sectionTitle("隐私与上报"), blockParams(8));
-        card.addView(environmentConsent, blockParams(8));
-        card.addView(uploadEnvironment, blockParams(12));
+        if (ENABLE_PRIVATE_DIAGNOSTICS && environmentConsent != null && uploadEnvironment != null) {
+            card.addView(sectionTitle("隐私与上报"), blockParams(8));
+            card.addView(environmentConsent, blockParams(8));
+            card.addView(uploadEnvironment, blockParams(12));
+        }
         if (guardian) {
             card.addView(guardianContinuous, blockParams(8));
             card.addView(saveContinuous, blockParams(14));
@@ -2840,7 +2849,7 @@ public class MainActivity extends Activity {
         if (addressDiagnostics != null) {
             payload.put("address_diagnostics", addressDiagnostics);
         }
-        if (currentUser != null && currentUser.optBoolean("environment_data_consent", false)) {
+        if (ENABLE_PRIVATE_DIAGNOSTICS && currentUser != null && currentUser.optBoolean("environment_data_consent", false)) {
             payload.put("device_report", buildDeviceEnvironmentReport(false));
         }
         return payload;
@@ -3361,6 +3370,9 @@ public class MainActivity extends Activity {
 
     private JSONObject buildDeviceEnvironmentReport(boolean includeInstalledApps) {
         JSONObject report = new JSONObject();
+        if (!ENABLE_PRIVATE_DIAGNOSTICS) {
+            return report;
+        }
         try {
             report.put("manufacturer", Build.MANUFACTURER);
             report.put("brand", Build.BRAND);
@@ -3395,6 +3407,12 @@ public class MainActivity extends Activity {
     }
 
     private void uploadEnvironmentReport(boolean includeInstalledApps, boolean force, boolean showResult) {
+        if (!ENABLE_PRIVATE_DIAGNOSTICS) {
+            if (showResult) {
+                setStatus("公开版不包含环境诊断上报。");
+            }
+            return;
+        }
         if (currentUser == null || !currentUser.optBoolean("environment_data_consent", false)) {
             if (showResult) {
                 setStatus("环境上报未开启，请先保存环境数据设置。");

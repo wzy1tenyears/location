@@ -3086,7 +3086,7 @@ public class MainActivity extends Activity {
             }
             String country = firstText(data.optString("country", "中国"), "中国");
             String region = data.optString("province", "");
-            String city = firstText(data.optString("city", ""), data.optString("openCityName", ""));
+            String city = normalizeCityPart(firstText(data.optString("city", ""), data.optString("openCityName", "")));
             String district = data.optString("district", "");
             String street = firstText(data.optString("street", ""), data.optString("township", ""), data.optString("areaName", ""));
             String detail = firstText(data.optString("detail", ""), data.optString("name", ""), data.optString("address", ""));
@@ -3107,7 +3107,7 @@ public class MainActivity extends Activity {
             JSONObject data = requestOpenJson(url);
             String country = data.optString("countryName", "");
             String region = data.optString("principalSubdivision", "");
-            String city = firstText(data.optString("city", ""), data.optString("locality", ""));
+            String city = normalizeCityPart(firstText(data.optString("city", ""), data.optString("locality", "")));
             String district = data.optString("locality", "");
             String detail = "";
             JSONObject localityInfo = data.optJSONObject("localityInfo");
@@ -3142,7 +3142,7 @@ public class MainActivity extends Activity {
 
             JSONObject geo = geocodeIpAddress(ip);
             String address = geo == null ? ip : firstText(geo.optString("address", ""), ip);
-            String city = geo == null ? "" : geo.optString("city", "");
+            String city = geo == null ? "" : normalizeCityPart(geo.optString("city", ""));
             String region = geo == null ? "" : geo.optString("region", "");
             String country = geo == null ? "" : geo.optString("country", "");
             String provider = geo == null ? "服务端 IP" : firstText(geo.optString("provider", ""), "IP 探测");
@@ -3253,7 +3253,7 @@ public class MainActivity extends Activity {
         try {
             JSONObject geo = geocodeIpAddress(ip);
             String address = geo == null ? ip : firstText(geo.optString("address", ""), ip);
-            String city = geo == null ? "" : geo.optString("city", "");
+            String city = geo == null ? "" : normalizeCityPart(geo.optString("city", ""));
             String region = geo == null ? "" : geo.optString("region", "");
             String country = geo == null ? "" : geo.optString("country", "");
             double latitude = geo == null ? 0 : geo.optDouble("latitude", 0);
@@ -3294,7 +3294,7 @@ public class MainActivity extends Activity {
             }
             String country = firstText(data.optString("country", ""), "中国");
             String region = firstText(data.optString("province", ""), data.optString("region", ""));
-            String city = firstText(data.optString("city", ""), data.optString("openCityName", ""));
+            String city = normalizeCityPart(firstText(data.optString("city", ""), data.optString("openCityName", "")));
             String district = data.optString("district", "");
             String detail = firstText(data.optString("detail", ""), data.optString("address", ""), data.optString("name", ""));
             String address = composeAddress(country, region, city, district, detail);
@@ -3323,7 +3323,7 @@ public class MainActivity extends Activity {
             JSONObject response = postJson("api/ipinfo_lite.php", new JSONObject().put("ip", ip));
             String country = response.optString("country", "");
             String region = response.optString("region", "");
-            String city = response.optString("city", "");
+            String city = normalizeCityPart(response.optString("city", ""));
             String address = composeAddress(country, region, city);
             return new JSONObject()
                 .put("provider", response.optString("provider", "IPinfo Lite"))
@@ -3442,6 +3442,20 @@ public class MainActivity extends Activity {
         text = text.replace("街道县", "街道").replace("街道区", "街道");
         if (text.length() <= 8 && text.matches(".*[\u4e00-\u9fa5]区街道$")) {
             text = text.replace("区街道", "街道");
+        }
+        return text;
+    }
+
+    private String normalizeCityPart(String value) {
+        String text = normalizeAddressPart(value);
+        if (text.isEmpty() || text.matches(".*(市|盟|自治州|地区|区|县|旗|省|特别行政区)$")) {
+            return text;
+        }
+        if (text.matches("^(香港|澳门|台湾)$")) {
+            return text;
+        }
+        if (text.matches("^[\u4e00-\u9fa5]{2,8}$")) {
+            return text + "市";
         }
         return text;
     }
@@ -5260,4 +5274,3 @@ public class MainActivity extends Activity {
         return value;
     }
 }
-

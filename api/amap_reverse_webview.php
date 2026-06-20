@@ -90,6 +90,13 @@ echo <<<HTML
       }
       return text;
     }
+    function normalizeCity(value) {
+      const text = normalizePart(value);
+      if (!text || /市|盟|自治州|地区|区|县|旗|省|特别行政区$/.test(text)) return text;
+      if (/^(香港|澳门|台湾)$/.test(text)) return text;
+      if (/^[\u4e00-\u9fa5]{2,8}$/.test(text)) return `${text}市`;
+      return text;
+    }
     function cleanupAddress(value) {
       let text = normalizePart(value);
       let previous = '';
@@ -157,7 +164,7 @@ echo <<<HTML
       const formatted = firstText(regeo && (regeo.formattedAddress || regeo.formatted_address));
       const country = firstText(comp.country, '中国');
       const province = firstText(comp.province);
-      const city = firstText(comp.city, comp.district, province);
+      const city = normalizeCity(firstText(comp.city, comp.district, province));
       const district = firstText(comp.district);
       const township = firstText(comp.township, comp.town);
       const streetNumber = firstText(comp.streetNumber);
@@ -165,7 +172,7 @@ echo <<<HTML
       const detailParts = uniqueParts([streetNumber, comp.neighborhood, comp.building]);
       const structured = uniqueParts([country, province, city, district, street, ...detailParts]).join('');
       const formattedAddress = formatted ? (country && !formatted.startsWith(country) ? country + formatted : formatted) : '';
-      const address = precisionScore(structured, detailParts.join('')) > precisionScore(formattedAddress, '')
+      const address = precisionScore(structured, detailParts.join('')) >= precisionScore(formattedAddress, '')
         ? structured
         : firstText(cleanupAddress(formattedAddress), structured);
       return {

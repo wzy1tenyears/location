@@ -88,8 +88,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 66;
-    private static final String APP_VERSION_NAME = "2.0.33";
+    private static final int APP_VERSION_CODE = 67;
+    private static final String APP_VERSION_NAME = "2.0.34";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -101,6 +101,7 @@ public class MainActivity extends Activity {
     private static final String KEY_THEME_MODE = "theme_mode";
     private static final String KEY_PENDING_UPDATE_INSTALL_ID = "pending_update_install_id";
     private static final String KEY_BACKGROUND_LOCATION_PROMPT_SHOWN = "background_location_prompt_shown";
+    private static final String KEY_PRECISE_LOCATION_PROMPT_SHOWN = "precise_location_prompt_shown";
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
     private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String KEY_SEEN_ANNOUNCEMENT_PREFIX = "announcement_seen_";
@@ -3823,11 +3824,35 @@ public class MainActivity extends Activity {
         if (hasFineLocationPermission()) {
             return false;
         }
+        if (hasCoarseLocationPermission()) {
+            return showPreciseLocationPromptIfNeeded();
+        }
         if (locationPermissionRequestInFlight) {
             return true;
         }
         locationPermissionRequestInFlight = true;
         requestPermissions(new String[] { Manifest.permission.ACCESS_FINE_LOCATION }, REQUEST_LOCATION);
+        return true;
+    }
+
+    private boolean showPreciseLocationPromptIfNeeded() {
+        if (prefs().getBoolean(KEY_PRECISE_LOCATION_PROMPT_SHOWN, false)) {
+            return false;
+        }
+        prefs().edit().putBoolean(KEY_PRECISE_LOCATION_PROMPT_SHOWN, true).apply();
+        showPopupDialog(
+            "\u9700\u8981\u7cbe\u786e\u5b9a\u4f4d",
+            new String[][] {
+                new String[] {"\u6743\u9650\u8bf4\u660e", "\u5f53\u524d\u53ef\u80fd\u53ea\u6388\u6743\u4e86\u6a21\u7cca\u5b9a\u4f4d\uff0c\u4f1a\u5f71\u54cd\u4e0a\u62a5\u4f4d\u7f6e\u548c\u5730\u56fe\u7cbe\u5ea6\u3002\u8bf7\u5728\u7cfb\u7edf\u8bbe\u7f6e\u4e2d\u5f00\u542f\u201c\u7cbe\u786e\u4f4d\u7f6e\u201d\uff0c\u5e76\u5141\u8bb8\u5b9a\u4f4d\u6743\u9650\u3002"}
+            },
+            "\u53bb\u8bbe\u7f6e",
+            () -> {
+                Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                intent.setData(Uri.parse("package:" + getPackageName()));
+                startActivity(intent);
+            },
+            "\u7a0d\u540e"
+        );
         return true;
     }
 
@@ -3921,6 +3946,10 @@ public class MainActivity extends Activity {
 
     private boolean hasFineLocationPermission() {
         return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean hasCoarseLocationPermission() {
+        return checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
     }
 
     private void syncKeepAliveService() {

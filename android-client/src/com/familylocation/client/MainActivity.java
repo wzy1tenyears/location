@@ -88,8 +88,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 67;
-    private static final String APP_VERSION_NAME = "2.0.34";
+    private static final int APP_VERSION_CODE = 68;
+    private static final String APP_VERSION_NAME = "2.0.35";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -100,6 +100,7 @@ public class MainActivity extends Activity {
     private static final String KEY_REPORT_INTERVAL_SECONDS = "report_interval_seconds";
     private static final String KEY_THEME_MODE = "theme_mode";
     private static final String KEY_PENDING_UPDATE_INSTALL_ID = "pending_update_install_id";
+    private static final String KEY_ACTIVE_UPDATE_DOWNLOAD_ID = "active_update_download_id";
     private static final String KEY_BACKGROUND_LOCATION_PROMPT_SHOWN = "background_location_prompt_shown";
     private static final String KEY_PRECISE_LOCATION_PROMPT_SHOWN = "precise_location_prompt_shown";
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
@@ -2223,12 +2224,15 @@ public class MainActivity extends Activity {
         guardianContinuous.setText("监护端持续上报当前位置");
         guardianContinuous.setTextColor(colorText());
         guardianContinuous.setChecked(guardianContinuousEnabled(selectedGroupName));
-        Button saveEnvironment = primaryButton("保存环境数据设置");
-        saveEnvironment.setOnClickListener(view -> saveEnvironmentConsent(environmentConsent.isChecked()));
         Button uploadEnvironment = secondaryButton("立即上报环境信息");
+        uploadEnvironment.setEnabled(environmentConsent.isChecked());
+        environmentConsent.setOnCheckedChangeListener((button, checked) -> {
+            uploadEnvironment.setEnabled(checked);
+            saveEnvironmentConsent(checked);
+        });
         uploadEnvironment.setOnClickListener(view -> {
             if (!environmentConsent.isChecked()) {
-                setStatus("请先勾选并保存环境数据设置。");
+                setStatus("请先勾选环境数据上报。");
                 return;
             }
             uploadEnvironmentReport(true, true, true);
@@ -2250,7 +2254,6 @@ public class MainActivity extends Activity {
         card.addView(changeTheme, blockParams(14));
         card.addView(sectionTitle("隐私与上报"), blockParams(8));
         card.addView(environmentConsent, blockParams(8));
-        card.addView(saveEnvironment, blockParams(8));
         card.addView(uploadEnvironment, blockParams(12));
         if (guardian) {
             card.addView(guardianContinuous, blockParams(8));
@@ -4015,7 +4018,10 @@ public class MainActivity extends Activity {
             registerUpdateReceiver();
             updateDownloadId = manager.enqueue(request);
             pendingInstallDownloadId = -1L;
-            prefs().edit().remove(KEY_PENDING_UPDATE_INSTALL_ID).apply();
+            prefs().edit()
+                .putLong(KEY_ACTIVE_UPDATE_DOWNLOAD_ID, updateDownloadId)
+                .remove(KEY_PENDING_UPDATE_INSTALL_ID)
+                .apply();
             installingDownloadId = -1L;
             startUpdateInstallPolling(updateDownloadId, 0);
             setStatus("新版 APK 已开始下载，完成后会自动打开安装确认。");
@@ -4061,6 +4067,7 @@ public class MainActivity extends Activity {
                 return;
             }
             if (status.startsWith("failed:")) {
+                prefs().edit().remove(KEY_ACTIVE_UPDATE_DOWNLOAD_ID).apply();
                 setStatus("APK 下载失败，错误码：" + status.substring("failed:".length()));
                 return;
             }
@@ -4084,7 +4091,10 @@ public class MainActivity extends Activity {
         } catch (Exception exception) {
             pendingInstallDownloadId = -1L;
             installingDownloadId = -1L;
-            prefs().edit().remove(KEY_PENDING_UPDATE_INSTALL_ID).apply();
+            prefs().edit()
+                .remove(KEY_PENDING_UPDATE_INSTALL_ID)
+                .remove(KEY_ACTIVE_UPDATE_DOWNLOAD_ID)
+                .apply();
             setStatus("自动拉起安装失败：" + exception.getMessage());
         }
     }
@@ -4105,7 +4115,10 @@ public class MainActivity extends Activity {
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
                 pendingInstallDownloadId = downloadId;
-                prefs().edit().putLong(KEY_PENDING_UPDATE_INSTALL_ID, downloadId).apply();
+                prefs().edit()
+                    .putLong(KEY_PENDING_UPDATE_INSTALL_ID, downloadId)
+                    .remove(KEY_ACTIVE_UPDATE_DOWNLOAD_ID)
+                    .apply();
                 installingDownloadId = -1L;
                 setStatus("APK 已下载，请允许本应用安装未知应用后返回安装。");
                 startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
@@ -4133,7 +4146,10 @@ public class MainActivity extends Activity {
                 startActivity(fallback);
             }
             pendingInstallDownloadId = -1L;
-            prefs().edit().remove(KEY_PENDING_UPDATE_INSTALL_ID).apply();
+            prefs().edit()
+                .remove(KEY_PENDING_UPDATE_INSTALL_ID)
+                .remove(KEY_ACTIVE_UPDATE_DOWNLOAD_ID)
+                .apply();
             setStatus("下载完成，请确认安装新版本。");
         } catch (Exception exception) {
             installingDownloadId = -1L;
@@ -4195,6 +4211,12 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         activityForeground = true;
+        long savedActiveDownload = prefs().getLong(KEY_ACTIVE_UPDATE_DOWNLOAD_ID, -1L);
+        if (updateDownloadId <= 0 && savedActiveDownload > 0) {
+            updateDownloadId = savedActiveDownload;
+            registerUpdateReceiver();
+            startUpdateInstallPolling(savedActiveDownload, 0);
+        }
         long savedPendingInstall = prefs().getLong(KEY_PENDING_UPDATE_INSTALL_ID, -1L);
         if (pendingInstallDownloadId <= 0 && savedPendingInstall > 0) {
             pendingInstallDownloadId = savedPendingInstall;

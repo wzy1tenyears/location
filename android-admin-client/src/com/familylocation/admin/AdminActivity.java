@@ -65,10 +65,11 @@ public class AdminActivity extends Activity {
     private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
     private static final String KEY_PENDING_UPDATE_INSTALL_ID = "pending_update_install_id";
+    private static final String KEY_ACTIVE_UPDATE_DOWNLOAD_ID = "active_update_download_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "";
-    private static final int APP_VERSION_CODE = 51;
-    private static final String APP_VERSION_NAME = "2.0.18";
+    private static final int APP_VERSION_CODE = 52;
+    private static final String APP_VERSION_NAME = "2.0.19";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
@@ -347,7 +348,10 @@ public class AdminActivity extends Activity {
             registerUpdateReceiver();
             updateDownloadId = manager.enqueue(request);
             pendingInstallDownloadId = -1L;
-            prefs().edit().remove(KEY_PENDING_UPDATE_INSTALL_ID).apply();
+            prefs().edit()
+                .putLong(KEY_ACTIVE_UPDATE_DOWNLOAD_ID, updateDownloadId)
+                .remove(KEY_PENDING_UPDATE_INSTALL_ID)
+                .apply();
             installingDownloadId = -1L;
             startUpdateInstallPolling(updateDownloadId, 0);
             setStatus("后台 APK 已开始下载，完成后会自动打开安装确认。");
@@ -393,6 +397,7 @@ public class AdminActivity extends Activity {
                 return;
             }
             if (status.startsWith("后台 APK 下载失败")) {
+                prefs().edit().remove(KEY_ACTIVE_UPDATE_DOWNLOAD_ID).apply();
                 setStatus(status);
                 return;
             }
@@ -416,7 +421,10 @@ public class AdminActivity extends Activity {
         } catch (Exception exception) {
             pendingInstallDownloadId = -1L;
             installingDownloadId = -1L;
-            prefs().edit().remove(KEY_PENDING_UPDATE_INSTALL_ID).apply();
+            prefs().edit()
+                .remove(KEY_PENDING_UPDATE_INSTALL_ID)
+                .remove(KEY_ACTIVE_UPDATE_DOWNLOAD_ID)
+                .apply();
             setStatus("自动拉起后台安装失败：" + exception.getMessage());
         }
     }
@@ -437,7 +445,10 @@ public class AdminActivity extends Activity {
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
                 pendingInstallDownloadId = downloadId;
-                prefs().edit().putLong(KEY_PENDING_UPDATE_INSTALL_ID, downloadId).apply();
+                prefs().edit()
+                    .putLong(KEY_PENDING_UPDATE_INSTALL_ID, downloadId)
+                    .remove(KEY_ACTIVE_UPDATE_DOWNLOAD_ID)
+                    .apply();
                 installingDownloadId = -1L;
                 setStatus("后台 APK 已下载，请允许本应用安装未知应用后返回安装。");
                 startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
@@ -465,7 +476,10 @@ public class AdminActivity extends Activity {
                 startActivity(fallback);
             }
             pendingInstallDownloadId = -1L;
-            prefs().edit().remove(KEY_PENDING_UPDATE_INSTALL_ID).apply();
+            prefs().edit()
+                .remove(KEY_PENDING_UPDATE_INSTALL_ID)
+                .remove(KEY_ACTIVE_UPDATE_DOWNLOAD_ID)
+                .apply();
             setStatus("下载完成，请确认安装新版本后台。");
         } catch (Exception exception) {
             installingDownloadId = -1L;
@@ -528,6 +542,12 @@ public class AdminActivity extends Activity {
     protected void onResume() {
         super.onResume();
         activityForeground = true;
+        long savedActiveDownload = prefs().getLong(KEY_ACTIVE_UPDATE_DOWNLOAD_ID, -1L);
+        if (updateDownloadId <= 0 && savedActiveDownload > 0) {
+            updateDownloadId = savedActiveDownload;
+            registerUpdateReceiver();
+            startUpdateInstallPolling(savedActiveDownload, 0);
+        }
         long savedPendingInstall = prefs().getLong(KEY_PENDING_UPDATE_INSTALL_ID, -1L);
         if (pendingInstallDownloadId <= 0 && savedPendingInstall > 0) {
             pendingInstallDownloadId = savedPendingInstall;

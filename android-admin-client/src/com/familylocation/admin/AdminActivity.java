@@ -67,8 +67,8 @@ public class AdminActivity extends Activity {
     private static final String KEY_PENDING_UPDATE_INSTALL_ID = "pending_update_install_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "";
-    private static final int APP_VERSION_CODE = 50;
-    private static final String APP_VERSION_NAME = "2.0.17";
+    private static final int APP_VERSION_CODE = 51;
+    private static final String APP_VERSION_NAME = "2.0.18";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
@@ -91,6 +91,14 @@ public class AdminActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        try {
+            startApp();
+        } catch (Throwable throwable) {
+            showStartupCrash(throwable);
+        }
+    }
+
+    private void startApp() {
         configureWindow();
         String serverUrl = storedServerUrl();
         if (serverUrl.isEmpty()) {
@@ -107,6 +115,28 @@ public class AdminActivity extends Activity {
         }
         showLogin("");
     }
+
+    private void showStartupCrash(Throwable throwable) {
+        Log.e(TAG, "Startup failed", throwable);
+        String message = exceptionMessage(throwable);
+        try {
+            LinearLayout card = screen("启动失败");
+            card.addView(body("后台 App 启动时遇到异常，请截图发给开发者。"), blockParams(8));
+            TextView detail = body(message);
+            detail.setTextColor(colorText());
+            detail.setPadding(dp(12), dp(10), dp(12), dp(10));
+            detail.setBackground(panelBackground());
+            card.addView(detail, blockParams(0));
+            setScreen(card, true);
+        } catch (Throwable fallback) {
+            TextView fallbackView = new TextView(this);
+            fallbackView.setText("启动失败\n" + message);
+            fallbackView.setTextColor(Color.BLACK);
+            fallbackView.setPadding(24, 24, 24, 24);
+            setContentView(fallbackView);
+        }
+    }
+
 
     private void configureWindow() {
         Window window = getWindow();
@@ -1793,11 +1823,41 @@ public class AdminActivity extends Activity {
     }
 
     private void runBackground(Runnable runnable) {
-        new Thread(runnable, "loc-admin-native").start();
+        new Thread(() -> {
+            try {
+                runnable.run();
+            } catch (Throwable throwable) {
+                Log.e(TAG, "Background task failed", throwable);
+                runUi(() -> setStatus("后台任务失败：" + exceptionMessage(throwable)));
+            }
+        }, "loc-admin-native").start();
     }
 
     private void runUi(Runnable runnable) {
-        mainHandler.post(runnable);
+        mainHandler.post(() -> {
+            try {
+                runnable.run();
+            } catch (Throwable throwable) {
+                Log.e(TAG, "UI task failed", throwable);
+                try {
+                    setStatus("界面任务失败：" + exceptionMessage(throwable));
+                } catch (Throwable ignored) {
+                    // Keep process alive even if status UI is unavailable.
+                }
+            }
+        });
+    }
+
+    private String exceptionMessage(Throwable throwable) {
+        if (throwable == null) {
+            return "未知错误";
+        }
+        String type = throwable.getClass().getSimpleName();
+        String message = throwable.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            return type;
+        }
+        return type + ": " + message.trim();
     }
 
     private SharedPreferences prefs() {

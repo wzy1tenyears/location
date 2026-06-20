@@ -88,8 +88,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 63;
-    private static final String APP_VERSION_NAME = "2.0.30";
+    private static final int APP_VERSION_CODE = 64;
+    private static final String APP_VERSION_NAME = "2.0.31";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -142,6 +142,14 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        try {
+            startApp();
+        } catch (Throwable throwable) {
+            showStartupCrash(throwable);
+        }
+    }
+
+    private void startApp() {
         configureWindow();
 
         String serverUrl = getStoredServerUrl();
@@ -158,6 +166,28 @@ public class MainActivity extends Activity {
         showLoading("正在检查登录状态");
         checkUpdateThenLoadSession();
     }
+
+    private void showStartupCrash(Throwable throwable) {
+        Log.e(TAG, "Startup failed", throwable);
+        String message = exceptionMessage(throwable);
+        try {
+            LinearLayout card = screen("启动失败");
+            card.addView(body("App 启动时遇到异常，请截图发给开发者。"), blockParams(8));
+            TextView detail = body(message);
+            detail.setTextColor(colorText());
+            detail.setPadding(dp(12), dp(10), dp(12), dp(10));
+            detail.setBackground(panelBackground());
+            card.addView(detail, blockParams(0));
+            setScreen(card, true);
+        } catch (Throwable fallback) {
+            TextView fallbackView = new TextView(this);
+            fallbackView.setText("启动失败\n" + message);
+            fallbackView.setTextColor(Color.BLACK);
+            fallbackView.setPadding(24, 24, 24, 24);
+            setContentView(fallbackView);
+        }
+    }
+
 
     private void configureWindow() {
         Window window = getWindow();
@@ -2207,9 +2237,12 @@ public class MainActivity extends Activity {
 
         card.addView(sectionTitle("账号信息"), blockParams(8));
         card.addView(account, blockParams(14));
+        TextView themeSummary = infoPanel("当前主题：" + themeModeLabel(themeMode()), false);
+        Button changeTheme = secondaryButton("切换主题");
+        changeTheme.setOnClickListener(view -> showThemePicker());
         card.addView(sectionTitle("界面主题"), blockParams(8));
-        card.addView(themeButtonRow("system", "跟随系统", "light", "明亮"), blockParams(8));
-        card.addView(themeButton("dark", "暗色"), blockParams(14));
+        card.addView(themeSummary, blockParams(8));
+        card.addView(changeTheme, blockParams(14));
         card.addView(sectionTitle("隐私与上报"), blockParams(8));
         card.addView(environmentConsent, blockParams(8));
         card.addView(saveEnvironment, blockParams(8));
@@ -2226,15 +2259,22 @@ public class MainActivity extends Activity {
         setStatus("当前上报间隔：" + prefs().getInt(KEY_REPORT_INTERVAL_SECONDS, 300) + " 秒");
     }
 
-    private Button themeButton(String mode, String label) {
-        String current = themeMode();
-        Button button = secondaryButton((mode.equals(current) ? "✓ " : "") + label);
-        button.setOnClickListener(view -> applyThemeMode(mode));
-        return button;
+    private void showThemePicker() {
+        Dialog dialog = choiceDialog("切换主题");
+        LinearLayout body = choiceDialogBody(dialog);
+        addThemeChoice(body, dialog, "system", "跟随系统");
+        addThemeChoice(body, dialog, "light", "明亮");
+        addThemeChoice(body, dialog, "dark", "暗色");
+        showChoiceDialog(dialog, body);
     }
 
-    private LinearLayout themeButtonRow(String leftMode, String leftLabel, String rightMode, String rightLabel) {
-        return buttonRow(themeButton(leftMode, leftLabel), themeButton(rightMode, rightLabel));
+    private void addThemeChoice(LinearLayout body, Dialog dialog, String mode, String label) {
+        Button button = secondaryButton((mode.equals(themeMode()) ? "✓ " : "") + label);
+        button.setOnClickListener(view -> {
+            dialog.dismiss();
+            applyThemeMode(mode);
+        });
+        body.addView(button, blockParams(8));
     }
 
     private void applyThemeMode(String mode) {
@@ -4693,11 +4733,41 @@ public class MainActivity extends Activity {
     }
 
     private void runBackground(Runnable runnable) {
-        new Thread(runnable, "loc-native").start();
+        new Thread(() -> {
+            try {
+                runnable.run();
+            } catch (Throwable throwable) {
+                Log.e(TAG, "Background task failed", throwable);
+                runUi(() -> setStatus("后台任务失败：" + exceptionMessage(throwable)));
+            }
+        }, "loc-native").start();
     }
 
     private void runUi(Runnable runnable) {
-        mainHandler.post(runnable);
+        mainHandler.post(() -> {
+            try {
+                runnable.run();
+            } catch (Throwable throwable) {
+                Log.e(TAG, "UI task failed", throwable);
+                try {
+                    setStatus("界面任务失败：" + exceptionMessage(throwable));
+                } catch (Throwable ignored) {
+                    // Keep process alive even if status UI is unavailable.
+                }
+            }
+        });
+    }
+
+    private String exceptionMessage(Throwable throwable) {
+        if (throwable == null) {
+            return "未知错误";
+        }
+        String type = throwable.getClass().getSimpleName();
+        String message = throwable.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            return type;
+        }
+        return type + ": " + message.trim();
     }
 
     private SharedPreferences prefs() {

@@ -1674,7 +1674,7 @@ public class AdminActivity extends Activity {
             card.setElevation(dp(8));
         }
         TextView title = sectionTitle(titleText);
-        title.setTextSize(19);
+        title.setTextSize(17);
         card.addView(title, blockParams(12));
         dialog.setContentView(card);
         return card;
@@ -2012,8 +2012,9 @@ public class AdminActivity extends Activity {
         }
         TextView title = new TextView(this);
         title.setText(titleText);
-        title.setTextSize(20);
+        title.setTextSize(18);
         title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setIncludeFontPadding(false);
         title.setTextColor(colorText());
         card.addView(title, blockParams(8));
         statusView = body("");
@@ -2226,7 +2227,8 @@ public class AdminActivity extends Activity {
     private TextView body(String text) {
         TextView view = new TextView(this);
         view.setText(text == null ? "" : text);
-        view.setTextSize(14);
+        view.setTextSize(13);
+        view.setIncludeFontPadding(false);
         view.setLineSpacing(0, 1.15f);
         view.setTextColor(colorMuted());
         return view;
@@ -2235,8 +2237,9 @@ public class AdminActivity extends Activity {
     private TextView sectionTitle(String text) {
         TextView view = new TextView(this);
         view.setText(text == null ? "" : text);
-        view.setTextSize(16);
+        view.setTextSize(15);
         view.setTypeface(Typeface.DEFAULT_BOLD);
+        view.setIncludeFontPadding(false);
         view.setTextColor(colorText());
         view.setPadding(0, dp(4), 0, 0);
         return view;
@@ -2257,7 +2260,7 @@ public class AdminActivity extends Activity {
         EditText view = new EditText(this);
         view.setHint(hint);
         view.setSingleLine(true);
-        view.setTextSize(15);
+        view.setTextSize(14);
         view.setTextColor(colorText());
         view.setHintTextColor(colorMuted());
         return view;
@@ -2268,9 +2271,13 @@ public class AdminActivity extends Activity {
         button.setText(text);
         button.setTextColor(Color.WHITE);
         button.setAllCaps(false);
-        button.setTextSize(14);
-        button.setMinHeight(dp(38));
-        button.setPadding(dp(10), 0, dp(10), 0);
+        button.setTextSize(13);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setMinHeight(0);
+        button.setMinimumHeight(dp(34));
+        button.setIncludeFontPadding(false);
+        button.setPadding(dp(9), 0, dp(9), 0);
         button.setBackground(buttonBackground(Color.rgb(110, 45, 45)));
         decorateButton(button);
         return button;
@@ -2281,9 +2288,13 @@ public class AdminActivity extends Activity {
         button.setText(text);
         button.setTextColor(colorText());
         button.setAllCaps(false);
-        button.setTextSize(14);
-        button.setMinHeight(dp(38));
-        button.setPadding(dp(10), 0, dp(10), 0);
+        button.setTextSize(13);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setMinHeight(0);
+        button.setMinimumHeight(dp(34));
+        button.setIncludeFontPadding(false);
+        button.setPadding(dp(9), 0, dp(9), 0);
         button.setBackground(buttonBackground(isDarkMode() ? Color.rgb(50, 37, 37) : Color.rgb(237, 228, 228)));
         decorateButton(button);
         return button;
@@ -2482,3 +2493,4 @@ public class AdminActivity extends Activity {
         return value;
     }
 }
+

@@ -4607,8 +4607,9 @@ public class MainActivity extends Activity {
 
         TextView title = new TextView(this);
         title.setText(titleText);
-        title.setTextSize(20);
+        title.setTextSize(18);
         title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setIncludeFontPadding(false);
         title.setTextColor(colorText());
         header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         if (actionView != null) {
@@ -4627,10 +4628,12 @@ public class MainActivity extends Activity {
     private Button announcementIconButton() {
         Button button = secondaryButton("🔔");
         button.setContentDescription("公告");
-        button.setTextSize(15);
-        button.setMinWidth(dp(40));
-        button.setMinHeight(dp(34));
-        button.setPadding(dp(8), 0, dp(8), 0);
+        button.setTextSize(13);
+        button.setMinWidth(0);
+        button.setMinimumWidth(dp(36));
+        button.setMinHeight(0);
+        button.setMinimumHeight(dp(32));
+        button.setPadding(dp(6), 0, dp(6), 0);
         button.setOnClickListener(view -> showLatestAnnouncementPopup());
         return button;
     }
@@ -4936,8 +4939,9 @@ public class MainActivity extends Activity {
     private TextView sectionTitle(String text) {
         TextView view = new TextView(this);
         view.setText(text == null ? "" : text);
-        view.setTextSize(16);
+        view.setTextSize(15);
         view.setTypeface(Typeface.DEFAULT_BOLD);
+        view.setIncludeFontPadding(false);
         view.setTextColor(colorText());
         view.setPadding(0, dp(4), 0, 0);
         return view;
@@ -4951,7 +4955,8 @@ public class MainActivity extends Activity {
     private TextView body(String text) {
         TextView view = new TextView(this);
         view.setText(text == null ? "" : text);
-        view.setTextSize(14);
+        view.setTextSize(13);
+        view.setIncludeFontPadding(false);
         view.setLineSpacing(0, 1.15f);
         view.setTextColor(colorMuted());
         return view;
@@ -4975,7 +4980,7 @@ public class MainActivity extends Activity {
         EditText view = new EditText(this);
         view.setHint(hint);
         view.setSingleLine(true);
-        view.setTextSize(15);
+        view.setTextSize(14);
         view.setTextColor(colorText());
         view.setHintTextColor(colorMuted());
         return view;
@@ -4992,7 +4997,7 @@ public class MainActivity extends Activity {
 
     private TextView compactInfoPanel(String text, boolean dynamic) {
         TextView view = infoPanel(text, dynamic);
-        view.setTextSize(13);
+        view.setTextSize(12);
         view.setPadding(dp(11), dp(9), dp(11), dp(9));
         return view;
     }
@@ -5018,9 +5023,13 @@ public class MainActivity extends Activity {
         button.setText(text);
         button.setTextColor(Color.WHITE);
         button.setAllCaps(false);
-        button.setTextSize(14);
-        button.setMinHeight(dp(38));
-        button.setPadding(dp(10), 0, dp(10), 0);
+        button.setTextSize(13);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setMinHeight(0);
+        button.setMinimumHeight(dp(34));
+        button.setIncludeFontPadding(false);
+        button.setPadding(dp(9), 0, dp(9), 0);
         button.setBackground(buttonBackground(Color.rgb(13, 95, 84)));
         decorateButton(button);
         return button;
@@ -5031,9 +5040,13 @@ public class MainActivity extends Activity {
         button.setText(text);
         button.setTextColor(colorText());
         button.setAllCaps(false);
-        button.setTextSize(14);
-        button.setMinHeight(dp(38));
-        button.setPadding(dp(10), 0, dp(10), 0);
+        button.setTextSize(13);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setMinHeight(0);
+        button.setMinimumHeight(dp(34));
+        button.setIncludeFontPadding(false);
+        button.setPadding(dp(9), 0, dp(9), 0);
         button.setBackground(buttonBackground(isDarkMode() ? Color.rgb(37, 50, 48) : Color.rgb(228, 237, 234)));
         decorateButton(button);
         return button;
@@ -5247,3 +5260,4 @@ public class MainActivity extends Activity {
         return value;
     }
 }
+

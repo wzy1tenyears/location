@@ -12,6 +12,7 @@ $safeKey = json_encode($key, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AM
 $safeServicePath = json_encode($servicePath, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 
 header('Content-Type: text/html; charset=utf-8');
+header('Cache-Control: no-store, no-transform');
 
 echo <<<HTML
 <!doctype html>
@@ -25,7 +26,7 @@ echo <<<HTML
     .empty { position: absolute; inset: 0; display: grid; place-items: center; color: #5c6f6a; font-size: 14px; text-align: center; padding: 18px; }
     .dot { min-width: 24px; height: 24px; padding: 0 6px; border-radius: 999px; background: var(--color, #0d5f54); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; box-shadow: 0 4px 12px rgba(0,0,0,.22); border: 2px solid #fff; }
   </style>
-  <script>
+  <script data-cfasync="false">
     const AMAP_KEY = {$safeKey};
     const AMAP_SERVICE_PATH = {$safeServicePath};
     const serviceHost = new URL(AMAP_SERVICE_PATH || '/_AMapService', window.location.origin).toString().replace(/\/$/, '');
@@ -41,6 +42,7 @@ echo <<<HTML
           return;
         }
         const script = document.createElement('script');
+        script.dataset.cfasync = 'false';
         script.src = `https://webapi.amap.com/maps?v=2.0&key=\${encodeURIComponent(AMAP_KEY)}&plugin=AMap.Scale,AMap.ToolBar`;
         script.onload = () => resolve(window.AMap);
         script.onerror = () => reject(new Error('高德地图加载失败'));

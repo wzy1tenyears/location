@@ -258,7 +258,6 @@ try {
         'stats' => $stats,
         'groups' => $groups,
         'memberships' => $memberships,
-        'security_settings' => security_policy_settings(),
         'users' => $users,
         'locations' => $locations,
         'devices' => $devices,

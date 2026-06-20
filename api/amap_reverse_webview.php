@@ -38,6 +38,7 @@ $safeLatitude = json_encode($latitude, JSON_UNESCAPED_SLASHES);
 $safeLongitude = json_encode($longitude, JSON_UNESCAPED_SLASHES);
 
 header('Content-Type: text/html; charset=utf-8');
+header('Cache-Control: no-store, no-transform');
 
 echo <<<HTML
 <!doctype html>
@@ -46,7 +47,7 @@ echo <<<HTML
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>高德逆地理</title>
-  <script>
+  <script data-cfasync="false">
     const AMAP_KEY = {$safeKey};
     const AMAP_SERVICE_PATH = {$safeServicePath};
     const RAW_LAT = Number({$safeLatitude});
@@ -158,6 +159,7 @@ echo <<<HTML
         return;
       }
       const script = document.createElement('script');
+      script.dataset.cfasync = 'false';
       script.src = `https://webapi.amap.com/maps?v=2.0&key=\${encodeURIComponent(AMAP_KEY)}&plugin=AMap.Geocoder`;
       script.onerror = () => sendError('amap script failed');
       script.onload = () => {

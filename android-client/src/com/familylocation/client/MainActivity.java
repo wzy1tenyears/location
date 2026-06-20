@@ -2,7 +2,6 @@ package com.familylocation.client;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.ActivityManager;
 import android.app.AlarmManager;
 import android.app.Dialog;
 import android.app.DownloadManager;
@@ -13,8 +12,6 @@ import android.content.Context;
 import android.content.IntentFilter;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
@@ -31,7 +28,6 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
-import android.os.StatFs;
 import android.provider.Settings;
 import android.text.InputType;
 import android.text.SpannableString;
@@ -48,6 +44,7 @@ import android.webkit.JavascriptInterface;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -88,8 +85,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 69;
-    private static final String APP_VERSION_NAME = "2.0.36";
+    private static final int APP_VERSION_CODE = 71;
+    private static final String APP_VERSION_NAME = "2.0.38";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -109,7 +106,6 @@ public class MainActivity extends Activity {
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String TAG = "FamilyLocationNative";
     private static final String UPDATE_APK_NAME = "location-release.apk";
-    private static final boolean ENABLE_PRIVATE_DIAGNOSTICS = false;
     private static final long MAX_CACHE_BYTES = 50L * 1024L * 1024L;
     private static final int TAB_POSITION = 0;
     private static final int TAB_GROUPS = 1;
@@ -238,7 +234,6 @@ public class MainActivity extends Activity {
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
                 runUi(this::showHome);
-                uploadEnvironmentReport(false, false);
                 refreshLocations();
             } catch (Exception exception) {
                 runUi(this::showLogin);
@@ -570,7 +565,6 @@ public class MainActivity extends Activity {
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
                 runUi(this::showHome);
-                uploadEnvironmentReport(false, false);
                 refreshLocations();
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
@@ -611,7 +605,6 @@ public class MainActivity extends Activity {
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
                 runUi(this::showHome);
-                uploadEnvironmentReport(false, false);
                 refreshLocations();
             } catch (ChallengeCancelledException exception) {
                 runUi(() -> setStatus(""));
@@ -1232,12 +1225,42 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse errorResponse) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && request != null && request.isForMainFrame()) {
+                    int statusCode = errorResponse == null ? 0 : errorResponse.getStatusCode();
+                    showMapWebViewError(view, "地图服务返回 HTTP " + statusCode + "，请检查服务器反代和 Cloudflare 规则。");
+                }
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || request == null || request.isForMainFrame()) {
+                    String description = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && error != null ? String.valueOf(error.getDescription()) : "网络请求失败";
+                    showMapWebViewError(view, "地图加载失败：" + description);
+                }
+            }
+
+            @Override
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
                 return handleWebViewRendererGone(view, "地图 WebView 已释放，请刷新后重试。");
             }
         });
         map.loadUrl(baseUrl + "api/history_map_webview.php");
         return map;
+    }
+
+    private void showMapWebViewError(WebView view, String message) {
+        String safeMessage = htmlEscape(message == null || message.trim().isEmpty() ? "地图加载失败，请稍后重试。" : message.trim());
+        String html = "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>html,body{margin:0;height:100%;background:#eef3f1;font-family:sans-serif;color:#5c6f6a}.empty{height:100%;display:grid;place-items:center;text-align:center;padding:18px;box-sizing:border-box}</style></head><body><div class=\"empty\">" + safeMessage + "</div></body></html>";
+        view.loadDataWithBaseURL(serverUrl(), html, "text/html", "UTF-8", null);
+    }
+
+    private String htmlEscape(String value) {
+        return value.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&#39;");
     }
 
     private JSONArray displayableLocations(JSONArray locations) {
@@ -2216,29 +2239,6 @@ public class MainActivity extends Activity {
         currentTab = TAB_MINE;
         LinearLayout card = screen("我的");
         TextView account = infoPanel(userDisplayName(currentUser), false);
-        CheckBox environmentConsent = null;
-        Button uploadEnvironment = null;
-        if (ENABLE_PRIVATE_DIAGNOSTICS) {
-            environmentConsent = new CheckBox(this);
-            environmentConsent.setText("同意上传环境诊断数据");
-            environmentConsent.setTextColor(colorText());
-            environmentConsent.setChecked(currentUser != null && currentUser.optBoolean("environment_data_consent", false));
-            uploadEnvironment = secondaryButton("立即上报环境信息");
-            uploadEnvironment.setEnabled(environmentConsent.isChecked());
-            CheckBox finalEnvironmentConsent = environmentConsent;
-            Button finalUploadEnvironment = uploadEnvironment;
-            environmentConsent.setOnCheckedChangeListener((button, checked) -> {
-                finalUploadEnvironment.setEnabled(checked);
-                saveEnvironmentConsent(checked);
-            });
-            uploadEnvironment.setOnClickListener(view -> {
-                if (!finalEnvironmentConsent.isChecked()) {
-                    setStatus("请先勾选环境数据上报。");
-                    return;
-                }
-                uploadEnvironmentReport(true, true, true);
-            });
-        }
         boolean guardian = "guardian".equals(currentUserRole());
         CheckBox guardianContinuous = new CheckBox(this);
         guardianContinuous.setText("监护端持续上报当前位置");
@@ -2256,14 +2256,14 @@ public class MainActivity extends Activity {
         TextView themeSummary = infoPanel("当前主题：" + themeModeLabel(themeMode()), false);
         Button changeTheme = secondaryButton("切换主题");
         changeTheme.setOnClickListener(view -> showThemePicker());
+        Button localSecurityCheck = secondaryButton("本机环境检测");
+        localSecurityCheck.setOnClickListener(view -> showLocalSecurityCheck());
         card.addView(sectionTitle("界面主题"), blockParams(8));
         card.addView(themeSummary, blockParams(8));
         card.addView(changeTheme, blockParams(14));
-        if (ENABLE_PRIVATE_DIAGNOSTICS && environmentConsent != null && uploadEnvironment != null) {
-            card.addView(sectionTitle("隐私与上报"), blockParams(8));
-            card.addView(environmentConsent, blockParams(8));
-            card.addView(uploadEnvironment, blockParams(12));
-        }
+        card.addView(sectionTitle("本机检测"), blockParams(8));
+        card.addView(compactInfoPanel("仅在本机判断 root、ADB、模拟定位、无障碍和常见抓包环境，不上传应用包名或应用列表。", false), blockParams(8));
+        card.addView(localSecurityCheck, blockParams(14));
         if (guardian) {
             card.addView(guardianContinuous, blockParams(8));
             card.addView(saveContinuous, blockParams(14));
@@ -2274,6 +2274,120 @@ public class MainActivity extends Activity {
         card.addView(logout, blockParams(0));
         setScreen(card, false);
         setStatus("当前上报间隔：" + prefs().getInt(KEY_REPORT_INTERVAL_SECONDS, 300) + " 秒");
+    }
+
+    private void showLocalSecurityCheck() {
+        boolean rootRisk = isRootLikely();
+        boolean adbRisk = isAdbEnabled();
+        boolean mockRisk = hasMockLocationRisk();
+        boolean accessibilityRisk = hasAccessibilityRisk();
+        boolean packetCaptureRisk = hasSuspiciousPackage();
+        boolean batteryOptimized = !isIgnoringBatteryOptimizations();
+        String summary = (rootRisk || adbRisk || mockRisk || accessibilityRisk || packetCaptureRisk)
+            ? "发现可能影响定位可信度的本机环境风险。检测结果仅在本机显示，不会上传应用包名或应用列表。"
+            : "未发现明显本机环境风险。检测结果仅在本机显示。";
+        showPopupDialog(
+            "本机环境检测",
+            new String[][] {
+                new String[] {"结果", summary},
+                new String[] {"Root", rootRisk ? "可能存在 root 或 su 环境。" : "未发现明显 root 痕迹。"},
+                new String[] {"ADB", adbRisk ? "开发者调试 ADB 已开启。" : "ADB 调试未开启。"},
+                new String[] {"模拟定位", mockRisk ? "系统模拟定位开关或 mock provider 可能启用。" : "未发现模拟定位风险。"},
+                new String[] {"无障碍", accessibilityRisk ? "无障碍服务已开启，可能影响自动化风险判断。" : "无障碍服务未开启或未发现风险。"},
+                new String[] {"抓包工具", packetCaptureRisk ? "检测到常见抓包/代理工具，仅本机匹配，不上传包名。" : "未检测到常见抓包/代理工具。"},
+                new String[] {"电池优化", batteryOptimized ? "系统仍可能限制后台保活，建议允许忽略电池优化。" : "已允许忽略电池优化。"}
+            },
+            "关闭",
+            null,
+            null
+        );
+    }
+
+    private boolean isRootLikely() {
+        String[] paths = new String[] {
+            "/system/bin/su",
+            "/system/xbin/su",
+            "/sbin/su",
+            "/system/app/Superuser.apk",
+            "/system/bin/.ext/.su",
+            "/system/usr/we-need-root/su-backup",
+            "/system/xbin/mu"
+        };
+        for (String path : paths) {
+            if (new File(path).exists()) {
+                return true;
+            }
+        }
+        return hasPackageInstalled("com.topjohnwu.magisk")
+            || hasPackageInstalled("eu.chainfire.supersu")
+            || hasPackageInstalled("com.noshufou.android.su");
+    }
+
+    private boolean isAdbEnabled() {
+        try {
+            return Settings.Global.getInt(getContentResolver(), Settings.Global.ADB_ENABLED, 0) == 1;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean hasMockLocationRisk() {
+        try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                return Settings.Secure.getInt(getContentResolver(), Settings.Secure.ALLOW_MOCK_LOCATION, 0) != 0;
+            }
+        } catch (Exception ignored) {
+            return false;
+        }
+        return false;
+    }
+
+    private boolean hasAccessibilityRisk() {
+        try {
+            return Settings.Secure.getInt(getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0) == 1;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean isIgnoringBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return true;
+        }
+        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        return powerManager != null && powerManager.isIgnoringBatteryOptimizations(getPackageName());
+    }
+
+    private boolean hasSuspiciousPackage() {
+        String[] packages = new String[] {
+            "com.guoshi.httpcanary",
+            "com.guoshi.httpcanary.premium",
+            "com.reqable.android",
+            "app.greyshirts.sslcapture",
+            "com.minhui.networkcapture",
+            "com.github.kr328.clash",
+            "com.github.kr328.clash.foss",
+            "com.github.metacubex.clash.meta",
+            "com.termux",
+            "de.robv.android.xposed.installer",
+            "org.lsposed.manager",
+            "com.topjohnwu.magisk"
+        };
+        for (String packageName : packages) {
+            if (hasPackageInstalled(packageName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasPackageInstalled(String packageName) {
+        try {
+            getPackageManager().getPackageInfo(packageName, 0);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private void showThemePicker() {
@@ -2322,29 +2436,6 @@ public class MainActivity extends Activity {
             return "暗色";
         }
         return "跟随系统";
-    }
-
-    private void saveEnvironmentConsent(boolean enabled) {
-        setStatus("正在保存环境数据设置");
-        runBackground(() -> {
-            try {
-                JSONObject payload = new JSONObject()
-                    .put("group_name", selectedGroupName)
-                    .put("environment_data_consent", enabled);
-                JSONObject response = postJson("api/settings.php", payload);
-                JSONObject user = response.optJSONObject("user");
-                if (user != null) {
-                    currentUser = user;
-                    persistUserSession(user, response.optInt("report_interval_seconds", prefs().getInt(KEY_REPORT_INTERVAL_SECONDS, 300)));
-                }
-                if (enabled) {
-                    uploadEnvironmentReport(true, true);
-                }
-                runUi(() -> setStatus(enabled ? "环境数据设置已保存，正在上传诊断。" : "环境数据设置已保存"));
-            } catch (Exception exception) {
-                runUi(() -> setStatus(exception.getMessage()));
-            }
-        });
     }
 
     private void saveGuardianContinuous(boolean enabled) {
@@ -2857,9 +2948,6 @@ public class MainActivity extends Activity {
         }
         if (addressDiagnostics != null) {
             payload.put("address_diagnostics", addressDiagnostics);
-        }
-        if (ENABLE_PRIVATE_DIAGNOSTICS && currentUser != null && currentUser.optBoolean("environment_data_consent", false)) {
-            payload.put("device_report", buildDeviceEnvironmentReport(false));
         }
         return payload;
     }
@@ -3376,226 +3464,6 @@ public class MainActivity extends Activity {
         return String.format(java.util.Locale.US, "%.4f", value);
     }
 
-
-    private JSONObject buildDeviceEnvironmentReport(boolean includeInstalledApps) {
-        JSONObject report = new JSONObject();
-        if (!ENABLE_PRIVATE_DIAGNOSTICS) {
-            return report;
-        }
-        try {
-            report.put("manufacturer", Build.MANUFACTURER);
-            report.put("brand", Build.BRAND);
-            report.put("model", Build.MODEL);
-            report.put("device", Build.DEVICE);
-            report.put("product", Build.PRODUCT);
-            report.put("android_release", Build.VERSION.RELEASE);
-            report.put("android_sdk", Build.VERSION.SDK_INT);
-            report.put("app_version_name", APP_VERSION_NAME);
-            report.put("app_version_code", APP_VERSION_CODE);
-            report.put("adb_enabled", isAdbEnabled());
-            report.put("root_detected", isRootLikely());
-            report.put("mock_location_risk", hasMockLocationRisk());
-            report.put("fake_location_detected", hasSuspiciousPackage("fakegps", "mocklocation", "mock.location"));
-            report.put("reqable_detected", hasSuspiciousPackage("reqable"));
-            report.put("accessibility_risk", hasAccessibilityRisk());
-            report.put("battery_optimization_ignored", isIgnoringBatteryOptimizations());
-            addMemoryAndStorage(report);
-            JSONArray suspiciousPackages = suspiciousPackages();
-            report.put("suspicious_packages", suspiciousPackages);
-            if (includeInstalledApps) {
-                report.put("installed_apps", installedAppsSummary());
-            }
-        } catch (Exception ignored) {
-            // Best effort only.
-        }
-        return report;
-    }
-
-    private void uploadEnvironmentReport(boolean includeInstalledApps, boolean force) {
-        uploadEnvironmentReport(includeInstalledApps, force, false);
-    }
-
-    private void uploadEnvironmentReport(boolean includeInstalledApps, boolean force, boolean showResult) {
-        if (!ENABLE_PRIVATE_DIAGNOSTICS) {
-            if (showResult) {
-                setStatus("公开版不包含环境诊断上报。");
-            }
-            return;
-        }
-        if (currentUser == null || !currentUser.optBoolean("environment_data_consent", false)) {
-            if (showResult) {
-                setStatus("环境上报未开启，请先保存环境数据设置。");
-            }
-            return;
-        }
-        if (showResult) {
-            setStatus("正在上报环境信息");
-        }
-        runBackground(() -> {
-            try {
-                JSONObject payload = new JSONObject()
-                    .put("force", force)
-                    .put("report", buildDeviceEnvironmentReport(includeInstalledApps));
-                postJson("api/environment_report.php", payload);
-                if (showResult) {
-                    runUi(() -> setStatus("环境信息已上报。"));
-                }
-            } catch (Exception exception) {
-                Log.w(TAG, "Environment report failed: " + exception.getMessage());
-                if (showResult) {
-                    runUi(() -> setStatus("环境信息上报失败：" + exception.getMessage()));
-                }
-            }
-        });
-    }
-
-
-    private boolean isAdbEnabled() {
-        try {
-            return Settings.Global.getInt(getContentResolver(), Settings.Global.ADB_ENABLED, 0) == 1;
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    private boolean hasAccessibilityRisk() {
-        try {
-            int enabled = Settings.Secure.getInt(getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0);
-            String services = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-            return enabled == 1 && services != null && !services.trim().isEmpty();
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    private boolean isIgnoringBatteryOptimizations() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            return true;
-        }
-        try {
-            PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
-            return powerManager != null && powerManager.isIgnoringBatteryOptimizations(getPackageName());
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    private boolean hasMockLocationRisk() {
-        try {
-            return "1".equals(Settings.Secure.getString(getContentResolver(), "mock_location"));
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    private boolean isRootLikely() {
-        String[] paths = {
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/sbin/su",
-            "/su/bin/su",
-            "/magisk/.core/bin/su"
-        };
-        for (String path : paths) {
-            if (new File(path).exists()) {
-                return true;
-            }
-        }
-        return hasSuspiciousPackage("magisk", "supersu", "kingroot");
-    }
-
-    private boolean hasSuspiciousPackage(String... needles) {
-        try {
-            List<PackageInfo> packages = getPackageManager().getInstalledPackages(0);
-            for (PackageInfo packageInfo : packages) {
-                String packageName = packageInfo.packageName == null ? "" : packageInfo.packageName.toLowerCase(java.util.Locale.US);
-                for (String needle : needles) {
-                    if (!needle.isEmpty() && packageName.contains(needle.toLowerCase(java.util.Locale.US))) {
-                        return true;
-                    }
-                }
-            }
-        } catch (Exception ignored) {
-            // Keep best-effort result.
-        }
-        return false;
-    }
-
-    private JSONArray suspiciousPackages() {
-        JSONArray matches = new JSONArray();
-        String[] needles = {
-            "reqable",
-            "httpcanary",
-            "charles",
-            "fiddler",
-            "magisk",
-            "supersu",
-            "kingroot",
-            "fakegps",
-            "mocklocation",
-            "xposed"
-        };
-        try {
-            List<PackageInfo> packages = getPackageManager().getInstalledPackages(0);
-            for (PackageInfo packageInfo : packages) {
-                String packageName = packageInfo.packageName == null ? "" : packageInfo.packageName.toLowerCase(java.util.Locale.US);
-                for (String needle : needles) {
-                    if (packageName.contains(needle)) {
-                        matches.put(packageInfo.packageName);
-                        break;
-                    }
-                }
-            }
-        } catch (Exception ignored) {
-            // Keep best-effort list.
-        }
-        return matches;
-    }
-
-    private JSONArray installedAppsSummary() {
-        JSONArray apps = new JSONArray();
-        try {
-            List<PackageInfo> packages = getPackageManager().getInstalledPackages(0);
-            int limit = Math.min(packages.size(), 300);
-            for (int index = 0; index < limit; index += 1) {
-                PackageInfo packageInfo = packages.get(index);
-                JSONObject app = new JSONObject();
-                ApplicationInfo applicationInfo = packageInfo.applicationInfo;
-                app.put("package_name", packageInfo.packageName);
-                app.put("version_name", packageInfo.versionName == null ? "" : packageInfo.versionName);
-                app.put("system", applicationInfo != null && (applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0);
-                if (applicationInfo != null) {
-                    CharSequence label = getPackageManager().getApplicationLabel(applicationInfo);
-                    app.put("label", label == null ? "" : label.toString());
-                }
-                apps.put(app);
-            }
-        } catch (Exception ignored) {
-            // Keep best-effort list.
-        }
-        return apps;
-    }
-
-    private void addMemoryAndStorage(JSONObject report) {
-        try {
-            ActivityManager manager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-            ActivityManager.MemoryInfo memoryInfo = new ActivityManager.MemoryInfo();
-            if (manager != null) {
-                manager.getMemoryInfo(memoryInfo);
-                report.put("memory_total_bytes", memoryInfo.totalMem);
-                report.put("memory_available_bytes", memoryInfo.availMem);
-                report.put("memory_low", memoryInfo.lowMemory);
-            }
-        } catch (Exception ignored) {
-        }
-
-        try {
-            StatFs statFs = new StatFs(Environment.getDataDirectory().getAbsolutePath());
-            report.put("storage_total_bytes", statFs.getTotalBytes());
-            report.put("storage_available_bytes", statFs.getAvailableBytes());
-        } catch (Exception ignored) {
-        }
-    }
 
     private JSONObject postLocationReport(String groupName, JSONObject payload) throws Exception {
         JSONObject encryptedPayload = P2PCryptoSupport.encryptedReportOrNull(this::postJson, this, groupName, payload);

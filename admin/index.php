@@ -439,7 +439,7 @@ require_once __DIR__ . '/../private/admin/controller.php';
                                             </label>
                                             <label class="check-line compact-check">
                                                 <input name="debug_mode" type="checkbox" value="1" <?= !empty($user['debug_mode']) ? 'checked' : '' ?>>
-                                                <span>调试模式（忽略安全策略）</span>
+                                                <span>调试模式（用于排查问题）</span>
                                             </label>
                                             <button class="small" type="submit">保存账号</button>
                                         </form>
@@ -858,4 +858,3 @@ require_once __DIR__ . '/../private/admin/controller.php';
     <script src="/<?= e(admin_url_path()) ?>assets/popup-select.js?v=<?= (int) filemtime(__DIR__ . '/assets/popup-select.js') ?>" defer></script>
 </body>
 </html>
-

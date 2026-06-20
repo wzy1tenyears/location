@@ -86,32 +86,7 @@ require_once __DIR__ . '/../private/admin/controller.php';
         </datalist>
 
         <div class="grid">
-            <section class="panel">
-                <h2>安全策略</h2>
-                <form method="post">
-                    <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
-                    <input type="hidden" name="action" value="update_security_settings">
-                    <?php
-                    $securityLabels = [
-                        'ban_root_users' => '禁止 Root 用户',
-                        'ban_adb_users' => '禁止 ADB 用户',
-                        'ban_fake_location_users' => '禁止模拟定位用户',
-                        'ban_accessibility_users' => '禁止异常无障碍用户',
-                        'ban_packet_capture_users' => '禁止抓包工具用户',
-                    ];
-                    ?>
-                    <div class="check-list">
-                        <?php foreach ($securityLabels as $key => $label): ?>
-                            <label class="check-line">
-                                <input name="<?= e($key) ?>" type="checkbox" value="1" <?= !empty($securitySettings[$key]) ? 'checked' : '' ?>>
-                                <span><?= e($label) ?></span>
-                            </label>
-                        <?php endforeach; ?>
-                    </div>
-                    <p class="muted">账号启用调试模式后，会忽略这些禁用项。</p>
-                    <button type="submit">保存安全策略</button>
-                </form>
-            </section>
+            
 
             <section class="panel">
                 <h2>公告管理</h2>
@@ -366,13 +341,7 @@ require_once __DIR__ . '/../private/admin/controller.php';
                         <?php endif; ?>
                         <?php foreach ($users as $user): ?>
                             <?php $userMemberships = $membershipsByUser[(int) $user['id']] ?? []; ?>
-                            <?php $environmentReport = $environmentReportsByUser[(int) $user['id']] ?? null; ?>
-                            <?php $deviceReport = $deviceReportsByUser[(int) $user['id']] ?? null; ?>
                             <?php $userDevices = $devicesByUser[(int) $user['id']] ?? []; ?>
-                            <?php $installedApps = installed_apps_from_environment_report($environmentReport['report_json'] ?? null); ?>
-                            <?php $installedUserAppCount = count(array_filter($installedApps, static fn (array $app): bool => empty($app['system']))); ?>
-                            <?php $installedSystemAppCount = count($installedApps) - $installedUserAppCount; ?>
-                            <?php $deviceInfo = device_info_from_environment_report($deviceReport['report_json'] ?? null); ?>
                             <?php $userAgreementAcceptedAt = (string) ($user['user_agreement_accepted_at'] ?? ($user['terms_accepted_at'] ?? '')); ?>
                             <?php $privacyPolicyAcceptedAt = (string) ($user['privacy_policy_accepted_at'] ?? ($user['terms_accepted_at'] ?? '')); ?>
                             <?php $crossBorderAcceptedAt = (string) ($user['cross_border_transfer_accepted_at'] ?? ''); ?>
@@ -529,28 +498,6 @@ require_once __DIR__ . '/../private/admin/controller.php';
                                                     <strong>未同意</strong>
                                                 <?php endif; ?>
                                             </div>
-                                            <div class="environment-status">
-                                                <span>设备信息：</span>
-                                                <?php if ($deviceReport): ?>
-                                                    <strong>已上报</strong>
-                                                    <span class="muted"><?= e(format_datetime((string) $deviceReport['created_at'])) ?></span>
-                                                <?php else: ?>
-                                                    <strong>暂无</strong>
-                                                <?php endif; ?>
-                                            </div>
-                                            <?php if ($deviceInfo): ?>
-                                                <details class="row-more installed-apps-details">
-                                                    <summary>查看设备信息</summary>
-                                                    <div class="device-info-list">
-                                                        <?php foreach ($deviceInfo as [$label, $value]): ?>
-                                                            <div class="device-info-row">
-                                                                <strong><?= e($label) ?></strong>
-                                                                <span><?= e($value) ?></span>
-                                                            </div>
-                                                        <?php endforeach; ?>
-                                                    </div>
-                                                </details>
-                                            <?php endif; ?>
                                             <details class="row-more installed-apps-details">
                                                 <summary>设备指纹绑定（<?= count($userDevices) ?>）</summary>
                                                 <?php if (!$userDevices): ?>
@@ -577,51 +524,6 @@ require_once __DIR__ . '/../private/admin/controller.php';
                                                     </div>
                                                 <?php endif; ?>
                                             </details>
-                                            <div class="environment-status">
-                                                <span>环境数据：</span>
-                                                <?php if (!empty($user['environment_data_consent_at'])): ?>
-                                                    <strong>已同意</strong>
-                                                    <span class="muted"><?= e(format_datetime((string) $user['environment_data_consent_at'])) ?></span>
-                                                <?php else: ?>
-                                                    <strong>未同意</strong>
-                                                <?php endif; ?>
-                                            </div>
-                                            <?php if (!empty($user['environment_data_consent_at'])): ?>
-                                                <details class="row-more installed-apps-details">
-                                                    <summary>查看已安装软件</summary>
-                                                    <?php if (!$environmentReport): ?>
-                                                        <div class="muted">暂无环境数据上报。</div>
-                                                    <?php elseif (!$installedApps): ?>
-                                                        <div class="muted">最新环境数据没有应用列表。</div>
-                                                    <?php else: ?>
-                                                        <div class="muted">上报时间：<?= e(format_datetime((string) $environmentReport['created_at'])) ?>，当前显示 <span data-installed-visible-count><?= (int) $installedUserAppCount ?></span> / <?= count($installedApps) ?> 个应用</div>
-                                                        <div class="installed-app-toolbar">
-                                                            <label class="compact-check">
-                                                                <input class="installed-app-system-toggle" type="checkbox">
-                                                                <span>显示系统应用<?= $installedSystemAppCount > 0 ? '（' . (int) $installedSystemAppCount . '）' : '' ?></span>
-                                                            </label>
-                                                            <span class="muted">默认隐藏系统应用。</span>
-                                                        </div>
-                                                        <div class="installed-app-list">
-                                                            <?php foreach ($installedApps as $app): ?>
-                                                                <div class="installed-app-item<?= $app['system'] ? ' is-system-app' : '' ?>"<?= $app['system'] ? ' hidden' : '' ?>>
-                                                                    <strong><?= e($app['package_name']) ?></strong>
-                                                                    <?php if ($app['label'] !== ''): ?>
-                                                                        <span><?= e($app['label']) ?></span>
-                                                                    <?php endif; ?>
-                                                                    <?php if ($app['version_name'] !== ''): ?>
-                                                                        <span>版本：<?= e($app['version_name']) ?></span>
-                                                                    <?php endif; ?>
-                                                                    <?php if ($app['system']): ?>
-                                                                        <span class="muted">系统应用</span>
-                                                                    <?php endif; ?>
-                                                                </div>
-                                                            <?php endforeach; ?>
-                                                        </div>
-                                                    <?php endif; ?>
-                                                </details>
-                                            <?php endif; ?>
-                                        </div>
                                         </div>
                                     </details>
                                 </td>

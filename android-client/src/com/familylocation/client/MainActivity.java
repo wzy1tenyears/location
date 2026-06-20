@@ -2628,33 +2628,42 @@ public class MainActivity extends Activity {
         String name = label.isEmpty()
             ? location.optString("display_name", location.optString("username", "成员"))
             : label;
+        String role = location.optString("role_label", "");
         JSONObject diagnostics = location.optJSONObject("address_diagnostics");
-        String address = "";
-        if (diagnostics != null) {
-            address = diagnostics.optString("preferred_address", "");
-        }
+        String address = diagnostics == null ? "" : diagnostics.optString("preferred_address", "");
 
-        StringBuilder builder = new StringBuilder()
-            .append(name)
-            .append(" · ")
-            .append(location.optString("role_label", ""))
-            .append("\n坐标：")
-            .append(formatCoordinate(location.optDouble("latitude", 0)))
-            .append(", ")
-            .append(formatCoordinate(location.optDouble("longitude", 0)))
-            .append("\n更新时间：")
-            .append(location.optString("updated_at", ""));
+        StringBuilder builder = new StringBuilder().append(name);
+        if (!role.isEmpty()) {
+            builder.append(" · ").append(role);
+        }
+        if (hasUsableCoordinates(location)) {
+            builder.append("\n坐标：")
+                .append(formatCoordinate(location.optDouble("latitude", 0)))
+                .append(", ")
+                .append(formatCoordinate(location.optDouble("longitude", 0)));
+        } else {
+            builder.append("\n坐标：暂无");
+        }
+        builder.append("\n更新时间：").append(location.optString("updated_at", ""));
+        appendHistoryNumeric(builder, location, "altitude", "高度", "m", 0);
+        appendHistoryNumeric(builder, location, "accuracy", "精度", "m", 0);
+        appendHistoryNumeric(builder, location, "heading", "方向", "°", 0);
+        appendHistoryNumeric(builder, location, "speed", "速度", " m/s", 2);
 
         if (!address.isEmpty()) {
             builder.append("\n地址：").append(address);
         }
+        builder.append("\n地址状态：").append(historyAddressStatus(location, diagnostics));
+        if (diagnostics != null && !diagnostics.optString("checked_at", "").isEmpty()) {
+            builder.append("\n对比时间：").append(diagnostics.optString("checked_at", ""));
+        }
+        appendHistoryAddressSources(builder, diagnostics);
 
         TextView row = infoPanel(builder.toString(), true);
         attachMapOpenAction(row, location, name);
         row.setTag("dynamic");
         content.addView(row, blockParams(8));
     }
-
     private void attachMapOpenAction(TextView row, JSONObject location, String label) {
         if (!hasUsableCoordinates(location)) {
             return;

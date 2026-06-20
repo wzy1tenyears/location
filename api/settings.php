@@ -38,10 +38,7 @@ try {
             $stmt->execute([password_hash($newPassword, PASSWORD_DEFAULT), (int) $user['id']]);
             session_regenerate_id(true);
         } else {
-            $environmentDataConsent = input_bool('environment_data_consent');
-            $stmt = db()->prepare('UPDATE users SET environment_data_consent_at = ? WHERE id = ?');
-            $stmt->execute([$environmentDataConsent ? date('Y-m-d H:i:s') : null, (int) $user['id']]);
-            $user['environment_data_consent_at'] = $environmentDataConsent ? date('Y-m-d H:i:s') : null;
+            json_response(['ok' => false, 'message' => 'Unsupported settings action.'], 422);
         }
     }
 

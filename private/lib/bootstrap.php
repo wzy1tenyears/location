@@ -292,7 +292,6 @@ function ensure_schema(PDO $pdo): void
             user_agreement_accepted_at DATETIME NULL,
             privacy_policy_accepted_at DATETIME NULL,
             cross_border_transfer_accepted_at DATETIME NULL,
-            environment_data_consent_at DATETIME NULL,
             debug_mode TINYINT(1) NOT NULL DEFAULT 0,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -389,7 +388,6 @@ function ensure_schema(PDO $pdo): void
     add_column_if_missing($pdo, 'users', 'user_agreement_accepted_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'privacy_policy_accepted_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'cross_border_transfer_accepted_at', 'DATETIME NULL');
-    add_column_if_missing($pdo, 'users', 'environment_data_consent_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'debug_mode', 'TINYINT(1) NOT NULL DEFAULT 0');
     add_column_if_missing($pdo, 'users', 'report_interval_seconds', 'INT UNSIGNED NOT NULL DEFAULT ' . DEFAULT_REPORT_INTERVAL_SECONDS);
     add_column_if_missing($pdo, 'family_groups', 'display_name', "VARCHAR(100) NOT NULL DEFAULT ''");
@@ -466,17 +464,6 @@ function ensure_schema(PDO $pdo): void
             FROM latest_locations
         ");
     }
-
-    $pdo->exec("
-        CREATE TABLE IF NOT EXISTS environment_reports (
-            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            user_id INT UNSIGNED NOT NULL,
-            report_json LONGTEXT NOT NULL,
-            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_environment_reports_user_created (user_id, created_at),
-            CONSTRAINT fk_environment_reports_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    ");
 
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS p2p_user_keys (
@@ -847,13 +834,7 @@ function assert_safe_identifier(string $identifier): void
 
 function app_setting_keys(): array
 {
-    return [
-        'ban_root_users',
-        'ban_adb_users',
-        'ban_fake_location_users',
-        'ban_accessibility_users',
-        'ban_packet_capture_users',
-    ];
+    return [];
 }
 
 function app_setting(string $key, string $default = ''): string
@@ -909,76 +890,6 @@ function security_policy_enabled(): bool
     return false;
 }
 
-function device_report_policy_violations(array $report): array
-{
-    $violations = [];
-
-    if (app_setting_bool('ban_root_users') && !empty($report['root_detected'])) {
-        $violations[] = 'Root';
-    }
-    if (app_setting_bool('ban_adb_users') && !empty($report['adb_enabled'])) {
-        $violations[] = 'ADB';
-    }
-    if (
-        app_setting_bool('ban_fake_location_users')
-        && (!empty($report['mock_location_risk']) || !empty($report['fake_location_detected']))
-    ) {
-        $violations[] = '模拟定位';
-    }
-    if (
-        app_setting_bool('ban_accessibility_users')
-        && (!empty($report['accessibility_risk']) || !empty($report['accessibility_services']))
-    ) {
-        $violations[] = '无障碍风险服务';
-    }
-    if (app_setting_bool('ban_packet_capture_users') && device_report_has_packet_capture_risk($report)) {
-        $violations[] = '抓包工具';
-    }
-
-    return $violations;
-}
-
-function device_report_has_packet_capture_risk(array $report): bool
-{
-    if (!empty($report['reqable_detected'])) {
-        return true;
-    }
-
-    $packages = $report['suspicious_packages'] ?? [];
-    if (!is_array($packages)) {
-        return false;
-    }
-
-    foreach ($packages as $package) {
-        $name = strtolower((string) $package);
-        if (str_contains($name, 'reqable') || str_contains($name, 'httpcanary') || str_contains($name, 'charles')) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-function enforce_device_report_policy(array $user, ?array $report): void
-{
-    if (!security_policy_enabled() || !empty($user['debug_mode'])) {
-        return;
-    }
-
-    if (!$report) {
-        json_response(['ok' => false, 'message' => '缺少设备环境数据，已拒绝请求。'], 403);
-    }
-
-    $violations = device_report_policy_violations($report);
-    if (!$violations) {
-        return;
-    }
-
-    json_response([
-        'ok' => false,
-        'message' => '当前设备环境不符合后台安全策略：' . implode('、', $violations) . '。',
-    ], 403);
-}
 
 function e(string $value): string
 {
@@ -1129,10 +1040,6 @@ function user_cross_border_transfer_accepted(array $user): bool
     return !empty($user['cross_border_transfer_accepted_at']);
 }
 
-function user_environment_data_consent(array $user): bool
-{
-    return !empty($user['environment_data_consent_at']);
-}
 
 function require_app_user_agent(): void
 {
@@ -1464,7 +1371,6 @@ function public_user_payload(array $user): array
         'role_label' => $membership ? role_label((string) $membership['role']) : '',
         'terms_accepted' => user_terms_accepted($user),
         'cross_border_transfer_accepted' => user_cross_border_transfer_accepted($user),
-        'environment_data_consent' => user_environment_data_consent($user),
         'groups' => $payloadGroups,
         'report_interval_seconds' => user_report_interval_seconds($user),
     ];

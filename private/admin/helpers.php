@@ -243,48 +243,6 @@ function location_source_provider_label(string $provider): string
 
     return $labels[$key] ?? $provider;
 }
-function installed_apps_from_environment_report(?string $json): array
-{
-    if (!$json) {
-        return [];
-    }
-
-    $report = json_decode($json, true);
-    if (!is_array($report)) {
-        return [];
-    }
-
-    $apps = $report['installed_apps'] ?? [];
-    if (!is_array($apps)) {
-        return [];
-    }
-
-    $items = [];
-    foreach ($apps as $app) {
-        if (!is_array($app)) {
-            continue;
-        }
-
-        $packageName = trim((string) ($app['package_name'] ?? ''));
-        if ($packageName === '') {
-            continue;
-        }
-
-        $items[] = [
-            'package_name' => $packageName,
-            'label' => trim((string) ($app['label'] ?? '')),
-            'version_name' => trim((string) ($app['version_name'] ?? '')),
-            'system' => !empty($app['system']),
-        ];
-    }
-
-    usort($items, static function (array $left, array $right): int {
-        return strcmp($left['package_name'], $right['package_name']);
-    });
-
-    return $items;
-}
-
 function format_bytes(?int $bytes): string
 {
     if ($bytes === null || $bytes <= 0) {
@@ -297,63 +255,6 @@ function format_bytes(?int $bytes): string
     }
 
     return number_format($bytes / 1024 / 1024, 0) . ' MB';
-}
-
-function device_info_from_environment_report(?string $json): array
-{
-    if (!$json) {
-        return [];
-    }
-
-    $report = json_decode($json, true);
-    if (!is_array($report)) {
-        return [];
-    }
-
-    $items = [];
-    $model = trim(implode(' ', array_filter([
-        (string) ($report['manufacturer'] ?? ''),
-        (string) ($report['model'] ?? ''),
-    ])));
-    if ($model !== '') {
-        $items[] = ['设备', $model];
-    }
-    if (!empty($report['android_release']) || !empty($report['android_sdk'])) {
-        $items[] = ['系统', 'Android ' . (string) ($report['android_release'] ?? '') . ' / SDK ' . (string) ($report['android_sdk'] ?? '')];
-    }
-    if (!empty($report['app_version_name']) || !empty($report['app_version_code'])) {
-        $items[] = ['App', (string) ($report['app_version_name'] ?? '') . ' / ' . (string) ($report['app_version_code'] ?? '')];
-    }
-
-    $memoryTotal = format_bytes(isset($report['memory_total_bytes']) ? (int) $report['memory_total_bytes'] : null);
-    $memoryAvailable = format_bytes(isset($report['memory_available_bytes']) ? (int) $report['memory_available_bytes'] : null);
-    if ($memoryTotal !== '' || $memoryAvailable !== '') {
-        $items[] = ['内存', trim($memoryAvailable . ' 可用 / ' . $memoryTotal . ' 总量')];
-    }
-
-    $storageTotal = format_bytes(isset($report['storage_total_bytes']) ? (int) $report['storage_total_bytes'] : null);
-    $storageAvailable = format_bytes(isset($report['storage_available_bytes']) ? (int) $report['storage_available_bytes'] : null);
-    if ($storageTotal !== '' || $storageAvailable !== '') {
-        $items[] = ['存储', trim($storageAvailable . ' 可用 / ' . $storageTotal . ' 总量')];
-    }
-
-    foreach ([
-        'adb_enabled' => 'ADB',
-        'root_detected' => 'Root',
-        'mock_location_risk' => '模拟定位风险',
-        'fake_location_detected' => '定位伪装应用',
-        'reqable_detected' => 'Reqable',
-    ] as $key => $label) {
-        if (array_key_exists($key, $report)) {
-            $items[] = [$label, !empty($report[$key]) ? '是' : '否'];
-        }
-    }
-
-    if (!empty($report['suspicious_packages']) && is_array($report['suspicious_packages'])) {
-        $items[] = ['风险包名', implode(', ', array_map('strval', $report['suspicious_packages']))];
-    }
-
-    return $items;
 }
 
 function refresh_latest_location(PDO $pdo, int $userId, string $groupName): void

@@ -88,8 +88,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 64;
-    private static final String APP_VERSION_NAME = "2.0.31";
+    private static final int APP_VERSION_CODE = 65;
+    private static final String APP_VERSION_NAME = "2.0.32";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -2064,7 +2064,7 @@ public class MainActivity extends Activity {
             return;
         }
         currentUser = user;
-        JSONObject selected = firstGroup(user);
+        JSONObject selected = selectedGroupForSession(user);
         selectedGroupName = selected.optString("group_name", "");
         persistUserSession(user, response.optInt("report_interval_seconds", prefs().getInt(KEY_REPORT_INTERVAL_SECONDS, 300)));
     }
@@ -3706,7 +3706,7 @@ public class MainActivity extends Activity {
     }
 
     private void persistUserSession(JSONObject user, int intervalSeconds) {
-        JSONObject selectedGroup = firstGroup(user);
+        JSONObject selectedGroup = selectedGroupForSession(user);
         selectedGroupName = selectedGroup.optString("group_name", user.optString("group_name", selectedGroupName));
         SharedPreferences.Editor editor = prefs().edit()
             .putString(KEY_USER_ROLE, normalizeRole(selectedGroup.optString("role", user.optString("role", ""))))
@@ -3732,13 +3732,33 @@ public class MainActivity extends Activity {
         editor.apply();
     }
 
-    private JSONObject firstGroup(JSONObject user) {
+    private JSONObject selectedGroupForSession(JSONObject user) {
         JSONArray groups = user == null ? null : user.optJSONArray("groups");
-        if (groups != null && groups.length() > 0) {
-            JSONObject group = groups.optJSONObject(0);
-            if (group != null) {
-                return group;
+        String preferredGroupName = selectedGroupName == null ? "" : selectedGroupName.trim();
+        if (preferredGroupName.isEmpty()) {
+            preferredGroupName = prefs().getString(KEY_GROUP_NAME, "").trim();
+        }
+        if (preferredGroupName.isEmpty() && user != null) {
+            preferredGroupName = user.optString("group_name", "").trim();
+        }
+
+        JSONObject first = null;
+        if (groups != null) {
+            for (int index = 0; index < groups.length(); index += 1) {
+                JSONObject group = groups.optJSONObject(index);
+                if (group == null) {
+                    continue;
+                }
+                if (first == null) {
+                    first = group;
+                }
+                if (!preferredGroupName.isEmpty() && preferredGroupName.equals(group.optString("group_name", ""))) {
+                    return group;
+                }
             }
+        }
+        if (first != null) {
+            return first;
         }
         JSONObject group = new JSONObject();
         putJson(group, "group_name", user == null ? "" : user.optString("group_name", ""));

@@ -1,7 +1,7 @@
 package com.familylocation.admin;
 
 import android.app.Activity;
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
@@ -13,6 +13,7 @@ import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
@@ -27,7 +28,14 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.DisplayCutout;
 import android.view.Window;
+import android.view.WindowInsets;
+import android.view.animation.AccelerateDecelerateInterpolator;
+import android.view.animation.AlphaAnimation;
+import android.view.animation.AnimationSet;
+import android.view.animation.TranslateAnimation;
+import android.webkit.CookieManager;
 import android.webkit.WebResourceError;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebResourceRequest;
@@ -68,16 +76,25 @@ public class AdminActivity extends Activity {
     private static final String KEY_ACTIVE_UPDATE_DOWNLOAD_ID = "active_update_download_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "";
-    private static final int APP_VERSION_CODE = 53;
-    private static final String APP_VERSION_NAME = "2.0.20";
+    private static final int APP_VERSION_CODE = 56;
+    private static final String APP_VERSION_NAME = "2.1.0";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
     private static final String TAG = "FamilyLocationAdmin";
     private static final long MAX_CACHE_BYTES = 50L * 1024L * 1024L;
+    private static final int ADMIN_TAB_OVERVIEW = 0;
+    private static final int ADMIN_TAB_USERS = 1;
+    private static final int ADMIN_TAB_GROUPS = 2;
+    private static final int ADMIN_TAB_TICKETS = 3;
+    private static final int ADMIN_TAB_LOGS = 4;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private LinearLayout content;
     private TextView statusView;
+    private JSONObject lastAdminSummary;
+    private String currentRedirectPath = ADMIN_UPDATE_PATH;
+    private int currentAdminTab = ADMIN_TAB_OVERVIEW;
+    private boolean adminLoggedIn;
     private long updateDownloadId = -1L;
     private long pendingInstallDownloadId = -1L;
     private long installingDownloadId = -1L;
@@ -168,6 +185,8 @@ public class AdminActivity extends Activity {
     }
 
     private void showLogin(String message) {
+        adminLoggedIn = false;
+        lastAdminSummary = null;
         LinearLayout card = screen("后台登录");
         EditText username = input("管理员账号");
         EditText password = input("管理员密码");
@@ -722,11 +741,14 @@ public class AdminActivity extends Activity {
             }
             return;
         }
+        TextView challengeHint = infoPanel("完成人机验证后后台会自动继续。");
+        card.addView(challengeHint, blockParams(10));
         WebView challengeView = managedWebView();
         WebSettings settings = challengeView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setUserAgentString(settings.getUserAgentString() + " " + USER_AGENT);
+        syncCookiesToWebView(challengeUrl);
         challengeView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -735,10 +757,15 @@ public class AdminActivity extends Activity {
 
             @Override
             public void onPageFinished(WebView view, String url) {
+                captureWebViewCookies(url);
+                challengeHint.setText("请完成下方人机验证。");
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || request == null || request.isForMainFrame()) {
+                    challengeHint.setText("Cloudflare 质询加载失败，请检查网络后返回上一页重试。");
+                }
             }
 
             @Override
@@ -750,7 +777,7 @@ public class AdminActivity extends Activity {
         LinearLayout.LayoutParams params = blockParams(10);
         params.height = dp(220);
         card.addView(challengeView, params);
-        Button back = secondaryButton("返回修改密码");
+        Button back = secondaryButton("返回后台登录 / 修改密码");
         back.setOnClickListener(view -> {
             if (onBack != null) {
                 onBack.run();
@@ -761,6 +788,8 @@ public class AdminActivity extends Activity {
     }
 
     private void showAdminHome(String redirectPath) {
+        adminLoggedIn = true;
+        currentRedirectPath = redirectPath == null ? ADMIN_UPDATE_PATH : redirectPath;
         LinearLayout card = screen("后台");
         card.addView(infoPanel("后台登录已验证，正在加载原生管理概览。\n\n服务端返回入口：" + redirectPath), blockParams(14));
         setScreen(card, true);
@@ -772,14 +801,54 @@ public class AdminActivity extends Activity {
         runBackground(() -> {
             try {
                 JSONObject response = getJson("api/admin_summary.php");
-                runUi(() -> showAdminDashboard(response, redirectPath));
+                runUi(() -> {
+                    lastAdminSummary = response;
+                    currentRedirectPath = redirectPath == null ? ADMIN_UPDATE_PATH : redirectPath;
+                    showCurrentAdminTab(response, currentRedirectPath);
+                });
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }
         });
     }
 
+    private void showCurrentAdminTab(JSONObject response, String redirectPath) {
+        if (response == null) {
+            loadAdminSummary(redirectPath);
+            return;
+        }
+        switch (currentAdminTab) {
+            case ADMIN_TAB_USERS:
+                showUserManager(response, redirectPath);
+                return;
+            case ADMIN_TAB_GROUPS:
+                showGroupManager(response, redirectPath);
+                return;
+            case ADMIN_TAB_TICKETS:
+                showTicketManager(response, redirectPath);
+                return;
+            case ADMIN_TAB_LOGS:
+                showLogManager(response, redirectPath);
+                return;
+            case ADMIN_TAB_OVERVIEW:
+            default:
+                showAdminDashboard(response, redirectPath);
+        }
+    }
+
+    private void switchAdminTab(int tab) {
+        currentAdminTab = tab;
+        if (lastAdminSummary == null) {
+            showAdminHome(currentRedirectPath);
+            return;
+        }
+        showCurrentAdminTab(lastAdminSummary, currentRedirectPath);
+    }
+
     private void showAdminDashboard(JSONObject response, String redirectPath) {
+        currentAdminTab = ADMIN_TAB_OVERVIEW;
+        lastAdminSummary = response;
+        currentRedirectPath = redirectPath == null ? ADMIN_UPDATE_PATH : redirectPath;
         LinearLayout card = screen("后台概览");
         JSONObject stats = response.optJSONObject("stats");
         if (stats != null) {
@@ -814,6 +883,8 @@ public class AdminActivity extends Activity {
                     "\n地址：" + (address.isEmpty() ? "未解析" : address) +
                     "\n时间：" + location.optString("updated_at", "");
                 card.addView(infoPanel(line), blockParams(8));
+                Button detailLocation = secondaryButton("查看定位详情");
+                detailLocation.setOnClickListener(view -> showLocationDetail(location));
                 int locationId = location.optInt("id", 0);
                 if (locationId > 0) {
                     Button deleteLocation = secondaryButton("删除这条定位");
@@ -822,68 +893,29 @@ public class AdminActivity extends Activity {
                         putJson(payload, "location_id", locationId);
                         postAdminAction(payload, redirectPath);
                     }));
-                    card.addView(deleteLocation, blockParams(12));
+                    card.addView(buttonRow(detailLocation, deleteLocation), blockParams(12));
+                } else {
+                    card.addView(detailLocation, blockParams(12));
                 }
             }
         }
 
-        JSONArray users = response.optJSONArray("users");
-        card.addView(sectionTitle("最近用户"), blockParams(8));
-        if (users == null || users.length() == 0) {
-            card.addView(infoPanel("暂无用户。"), blockParams(16));
-        } else {
-            int count = Math.min(users.length(), 8);
-            for (int index = 0; index < count; index += 1) {
-                JSONObject user = users.optJSONObject(index);
-                if (user == null) {
-                    continue;
-                }
-                String line = displayName(user) +
-                    "\n状态：" + (user.optBoolean("is_active", false) ? "启用" : "停用") +
-                    " / " + (user.optBoolean("online", false) ? "在线" : "离线") +
-                    "\n最后在线：" + user.optString("last_seen_at", "无");
-                card.addView(infoPanel(line), blockParams(12));
-            }
-        }
-
-        JSONArray groups = response.optJSONArray("groups");
-        card.addView(sectionTitle("家庭组"), blockParams(8));
-        if (groups == null || groups.length() == 0) {
-            card.addView(infoPanel("暂无家庭组。"), blockParams(16));
-        } else {
-            int count = Math.min(groups.length(), 8);
-            for (int index = 0; index < count; index += 1) {
-                JSONObject group = groups.optJSONObject(index);
-                if (group == null) {
-                    continue;
-                }
-                String line = group.optString("display_name", group.optString("group_name", "")) +
-                    "\n成员：" + group.optInt("member_count") +
-                    " / 邀请码：" + group.optString("group_code", "未生成");
-                card.addView(infoPanel(line), blockParams(12));
-            }
-        }
-
-        Button usersManage = primaryButton("账号管理");
-        usersManage.setOnClickListener(view -> showUserManager(response, redirectPath));
-        Button groupManage = secondaryButton("家庭组管理");
-        groupManage.setOnClickListener(view -> showGroupManager(response, redirectPath));
+        card.addView(sectionTitle("系统工具"), blockParams(8));
+        Button securityManage = secondaryButton("安全策略");
+        securityManage.setOnClickListener(view -> showSecurityManager(response, redirectPath));
         Button announcementManage = secondaryButton("公告管理");
         announcementManage.setOnClickListener(view -> showAnnouncementManager(response, redirectPath));
         Button inviteManage = secondaryButton("邀请码管理");
         inviteManage.setOnClickListener(view -> showInviteManager(response, redirectPath));
-        Button ticketManage = secondaryButton("工单管理");
-        ticketManage.setOnClickListener(view -> showTicketManager(response, redirectPath));
         Button checkUpdate = secondaryButton("检查后台更新");
         checkUpdate.setOnClickListener(view -> checkAdminUpdateManually(redirectPath));
         Button refresh = secondaryButton("刷新后台数据");
         refresh.setOnClickListener(view -> showAdminHome(redirectPath));
         Button relogin = secondaryButton("重新登录");
         relogin.setOnClickListener(view -> showLogin(""));
-        card.addView(usersManage, blockParams(10));
-        card.addView(groupManage, blockParams(10));
+        card.addView(securityManage, blockParams(10));
         card.addView(buttonRow(announcementManage, inviteManage), blockParams(10));
-        card.addView(buttonRow(ticketManage, checkUpdate), blockParams(10));
+        card.addView(checkUpdate, blockParams(10));
         card.addView(refresh, blockParams(10));
         card.addView(relogin, blockParams(0));
         setScreen(card, false);
@@ -891,6 +923,44 @@ public class AdminActivity extends Activity {
     }
 
 
+
+    private void showSecurityManager(JSONObject response, String redirectPath) {
+        LinearLayout card = screen("安全策略");
+        JSONObject settings = response.optJSONObject("security_settings");
+        if (settings == null) {
+            settings = new JSONObject();
+        }
+        CheckBox banRoot = policyCheckBox("拦截 Root 环境", settings.optBoolean("ban_root_users", false));
+        CheckBox banAdb = policyCheckBox("拦截 ADB 调试", settings.optBoolean("ban_adb_users", false));
+        CheckBox banMock = policyCheckBox("拦截模拟定位", settings.optBoolean("ban_fake_location_users", false));
+        CheckBox banAccessibility = policyCheckBox("拦截无障碍风险", settings.optBoolean("ban_accessibility_users", false));
+        CheckBox banCapture = policyCheckBox("拦截抓包环境", settings.optBoolean("ban_packet_capture_users", false));
+        CheckBox banSuspiciousPackages = policyCheckBox("拦截可疑包名", settings.optBoolean("ban_suspicious_packages_users", false));
+        Button save = primaryButton("保存安全策略");
+        save.setOnClickListener(view -> {
+            JSONObject payload = adminPayload("update_security_settings");
+            putJson(payload, "ban_root_users", banRoot.isChecked());
+            putJson(payload, "ban_adb_users", banAdb.isChecked());
+            putJson(payload, "ban_fake_location_users", banMock.isChecked());
+            putJson(payload, "ban_accessibility_users", banAccessibility.isChecked());
+            putJson(payload, "ban_packet_capture_users", banCapture.isChecked());
+            putJson(payload, "ban_suspicious_packages_users", banSuspiciousPackages.isChecked());
+            postAdminAction(payload, redirectPath);
+        });
+        Button back = secondaryButton("返回概览");
+        back.setOnClickListener(view -> showAdminDashboard(response, redirectPath));
+        card.addView(infoPanel("安全策略开启后，命中风险的用户会按服务端规则限制登录或上报。调试模式账号不受拦截影响。\n\nRoot/ADB/模拟定位/无障碍/抓包按对应检测项拦截；可疑包名会拦截安装列表中命中的 Magisk、Xposed、Reqable、HttpCanary、Charles 等风险包名。"), blockParams(12));
+        card.addView(banRoot, blockParams(6));
+        card.addView(banAdb, blockParams(6));
+        card.addView(banMock, blockParams(6));
+        card.addView(banAccessibility, blockParams(6));
+        card.addView(banCapture, blockParams(6));
+        card.addView(banSuspiciousPackages, blockParams(12));
+        card.addView(save, blockParams(10));
+        card.addView(back, blockParams(0));
+        setScreen(card, false);
+        setStatus("");
+    }
 
     private CheckBox policyCheckBox(String text, boolean checked) {
         CheckBox box = new CheckBox(this);
@@ -901,6 +971,9 @@ public class AdminActivity extends Activity {
     }
 
     private void showGroupManager(JSONObject response, String redirectPath) {
+        currentAdminTab = ADMIN_TAB_GROUPS;
+        lastAdminSummary = response;
+        currentRedirectPath = redirectPath == null ? ADMIN_UPDATE_PATH : redirectPath;
         LinearLayout card = screen("家庭组管理");
         EditText newGroupName = input("新家庭组显示名称");
         Button add = primaryButton("添加家庭组");
@@ -1112,6 +1185,9 @@ public class AdminActivity extends Activity {
     }
 
     private void showUserManager(JSONObject response, String redirectPath) {
+        currentAdminTab = ADMIN_TAB_USERS;
+        lastAdminSummary = response;
+        currentRedirectPath = redirectPath == null ? ADMIN_UPDATE_PATH : redirectPath;
         LinearLayout card = screen("账号管理");
         JSONArray users = response.optJSONArray("users");
         JSONArray memberships = response.optJSONArray("memberships");
@@ -1345,6 +1421,9 @@ public class AdminActivity extends Activity {
     }
 
     private void showTicketManager(JSONObject response, String redirectPath) {
+        currentAdminTab = ADMIN_TAB_TICKETS;
+        lastAdminSummary = response;
+        currentRedirectPath = redirectPath == null ? ADMIN_UPDATE_PATH : redirectPath;
         LinearLayout card = screen("工单管理");
         JSONArray tickets = response.optJSONArray("tickets");
         if (tickets == null || tickets.length() == 0) {
@@ -1391,17 +1470,291 @@ public class AdminActivity extends Activity {
         setStatus("");
     }
 
+    private void showLogManager(JSONObject response, String redirectPath) {
+        currentAdminTab = ADMIN_TAB_LOGS;
+        lastAdminSummary = response;
+        currentRedirectPath = redirectPath == null ? ADMIN_UPDATE_PATH : redirectPath;
+        LinearLayout card = screen("日志");
+        JSONArray logs = response.optJSONArray("logs");
+        if (logs == null || logs.length() == 0) {
+            card.addView(infoPanel("暂无日志。"), blockParams(12));
+        } else {
+            int count = Math.min(logs.length(), 50);
+            for (int index = 0; index < count; index += 1) {
+                JSONObject log = logs.optJSONObject(index);
+                if (log == null) {
+                    continue;
+                }
+                String line = firstText(log.optString("message", ""), log.optString("event_type", "日志")) +
+                    "\n用户：" + firstText(displayName(log), "系统/后台") +
+                    " / 类型：" + log.optString("event_type", "") +
+                    "\n家庭组：" + firstText(log.optString("group_name", ""), "无") +
+                    " / IP：" + firstText(log.optString("ip", ""), "无") +
+                    "\n时间：" + log.optString("created_at", "");
+                card.addView(infoPanel(line), blockParams(6));
+                Button detailLog = secondaryButton("查看详情");
+                detailLog.setOnClickListener(view -> showLogDetail(log));
+                card.addView(detailLog, blockParams(10));
+            }
+        }
+        Button refresh = secondaryButton("刷新日志");
+        refresh.setOnClickListener(view -> loadAdminSummary(redirectPath));
+        card.addView(refresh, blockParams(0));
+        setScreen(card, false);
+        setStatus("");
+    }
+
 
     private void confirmDanger(String message, Runnable action) {
         if (action == null) {
             return;
         }
-        new AlertDialog.Builder(this)
-            .setTitle("确认操作")
-            .setMessage(message)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("确认", (dialog, which) -> action.run())
-            .show();
+        Dialog dialog = new Dialog(this);
+        LinearLayout card = dialogCard(dialog, "确认操作");
+        card.addView(infoPanel(message), blockParams(14));
+
+        Button cancel = secondaryButton("取消");
+        cancel.setOnClickListener(view -> dialog.dismiss());
+        Button confirm = primaryButton("确认");
+        confirm.setOnClickListener(view -> {
+            dialog.dismiss();
+            action.run();
+        });
+        card.addView(buttonRow(cancel, confirm), blockParams(0));
+        showCardDialog(dialog);
+    }
+
+    private void showLocationDetail(JSONObject location) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("用户：").append(displayName(location)).append('\n');
+        builder.append("家庭组：").append(location.optString("group_name", "")).append('\n');
+        builder.append("身份：").append(location.optString("role_label", "")).append('\n');
+        builder.append("坐标：").append(formatCoordinate(location.optDouble("latitude")))
+            .append(", ").append(formatCoordinate(location.optDouble("longitude"))).append('\n');
+        builder.append("精度：").append(formatCoordinate(location.optDouble("accuracy"))).append(" 米\n");
+        builder.append("时间：").append(location.optString("updated_at", "")).append("\n\n");
+
+        JSONObject diagnostics = location.optJSONObject("address_diagnostics");
+        if (diagnostics == null) {
+            builder.append("地址诊断：无\n");
+        } else {
+            builder.append("首选来源：").append(diagnostics.optString("preferred_source", "")).append('\n');
+            builder.append("首选地址：").append(firstText(diagnostics.optString("preferred_address", ""), locationAddress(location), "未解析")).append('\n');
+            builder.append("首选城市：").append(diagnostics.optString("preferred_city", "")).append('\n');
+            builder.append("检查时间：").append(diagnostics.optString("checked_at", "")).append('\n');
+            builder.append("状态：")
+                .append(diagnostics.optBoolean("mismatch", false) ? "存在位置差异" : "未发现明显差异")
+                .append(diagnostics.optBoolean("mobile_ip_uncertain", false) ? " / 移动网络 IP 仅供参考" : "")
+                .append("\n\n");
+
+            JSONArray sources = diagnostics.optJSONArray("sources");
+            if (sources == null || sources.length() == 0) {
+                builder.append("来源：无\n");
+            } else {
+                builder.append("来源与响应数据：\n");
+                for (int index = 0; index < sources.length(); index += 1) {
+                    JSONObject source = sources.optJSONObject(index);
+                    if (source == null) {
+                        continue;
+                    }
+                    builder.append('\n').append(index + 1).append(". ").append(locationSourceTitle(source)).append('\n');
+                    appendIfPresent(builder, "类型", source.optString("type", ""));
+                    appendIfPresent(builder, "地址", source.optString("address", ""));
+                    appendIfPresent(builder, "城市", source.optString("city", ""));
+                    appendIfPresent(builder, "省/地区", source.optString("region", ""));
+                    appendIfPresent(builder, "国家", source.optString("country", ""));
+                    appendIfPresent(builder, "IP", firstText(source.optString("ip", ""), source.optString("ipv4", ""), source.optString("ipv6", "")));
+                    appendIfPresent(builder, "STUN", firstText(source.optString("stun_label", ""), source.optString("stun_server", "")));
+                    if (!Double.isNaN(source.optDouble("latitude", Double.NaN)) && !Double.isNaN(source.optDouble("longitude", Double.NaN))) {
+                        builder.append("坐标：").append(formatCoordinate(source.optDouble("latitude")))
+                            .append(", ").append(formatCoordinate(source.optDouble("longitude"))).append('\n');
+                    }
+                    builder.append("保存响应：").append(prettyJson(source)).append('\n');
+                }
+            }
+        }
+
+        appendEnvironmentReportDetail(builder, location);
+
+        showTextDetailDialog("定位详情", builder.toString());
+    }
+
+    private void appendEnvironmentReportDetail(StringBuilder builder, JSONObject location) {
+        JSONObject report = location.optJSONObject("environment_report");
+        if (report == null) {
+            report = environmentReportForUser(location.optInt("user_id", 0));
+        }
+        builder.append("\n设备/环境报告：");
+        if (report == null) {
+            builder.append("无\n");
+            return;
+        }
+        builder.append('\n');
+        appendIfPresent(builder, "上报时间", report.optString("created_at", ""));
+        JSONObject device = report.optJSONObject("device");
+        if (device != null) {
+            appendIfPresent(builder, "设备", firstText(device.optString("manufacturer", ""), device.optString("brand", ""))
+                + " " + firstText(device.optString("model", ""), device.optString("device", "")));
+            appendIfPresent(builder, "系统", firstText(device.optString("android_release", ""), "Android")
+                + " / SDK " + firstText(device.optString("android_sdk", ""), "未知"));
+            appendIfPresent(builder, "App", firstText(device.optString("app_version_name", ""), "未知")
+                + " (" + firstText(device.optString("app_version_code", ""), "0") + ")");
+            appendIfPresent(builder, "Root", boolLabel(device, "root_detected"));
+            appendIfPresent(builder, "ADB", boolLabel(device, "adb_enabled"));
+            appendIfPresent(builder, "模拟定位", boolLabel(device, "mock_location_enabled"));
+        }
+        JSONArray apps = report.optJSONArray("installed_apps");
+        int appCount = report.optInt("installed_apps_count", apps == null ? 0 : apps.length());
+        builder.append("安装应用：").append(appCount).append(" 个").append('\n');
+        if (apps != null && apps.length() > 0) {
+            int count = Math.min(appCount, Math.min(apps.length(), 40));
+            for (int index = 0; index < count; index += 1) {
+                JSONObject app = apps.optJSONObject(index);
+                if (app == null) {
+                    continue;
+                }
+                builder.append("  - ")
+                    .append(firstText(app.optString("label", ""), app.optString("package_name", ""), "未知应用"));
+                String packageName = app.optString("package_name", "");
+                if (!packageName.isEmpty()) {
+                    builder.append(" / ").append(packageName);
+                }
+                String versionName = app.optString("version_name", "");
+                if (!versionName.isEmpty()) {
+                    builder.append(" / ").append(versionName);
+                }
+                builder.append('\n');
+            }
+            if (apps.length() > count || appCount > count) {
+                builder.append("  ... 仅显示前 ").append(count).append(" 个\n");
+            }
+        }
+        JSONObject rawReport = report.optJSONObject("report");
+        if (rawReport != null) {
+            builder.append("环境报告 JSON：").append(prettyJson(rawReport)).append('\n');
+        }
+    }
+
+    private JSONObject environmentReportForUser(int userId) {
+        if (userId <= 0 || lastAdminSummary == null) {
+            return null;
+        }
+        JSONArray reports = lastAdminSummary.optJSONArray("environment_reports");
+        if (reports == null) {
+            return null;
+        }
+        for (int index = 0; index < reports.length(); index += 1) {
+            JSONObject report = reports.optJSONObject(index);
+            if (report != null && report.optInt("user_id", 0) == userId) {
+                return report;
+            }
+        }
+        return null;
+    }
+
+    private String boolLabel(JSONObject object, String key) {
+        if (object == null || !object.has(key) || object.isNull(key)) {
+            return "";
+        }
+        return object.optBoolean(key, false) ? "是" : "否";
+    }
+
+    private void showLogDetail(JSONObject log) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("日志 ID：").append(log.optInt("id", 0)).append('\n');
+        builder.append("用户：").append(firstText(displayName(log), "系统/后台")).append('\n');
+        builder.append("用户 ID：").append(log.optInt("user_id", 0)).append('\n');
+        builder.append("家庭组：").append(firstText(log.optString("group_name", ""), "无")).append('\n');
+        builder.append("类型：").append(log.optString("event_type", "")).append('\n');
+        builder.append("消息：").append(log.optString("message", "")).append('\n');
+        builder.append("IP：").append(log.optString("ip", "")).append('\n');
+        builder.append("时间：").append(log.optString("created_at", "")).append('\n');
+        builder.append("User-Agent：").append(log.optString("user_agent", "")).append("\n\n");
+        JSONObject meta = log.optJSONObject("meta");
+        builder.append("Meta：").append(meta == null ? "无" : prettyJson(meta));
+
+        showTextDetailDialog("日志详情", builder.toString());
+    }
+
+    private LinearLayout dialogCard(Dialog dialog, String titleText) {
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(18), dp(18), dp(18), dp(14));
+        card.setBackground(cardBackground());
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            card.setElevation(dp(8));
+        }
+        TextView title = sectionTitle(titleText);
+        title.setTextSize(22);
+        card.addView(title, blockParams(12));
+        dialog.setContentView(card);
+        return card;
+    }
+
+    private void showTextDetailDialog(String titleText, String detailText) {
+        Dialog dialog = new Dialog(this);
+        LinearLayout card = dialogCard(dialog, titleText);
+        TextView detail = body(detailText);
+        detail.setTextColor(colorText());
+        detail.setPadding(dp(14), dp(12), dp(14), dp(12));
+        detail.setBackground(panelBackground());
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(detail, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams scrollParams = blockParams(12);
+        int availableHeight = getResources().getDisplayMetrics().heightPixels - topSafePadding() - dp(170);
+        scrollParams.height = Math.max(dp(180), Math.min(dp(460), availableHeight));
+        card.addView(scroll, scrollParams);
+
+        Button close = secondaryButton("关闭");
+        close.setOnClickListener(view -> dialog.dismiss());
+        card.addView(close, blockParams(0));
+        showCardDialog(dialog);
+    }
+
+    private void showCardDialog(Dialog dialog) {
+        dialog.show();
+        Window window = dialog.getWindow();
+        if (window == null) {
+            return;
+        }
+        window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int dialogWidth = Math.min(screenWidth - dp(32), dp(520));
+        window.setLayout(dialogWidth > 0 ? dialogWidth : ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
+
+    private void appendIfPresent(StringBuilder builder, String label, String value) {
+        String text = value == null ? "" : value.trim();
+        if (!text.isEmpty()) {
+            builder.append(label).append("：").append(text).append('\n');
+        }
+    }
+
+    private String locationSourceTitle(JSONObject source) {
+        return firstText(source.optString("provider", ""), source.optString("source", ""), source.optString("name", ""), source.optString("type", "来源"));
+    }
+
+    private String firstText(String... values) {
+        if (values == null) {
+            return "";
+        }
+        for (String value : values) {
+            String text = value == null ? "" : value.trim();
+            if (!text.isEmpty() && !"0".equals(text)) {
+                return text;
+            }
+        }
+        return "";
+    }
+
+    private String prettyJson(JSONObject object) {
+        try {
+            return object.toString(2);
+        } catch (Exception ignored) {
+            return object.toString();
+        }
     }
 
     private void postAdminAction(JSONObject payload, String redirectPath) {
@@ -1550,6 +1903,42 @@ public class AdminActivity extends Activity {
         if (values == null || values.isEmpty()) {
             return;
         }
+        for (String value : values) {
+            mergeCookieHeader(value);
+        }
+    }
+
+    private void syncCookiesToWebView(String url) {
+        try {
+            CookieManager cookieManager = CookieManager.getInstance();
+            cookieManager.setAcceptCookie(true);
+            for (String cookie : cookieHeader().split(";")) {
+                String trimmed = cookie.trim();
+                if (!trimmed.isEmpty()) {
+                    cookieManager.setCookie(url, trimmed);
+                }
+            }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                cookieManager.flush();
+            }
+        } catch (Exception exception) {
+            Log.w(TAG, "Sync cookies to WebView failed: " + exception.getMessage());
+        }
+    }
+
+    private void captureWebViewCookies(String url) {
+        try {
+            String cookies = CookieManager.getInstance().getCookie(url == null || url.trim().isEmpty() ? serverUrl() : url);
+            mergeCookieHeader(cookies);
+        } catch (Exception exception) {
+            Log.w(TAG, "Capture WebView cookies failed: " + exception.getMessage());
+        }
+    }
+
+    private void mergeCookieHeader(String header) {
+        if (header == null || header.trim().isEmpty()) {
+            return;
+        }
         List<String> cookies = new ArrayList<>();
         String existing = prefs().getString(KEY_SESSION_COOKIE, "");
         if (existing != null && !existing.trim().isEmpty()) {
@@ -1560,12 +1949,15 @@ public class AdminActivity extends Activity {
                 }
             }
         }
-        for (String value : values) {
-            String cookie = value.split(";", 2)[0].trim();
-            if (cookie.isEmpty()) {
+        for (String item : header.split(";")) {
+            String cookie = item.trim();
+            if (cookie.isEmpty() || !cookie.contains("=")) {
                 continue;
             }
-            String name = cookie.split("=", 2)[0];
+            String name = cookie.split("=", 2)[0].trim();
+            if (name.isEmpty() || isCookieAttribute(name)) {
+                continue;
+            }
             for (int index = cookies.size() - 1; index >= 0; index -= 1) {
                 if (cookies.get(index).startsWith(name + "=")) {
                     cookies.remove(index);
@@ -1574,6 +1966,17 @@ public class AdminActivity extends Activity {
             cookies.add(cookie);
         }
         prefs().edit().putString(KEY_SESSION_COOKIE, joinCookies(cookies)).apply();
+    }
+
+    private boolean isCookieAttribute(String name) {
+        String value = name == null ? "" : name.trim().toLowerCase(java.util.Locale.US);
+        return "path".equals(value)
+            || "domain".equals(value)
+            || "expires".equals(value)
+            || "max-age".equals(value)
+            || "secure".equals(value)
+            || "httponly".equals(value)
+            || "samesite".equals(value);
     }
 
     private String cookieHeader() {
@@ -1642,10 +2045,11 @@ public class AdminActivity extends Activity {
             LinearLayout root = new LinearLayout(this);
             root.setOrientation(LinearLayout.VERTICAL);
             root.setGravity(Gravity.CENTER);
-            root.setPadding(dp(16), dp(16), dp(16), dp(16));
+            root.setPadding(dp(16), topSafePadding(), dp(16), dp(16));
             root.setBackgroundColor(colorSurface());
             root.addView(card, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             setContentView(root, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            animateScreen(root, true);
             return;
         }
 
@@ -1654,11 +2058,113 @@ public class AdminActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        root.setPadding(dp(16), dp(16), dp(16), dp(16));
+        root.setPadding(dp(16), topSafePadding(), dp(16), dp(16));
         root.setBackgroundColor(colorSurface());
         root.addView(card, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         scroll.addView(root, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        setContentView(scroll);
+        if (!adminLoggedIn) {
+            setContentView(scroll);
+            animateScreen(scroll, false);
+            return;
+        }
+
+        LinearLayout frame = new LinearLayout(this);
+        frame.setOrientation(LinearLayout.VERTICAL);
+        frame.setBackgroundColor(colorSurface());
+        frame.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        frame.addView(adminBottomNavigation(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        setContentView(frame);
+        animateScreen(scroll, false);
+    }
+
+    private LinearLayout adminBottomNavigation() {
+        LinearLayout outer = new LinearLayout(this);
+        outer.setOrientation(LinearLayout.VERTICAL);
+        outer.setPadding(dp(12), dp(6), dp(12), dp(10));
+        outer.setBackgroundColor(colorSurface());
+
+        LinearLayout nav = new LinearLayout(this);
+        nav.setOrientation(LinearLayout.HORIZONTAL);
+        nav.setGravity(Gravity.CENTER);
+        nav.setPadding(dp(5), dp(5), dp(5), dp(5));
+        nav.setBackground(bottomNavBackground());
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            nav.setElevation(dp(12));
+        }
+
+        nav.addView(adminNavButton("⌂", "概览", ADMIN_TAB_OVERVIEW), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        nav.addView(adminNavButton("◎", "账号", ADMIN_TAB_USERS), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        nav.addView(adminNavButton("▦", "家庭组", ADMIN_TAB_GROUPS), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        nav.addView(adminNavButton("☏", "工单", ADMIN_TAB_TICKETS), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        nav.addView(adminNavButton("≡", "日志", ADMIN_TAB_LOGS), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        outer.addView(nav, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return outer;
+    }
+
+    private View adminNavButton(String icon, String label, int tab) {
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setGravity(Gravity.CENTER);
+        item.setMinimumHeight(dp(58));
+        item.setPadding(dp(3), dp(5), dp(3), dp(5));
+        boolean active = currentAdminTab == tab;
+        item.setBackground(active ? navActiveBackground() : transparentButtonBackground());
+        item.setClickable(true);
+        item.setFocusable(true);
+        item.setOnClickListener(view -> switchAdminTab(tab));
+
+        TextView iconView = new TextView(this);
+        iconView.setText(icon);
+        iconView.setTextSize(active ? 22 : 20);
+        iconView.setGravity(Gravity.CENTER);
+        iconView.setTypeface(Typeface.DEFAULT_BOLD);
+        iconView.setTextColor(active ? Color.rgb(230, 76, 76) : colorMuted());
+
+        TextView labelView = new TextView(this);
+        labelView.setText(label);
+        labelView.setTextSize(11);
+        labelView.setGravity(Gravity.CENTER);
+        labelView.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+        labelView.setTextColor(active ? Color.rgb(230, 76, 76) : colorMuted());
+
+        item.addView(iconView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        item.addView(labelView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return item;
+    }
+
+    private int topSafePadding() {
+        int statusBarHeight = 0;
+        int resourceId = getResources().getIdentifier("status_bar_height", "dimen", "android");
+        if (resourceId > 0) {
+            statusBarHeight = getResources().getDimensionPixelSize(resourceId);
+        }
+        int insetTop = statusBarHeight;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
+            if (insets != null) {
+                insetTop = Math.max(insetTop, insets.getSystemWindowInsetTop());
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    DisplayCutout cutout = insets.getDisplayCutout();
+                    if (cutout != null) {
+                        insetTop = Math.max(insetTop, cutout.getSafeInsetTop());
+                    }
+                }
+            }
+        }
+        return Math.max(dp(22), insetTop + dp(12));
+    }
+
+    private void animateScreen(View view, boolean center) {
+        if (view == null) {
+            return;
+        }
+        AnimationSet animationSet = new AnimationSet(true);
+        animationSet.setInterpolator(new AccelerateDecelerateInterpolator());
+        animationSet.setDuration(180);
+        animationSet.addAnimation(new AlphaAnimation(0.88f, 1f));
+        animationSet.addAnimation(new TranslateAnimation(0f, 0f, center ? dp(10) : dp(14), 0f));
+        view.startAnimation(animationSet);
     }
 
     private LinearLayout buttonRow(Button left, Button right) {
@@ -1757,6 +2263,28 @@ public class AdminActivity extends Activity {
         drawable.setColor(isDarkMode() ? Color.rgb(63, 29, 29) : Color.rgb(246, 226, 226));
         drawable.setCornerRadius(dp(999));
         return drawable;
+    }
+
+    private GradientDrawable bottomNavBackground() {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(isDarkMode() ? Color.rgb(29, 17, 17) : Color.WHITE);
+        drawable.setCornerRadius(dp(20));
+        drawable.setStroke(dp(1), isDarkMode() ? Color.rgb(72, 45, 45) : Color.rgb(231, 217, 217));
+        return drawable;
+    }
+
+    private GradientDrawable navActiveBackground() {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(isDarkMode() ? Color.rgb(68, 28, 28) : Color.rgb(252, 230, 230));
+        drawable.setCornerRadius(dp(16));
+        return drawable;
+    }
+
+    private RippleDrawable transparentButtonBackground() {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(Color.TRANSPARENT);
+        drawable.setCornerRadius(dp(16));
+        return new RippleDrawable(ColorStateList.valueOf(Color.argb(32, 230, 76, 76)), drawable, null);
     }
 
     private RippleDrawable buttonBackground(int color) {

@@ -81,10 +81,39 @@ echo <<<HTML
       }
       return '';
     }
+    function normalizePart(value) {
+      let text = String(value || '').trim().replace(/\s+/g, '');
+      text = text.replace(/城市：|来源：/g, '');
+      text = text.replace(/街道县/g, '街道').replace(/街道区/g, '街道');
+      if (text.length <= 8 && /[\u4e00-\u9fa5]区街道$/.test(text)) {
+        text = text.replace(/区街道$/, '街道');
+      }
+      return text;
+    }
+    function cleanupAddress(value) {
+      let text = normalizePart(value);
+      let previous = '';
+      while (text && text !== previous) {
+        previous = text;
+        text = text.replace(/([\u4e00-\u9fa5A-Za-z0-9]{2,16})\1/g, '$1');
+      }
+      return text;
+    }
+    function precisionScore(value, detail) {
+      const text = cleanupAddress(`${value || ''}${detail || ''}`);
+      let score = 0;
+      if (/中国|省|自治区|特别行政区/.test(text)) score = Math.max(score, 1);
+      if (/市|盟|自治州/.test(text)) score = Math.max(score, 2);
+      if (/区|县|旗/.test(text)) score = Math.max(score, 3);
+      if (/街道|镇|乡|路|街|大道|巷|弄/.test(text)) score = Math.max(score, 4);
+      if (/小区|花园|家园|公寓|大厦|广场|中心|园区|学校|医院|写字楼|商务|住宅区|酒店|商场|市场|超市|银行|地铁站|车站|停车场|便利店|餐厅|门店|馆|苑|府|轩|阁/.test(text)) score = Math.max(score, 5);
+      if (/(\d+\s*号|[一二三四五六七八九十\d]+\s*(栋|幢|座|单元|楼|层|室)|[A-Z]\s*\d)/.test(text)) score = Math.max(score, 6);
+      return score;
+    }
     function uniqueParts(parts) {
       const selected = [];
       for (const part of parts) {
-        const text = String(part || '').trim();
+        const text = normalizePart(part);
         const key = text.replace(/\s+/g, '');
         if (!text || key === '0') continue;
         if (selected.some((item) => item.replace(/\s+/g, '').includes(key))) continue;
@@ -135,14 +164,17 @@ echo <<<HTML
       const street = firstText(township, comp.street, comp.road);
       const detailParts = uniqueParts([streetNumber, comp.neighborhood, comp.building]);
       const structured = uniqueParts([country, province, city, district, street, ...detailParts]).join('');
-      const address = formatted ? (country && !formatted.startsWith(country) ? country + formatted : formatted) : structured;
+      const formattedAddress = formatted ? (country && !formatted.startsWith(country) ? country + formatted : formatted) : '';
+      const address = precisionScore(structured, detailParts.join('')) > precisionScore(formattedAddress, '')
+        ? structured
+        : firstText(cleanupAddress(formattedAddress), structured);
       return {
         type: 'gps',
         name: '定位地址',
         provider: '高德',
         source: 'amap',
         domestic_source: true,
-        address,
+        address: cleanupAddress(address),
         city,
         region: province,
         country,
@@ -160,7 +192,7 @@ echo <<<HTML
       }
       const script = document.createElement('script');
       script.dataset.cfasync = 'false';
-      script.src = `https://webapi.amap.com/maps?v=2.0&key=\${encodeURIComponent(AMAP_KEY)}&plugin=AMap.Geocoder`;
+      script.src = `\${serviceHost}/maps?v=2.0&key=\${encodeURIComponent(AMAP_KEY)}&plugin=AMap.Geocoder`;
       script.onerror = () => sendError('amap script failed');
       script.onload = () => {
         try {

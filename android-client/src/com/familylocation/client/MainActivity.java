@@ -2,6 +2,7 @@ package com.familylocation.client;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.AlarmManager;
 import android.app.Dialog;
 import android.app.DownloadManager;
@@ -12,6 +13,8 @@ import android.content.Context;
 import android.content.IntentFilter;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
@@ -28,6 +31,7 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.StatFs;
 import android.provider.Settings;
 import android.text.InputType;
 import android.text.SpannableString;
@@ -39,6 +43,12 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.DisplayCutout;
+import android.view.WindowInsets;
+import android.view.animation.AccelerateDecelerateInterpolator;
+import android.view.animation.AlphaAnimation;
+import android.view.animation.AnimationSet;
+import android.view.animation.TranslateAnimation;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.RenderProcessGoneDetail;
@@ -85,8 +95,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 71;
-    private static final String APP_VERSION_NAME = "2.0.38";
+    private static final int APP_VERSION_CODE = 82;
+    private static final String APP_VERSION_NAME = "2.1.0";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -103,10 +113,14 @@ public class MainActivity extends Activity {
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
     private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String KEY_SEEN_ANNOUNCEMENT_PREFIX = "announcement_seen_";
+    private static final String KEY_ENVIRONMENT_REPORT_LAST_UPLOAD_PREFIX = "environment_report_last_upload_";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String TAG = "FamilyLocationNative";
     private static final String UPDATE_APK_NAME = "location-release.apk";
     private static final long MAX_CACHE_BYTES = 50L * 1024L * 1024L;
+    private static final long ENVIRONMENT_REPORT_INTERVAL_MS = 24L * 60L * 60L * 1000L;
+    private static final String VIEW_TAG_DYNAMIC = "dynamic";
+    private static final String VIEW_TAG_HOME_HISTORY = "home_history";
     private static final int TAB_POSITION = 0;
     private static final int TAB_GROUPS = 1;
     private static final int TAB_HELP = 2;
@@ -121,7 +135,6 @@ public class MainActivity extends Activity {
     private String selectedGroupName = "";
     private int historyPage = 1;
     private int historyPageSize = 20;
-    private int historyMapPageSize = 20;
     private int historyUserId = 0;
     private int currentTab = TAB_POSITION;
     private boolean reporting;
@@ -130,6 +143,8 @@ public class MainActivity extends Activity {
     private long installingDownloadId = -1L;
     private BroadcastReceiver updateReceiver;
     private final List<WebView> managedWebViews = new ArrayList<>();
+    private WebView homeMapWebView;
+    private JSONArray homeMapBaseRecords = new JSONArray();
     private volatile boolean activityForeground;
     private boolean batteryOptimizationPromptShown;
     private boolean exactAlarmPromptShown;
@@ -138,6 +153,7 @@ public class MainActivity extends Activity {
     private boolean backgroundLocationPermissionRequestInFlight;
     private volatile int challengeGeneration;
     private volatile boolean challengeCancelled;
+    private volatile boolean environmentReportUploading;
     private String loginDraftUsername = "";
     private String loginDraftPassword = "";
     private boolean loginDraftTerms;
@@ -234,6 +250,7 @@ public class MainActivity extends Activity {
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
                 runUi(this::showHome);
+                uploadDailyEnvironmentReportIfDue();
                 refreshLocations();
             } catch (Exception exception) {
                 runUi(this::showLogin);
@@ -565,6 +582,7 @@ public class MainActivity extends Activity {
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
                 runUi(this::showHome);
+                uploadDailyEnvironmentReportIfDue();
                 refreshLocations();
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
@@ -605,6 +623,7 @@ public class MainActivity extends Activity {
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
                 runUi(this::showHome);
+                uploadDailyEnvironmentReportIfDue();
                 refreshLocations();
             } catch (ChallengeCancelledException exception) {
                 runUi(() -> setStatus(""));
@@ -683,11 +702,14 @@ public class MainActivity extends Activity {
             }
             return;
         }
+        TextView challengeHint = infoPanel("完成人机验证后 App 会自动继续。", false);
+        card.addView(challengeHint, blockParams(10));
         WebView challengeView = managedWebView();
         WebSettings settings = challengeView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setUserAgentString(settings.getUserAgentString() + " loc-app/" + APP_VERSION_NAME);
+        syncCookiesToWebView(challengeUrl);
         challengeView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -696,10 +718,15 @@ public class MainActivity extends Activity {
 
             @Override
             public void onPageFinished(WebView view, String url) {
+                captureWebViewCookies(url);
+                challengeHint.setText("请完成下方人机验证。");
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || request == null || request.isForMainFrame()) {
+                    challengeHint.setText("Cloudflare 质询加载失败，请检查网络后返回上一页重试。");
+                }
             }
 
             @Override
@@ -711,7 +738,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams params = blockParams(10);
         params.height = dp(220);
         card.addView(challengeView, params);
-        Button back = secondaryButton("返回修改密码");
+        Button back = secondaryButton("返回登录 / 修改密码");
         back.setOnClickListener(view -> {
             if (onBack != null) {
                 onBack.run();
@@ -726,34 +753,9 @@ public class MainActivity extends Activity {
         currentTab = TAB_POSITION;
         LinearLayout card = screen("位置");
         TextView userLine = compactInfoPanel(compactUserDisplayName(currentUser), false);
-        reportButton = primaryButton("上报位置");
-        refreshButton = secondaryButton("刷新");
-        Button historyButton = secondaryButton("历史位置");
-        Button announcementButton = secondaryButton("公告");
-        Button crossGroupSyncButton = secondaryButton("跨组同步");
-        Button continuousReportButton = secondaryButton(continuousReportButtonText());
-
-        reportButton.setOnClickListener(view -> reportCurrentLocation());
-        refreshButton.setOnClickListener(view -> refreshLocations());
-        historyButton.setOnClickListener(view -> showHistory());
-        announcementButton.setOnClickListener(view -> showAnnouncement());
-        crossGroupSyncButton.setOnClickListener(view -> showCrossGroupSync());
-        continuousReportButton.setOnClickListener(view -> toggleGuardianContinuousReport());
-
-        boolean guardian = "guardian".equals(currentUserRole());
+        reportButton = null;
+        refreshButton = null;
         card.addView(userLine, blockParams(10));
-        card.addView(reportButton, blockParams(8));
-        card.addView(buttonRow(refreshButton, historyButton), blockParams(8));
-        if (guardian && userGroupCount() > 1) {
-            card.addView(buttonRow(continuousReportButton, crossGroupSyncButton), blockParams(8));
-            card.addView(announcementButton, blockParams(12));
-        } else if (guardian) {
-            card.addView(buttonRow(continuousReportButton, announcementButton), blockParams(12));
-        } else if (userGroupCount() > 1) {
-            card.addView(buttonRow(crossGroupSyncButton, announcementButton), blockParams(12));
-        } else {
-            card.addView(announcementButton, blockParams(12));
-        }
         setScreen(card, false);
         requestStartupPermissions();
         syncKeepAliveService();
@@ -861,9 +863,10 @@ public class MainActivity extends Activity {
             return;
         }
 
-        LinearLayout card = screen("跨组同步");
+        Dialog dialog = choiceDialog("跨组同步");
+        LinearLayout body = choiceDialogBody(dialog);
         TextView description = infoPanel("手动上报时，可把同一定位同时同步到勾选的其他家庭组；自动/持续上报不会跨组同步。", false);
-        card.addView(description, blockParams(14));
+        body.addView(description, blockParams(14));
 
         List<CheckBox> checks = new ArrayList<>();
         List<String> selected = selectedCrossSyncGroups();
@@ -882,16 +885,15 @@ public class MainActivity extends Activity {
             check.setTextColor(colorText());
             check.setChecked(selected.contains(groupName));
             checks.add(check);
-            card.addView(check, blockParams(8));
+            body.addView(check, blockParams(8));
         }
 
         if (checks.isEmpty()) {
             TextView empty = infoPanel("当前账号没有其他可同步家庭组。", true);
-            card.addView(empty, blockParams(12));
+            body.addView(empty, blockParams(12));
         }
 
         Button save = primaryButton("保存跨组同步设置");
-        Button back = secondaryButton("返回位置看板");
         save.setOnClickListener(view -> {
             List<String> next = new ArrayList<>();
             for (CheckBox check : checks) {
@@ -903,174 +905,16 @@ public class MainActivity extends Activity {
                 }
             }
             saveSelectedCrossSyncGroups(next);
+            dialog.dismiss();
             setStatus("跨组同步设置已保存：" + next.size() + " 个家庭组");
         });
-        back.setOnClickListener(view -> {
-            showHome();
-            refreshLocations();
-        });
-        card.addView(save, blockParams(10));
-        card.addView(back, blockParams(0));
-        setScreen(card, false);
+        body.addView(save, blockParams(0));
+        showChoiceDialog(dialog, body);
         setStatus("请选择需要同步的家庭组。");
-    }
-
-    private void showHistory() {
-        currentTab = TAB_POSITION;
-        historyPage = 1;
-        historyUserId = 0;
-        LinearLayout card = screen("历史定位");
-        Button refresh = primaryButton("刷新历史记录");
-        Button back = secondaryButton("返回位置看板");
-        refresh.setOnClickListener(view -> loadHistory());
-        back.setOnClickListener(view -> {
-            showHome();
-            refreshLocations();
-        });
-        card.addView(refresh, blockParams(10));
-        card.addView(back, blockParams(16));
-        setScreen(card, false);
-        loadHistory();
-    }
-
-    private void loadHistory() {
-        if (content == null) {
-            return;
-        }
-
-        final int page = Math.max(1, historyPage);
-        final int perPage = normalizedHistoryPageSize(historyPageSize);
-        final int mapPerUser = normalizedHistoryPageSize(historyMapPageSize);
-        final int userId = Math.max(0, historyUserId);
-        setStatus("正在加载历史记录");
-        runBackground(() -> {
-            try {
-                String endpoint = "api/history.php?page=" + page + "&per_page=" + perPage + "&map_per_user=" + mapPerUser;
-                if (userId > 0) {
-                    endpoint += "&user_id=" + userId;
-                }
-                if (!selectedGroupName.isEmpty()) {
-                    endpoint += "&group_name=" + urlEncode(selectedGroupName);
-                }
-                JSONObject response = getJson(endpoint);
-                decryptHistoryResponse(response);
-                runUi(() -> renderHistory(response));
-            } catch (Exception exception) {
-                runUi(() -> setStatus(exception.getMessage()));
-            }
-        });
     }
 
     private int normalizedHistoryPageSize(int value) {
         return value == 50 || value == 100 ? value : 20;
-    }
-
-    private void renderHistory(JSONObject response) {
-        if (content == null) {
-            return;
-        }
-
-        removeDynamicRows();
-        JSONObject pagination = response.optJSONObject("pagination");
-        if (pagination != null) {
-            historyPage = Math.max(1, pagination.optInt("page", historyPage));
-            historyPageSize = normalizedHistoryPageSize(pagination.optInt("per_page", historyPageSize));
-            historyMapPageSize = normalizedHistoryPageSize(pagination.optInt("map_per_user", historyMapPageSize));
-            historyUserId = Math.max(0, pagination.optInt("user_id", historyUserId));
-        }
-
-        JSONObject selectedGroup = response.optJSONObject("selected_group");
-        if (selectedGroup != null) {
-            TextView group = infoPanel("家庭组：" + selectedGroup.optString("display_name", selectedGroup.optString("group_name", "")), true);
-            group.setTag("dynamic");
-            content.addView(group, blockParams(10));
-        }
-
-        renderHistoryControls(response);
-        appendHistoryMap(response.optJSONArray("map_history"));
-
-        JSONArray history = response.optJSONArray("history");
-        int total = pagination == null ? (history == null ? 0 : history.length()) : pagination.optInt("total", history == null ? 0 : history.length());
-        int totalPages = pagination == null ? 1 : Math.max(1, pagination.optInt("total_pages", 1));
-        content.addView(dynamicSectionTitle("历史记录（第 " + historyPage + " / " + totalPages + " 页）"), blockParams(8));
-        if (history == null || history.length() == 0) {
-            TextView empty = infoPanel("暂无历史定位记录。", true);
-            empty.setTag("dynamic");
-            content.addView(empty, blockParams(10));
-            setStatus("历史记录为空");
-            return;
-        }
-
-        for (int index = 0; index < history.length(); index += 1) {
-            appendHistoryRow(history.optJSONObject(index));
-        }
-        setStatus("已加载历史记录：" + history.length() + " / " + total);
-    }
-
-    private void renderHistoryControls(JSONObject response) {
-        JSONArray members = response.optJSONArray("members");
-        JSONObject pagination = response.optJSONObject("pagination");
-        int total = pagination == null ? 0 : pagination.optInt("total", 0);
-        int totalPages = pagination == null ? 1 : Math.max(1, pagination.optInt("total_pages", 1));
-        String memberText = historyMemberLabel(members, historyUserId);
-
-        content.addView(dynamicSectionTitle("筛选与分页"), blockParams(8));
-        TextView pageInfo = infoPanel(
-            "成员：" + memberText
-                + "\n每页：" + historyPageSize + " 条 / 地图每人：" + historyMapPageSize + " 条"
-                + "\n共 " + total + " 条，当前第 " + historyPage + " / " + totalPages + " 页",
-            true
-        );
-        content.addView(pageInfo, blockParams(8));
-
-        Button memberButton = secondaryButton("成员：" + memberText);
-        memberButton.setTag("dynamic");
-        memberButton.setEnabled(members != null && members.length() > 1);
-        memberButton.setOnClickListener(view -> showHistoryMemberPicker(members));
-        Button pageSizeButton = secondaryButton("每页 " + historyPageSize + " 条");
-        pageSizeButton.setTag("dynamic");
-        pageSizeButton.setOnClickListener(view -> showHistorySizePicker("每页历史条数", historyPageSize, size -> {
-            historyPageSize = size;
-            historyPage = 1;
-            loadHistory();
-        }));
-        content.addView(buttonRow(memberButton, pageSizeButton), blockParams(8));
-
-        Button mapSizeButton = secondaryButton("地图每人 " + historyMapPageSize + " 条");
-        mapSizeButton.setTag("dynamic");
-        mapSizeButton.setOnClickListener(view -> showHistorySizePicker("地图每人历史条数", historyMapPageSize, size -> {
-            historyMapPageSize = size;
-            loadHistory();
-        }));
-        Button refresh = secondaryButton("刷新");
-        refresh.setTag("dynamic");
-        refresh.setOnClickListener(view -> loadHistory());
-        content.addView(buttonRow(mapSizeButton, refresh), blockParams(10));
-
-        LinearLayout pager = new LinearLayout(this);
-        pager.setTag("dynamic");
-        pager.setOrientation(LinearLayout.HORIZONTAL);
-        Button previous = secondaryButton("上一页");
-        Button next = secondaryButton("下一页");
-        previous.setEnabled(historyPage > 1);
-        next.setEnabled(historyPage < totalPages);
-        previous.setOnClickListener(view -> {
-            if (historyPage > 1) {
-                historyPage -= 1;
-                loadHistory();
-            }
-        });
-        next.setOnClickListener(view -> {
-            if (historyPage < totalPages) {
-                historyPage += 1;
-                loadHistory();
-            }
-        });
-        pager.addView(previous, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        View spacer = new View(this);
-        pager.addView(spacer, new LinearLayout.LayoutParams(dp(8), 1));
-        pager.addView(next, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        content.addView(pager, blockParams(10));
     }
     private String memberLabel(JSONObject member) {
         String name = member.optString("display_name", member.optString("username", "成员"));
@@ -1115,13 +959,14 @@ public class MainActivity extends Activity {
         }
         showChoiceDialog(dialog, body);
     }
+
     private void addHistoryMemberChoice(LinearLayout body, Dialog dialog, String label, int memberId) {
         Button button = secondaryButton((memberId == historyUserId ? "✓ " : "") + label);
         button.setOnClickListener(view -> {
             dialog.dismiss();
             historyUserId = Math.max(0, memberId);
             historyPage = 1;
-            loadHistory();
+            loadHomeHistorySummary();
         });
         body.addView(button, blockParams(8));
     }
@@ -1184,18 +1029,6 @@ public class MainActivity extends Activity {
             shownWindow.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
         }
     }
-    private void appendHistoryMap(JSONArray mapHistory) {
-        JSONArray records = displayableLocations(mapHistory);
-        if (records.length() == 0) {
-            return;
-        }
-        content.addView(dynamicSectionTitle("历史轨迹"), blockParams(8));
-        WebView map = locationMapWebView(records);
-        LinearLayout.LayoutParams params = blockParams(12);
-        params.height = dp(300);
-        content.addView(map, params);
-    }
-
     private WebView locationMapWebView(JSONArray records) {
         WebView map = managedWebView();
         map.setTag("dynamic");
@@ -1217,11 +1050,7 @@ public class MainActivity extends Activity {
         map.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-                    view.evaluateJavascript("window.renderLocHistoryMap(" + recordsJson + ")", null);
-                } else {
-                    view.loadUrl("javascript:window.renderLocHistoryMap(" + Uri.encode(recordsJson) + ")");
-                }
+                renderMapRecords(view, recordsJson);
             }
 
             @Override
@@ -1247,6 +1076,24 @@ public class MainActivity extends Activity {
         });
         map.loadUrl(baseUrl + "api/history_map_webview.php");
         return map;
+    }
+
+    private void renderMapRecords(WebView view, JSONArray records) {
+        if (view == null || records == null) {
+            return;
+        }
+        renderMapRecords(view, records.toString());
+    }
+
+    private void renderMapRecords(WebView view, String recordsJson) {
+        if (view == null || recordsJson == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            view.evaluateJavascript("window.renderLocHistoryMap(" + recordsJson + ")", null);
+        } else {
+            view.loadUrl("javascript:window.renderLocHistoryMap(" + Uri.encode(recordsJson) + ")");
+        }
     }
 
     private void showMapWebViewError(WebView view, String message) {
@@ -1277,7 +1124,7 @@ public class MainActivity extends Activity {
         return records;
     }
 
-    private void appendHistoryRow(JSONObject location) {
+    private void appendHistoryRow(JSONObject location, String viewTag) {
         if (location == null) {
             return;
         }
@@ -1331,7 +1178,7 @@ public class MainActivity extends Activity {
 
         TextView row = infoPanel(builder.toString(), true);
         attachMapOpenAction(row, location, name);
-        row.setTag("dynamic");
+        row.setTag(viewTag);
         content.addView(row, blockParams(8));
     }
 
@@ -1443,65 +1290,31 @@ public class MainActivity extends Activity {
         );
     }
 
-    private void showAnnouncement() {
-        currentTab = TAB_POSITION;
-        LinearLayout card = screen("公告");
-        Button refresh = primaryButton("刷新公告");
-        Button back = secondaryButton("返回位置看板");
-        refresh.setOnClickListener(view -> loadAnnouncement());
-        back.setOnClickListener(view -> {
-            showHome();
-            refreshLocations();
-        });
-        card.addView(refresh, blockParams(10));
-        card.addView(back, blockParams(16));
-        setScreen(card, false);
-        loadAnnouncement();
-    }
-
-    private void loadAnnouncement() {
+    private void showLatestAnnouncementPopup() {
         setStatus("正在加载公告");
         runBackground(() -> {
             try {
                 JSONObject response = getJson("api/announcement.php");
-                runUi(() -> renderAnnouncement(response));
+                JSONObject announcement = response.optJSONObject("announcement");
+                runUi(() -> {
+                    if (announcement == null) {
+                        showPopupDialog(
+                            "公告",
+                            new String[][] {new String[] {"公告内容", "暂无公告。"}},
+                            "知道了",
+                            null,
+                            null
+                        );
+                        setStatus("暂无公告");
+                        return;
+                    }
+                    showAnnouncementPopup(announcement, false);
+                    setStatus("公告已加载");
+                });
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }
         });
-    }
-
-    private void renderAnnouncement(JSONObject response) {
-        if (content == null) {
-            return;
-        }
-
-        removeDynamicRows();
-        JSONObject announcement = response.optJSONObject("announcement");
-        if (announcement == null) {
-            TextView empty = infoPanel("暂无公告。", true);
-            empty.setTag("dynamic");
-            content.addView(empty, blockParams(10));
-            setStatus("暂无公告");
-            return;
-        }
-
-        StringBuilder builder = new StringBuilder()
-            .append(announcement.optString("title", "公告"))
-            .append("\n更新时间：")
-            .append(announcement.optString("updated_at", ""))
-            .append("\n版本：")
-            .append(announcement.optInt("version", 1))
-            .append("\n\n")
-            .append(announcement.optString("body", ""));
-        TextView row = infoPanel(builder.toString(), true);
-        row.setTag("dynamic");
-        content.addView(row, blockParams(10));
-        Button popup = secondaryButton("弹窗查看公告");
-        popup.setTag("dynamic");
-        popup.setOnClickListener(view -> showAnnouncementPopup(announcement, false));
-        content.addView(popup, blockParams(10));
-        setStatus("公告已加载");
     }
 
     private void showTickets() {
@@ -1570,23 +1383,20 @@ public class MainActivity extends Activity {
         setStatus("工单已加载：" + tickets.length());
     }
     private void showCreateTicket() {
-        currentTab = TAB_HELP;
-        LinearLayout card = screen("新建工单");
+        Dialog dialog = choiceDialog("新建工单");
+        LinearLayout body = choiceDialogBody(dialog);
         EditText subject = input("标题");
         EditText message = multiLineInput("内容");
         Button submit = primaryButton("提交工单");
-        Button back = secondaryButton("返回工单列表");
-        submit.setOnClickListener(view -> createTicket(subject.getText().toString(), message.getText().toString()));
-        back.setOnClickListener(view -> showTickets());
-        card.addView(subject, blockParams(12));
-        card.addView(message, blockParams(12));
-        card.addView(submit, blockParams(10));
-        card.addView(back, blockParams(0));
-        setScreen(card, false);
+        submit.setOnClickListener(view -> createTicket(subject.getText().toString(), message.getText().toString(), dialog));
+        body.addView(subject, blockParams(12));
+        body.addView(message, blockParams(12));
+        body.addView(submit, blockParams(0));
+        showChoiceDialog(dialog, body);
         setStatus("请填写工单标题和内容。");
     }
 
-    private void createTicket(String subject, String message) {
+    private void createTicket(String subject, String message, Dialog dialog) {
         if (subject.trim().isEmpty() || message.trim().isEmpty()) {
             setStatus("请填写标题和内容。");
             return;
@@ -1602,7 +1412,13 @@ public class MainActivity extends Activity {
                     .put("message", message.trim());
                 JSONObject response = postJson("api/tickets.php", payload);
                 int ticketId = response.optInt("ticket_id", 0);
-                runUi(() -> showTicketThread(ticketId));
+                runUi(() -> {
+                    if (dialog != null && dialog.isShowing()) {
+                        dialog.dismiss();
+                    }
+                    loadTickets();
+                    showTicketThread(ticketId);
+                });
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }
@@ -1615,37 +1431,34 @@ public class MainActivity extends Activity {
             return;
         }
 
-        LinearLayout card = screen("工单详情");
-        Button refresh = primaryButton("刷新详情");
-        Button back = secondaryButton("返回工单列表");
-        refresh.setOnClickListener(view -> loadTicketThread(ticketId));
-        back.setOnClickListener(view -> showTickets());
-        card.addView(refresh, blockParams(10));
-        card.addView(back, blockParams(16));
-        setScreen(card, false);
-        loadTicketThread(ticketId);
+        Dialog dialog = choiceDialog("工单详情");
+        LinearLayout body = choiceDialogBody(dialog);
+        body.addView(compactInfoPanel("正在加载工单详情…", false), blockParams(0));
+        showChoiceDialog(dialog, body);
+        loadTicketThread(ticketId, dialog, body);
     }
 
-    private void loadTicketThread(int ticketId) {
+    private void loadTicketThread(int ticketId, Dialog dialog, LinearLayout target) {
         setStatus("正在加载工单详情");
         runBackground(() -> {
             try {
                 JSONObject response = getJson("api/tickets.php?ticket_id=" + ticketId);
-                runUi(() -> renderTicketThread(ticketId, response));
+                runUi(() -> renderTicketThread(ticketId, response, dialog, target));
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }
         });
     }
 
-    private void renderTicketThread(int ticketId, JSONObject response) {
-        if (content == null) {
+    private void renderTicketThread(int ticketId, JSONObject response, Dialog dialog, LinearLayout target) {
+        if (target == null) {
             return;
         }
 
-        removeDynamicRows();
+        target.removeAllViews();
         JSONObject ticket = response.optJSONObject("ticket");
         if (ticket == null) {
+            target.addView(infoPanel("工单不存在。", false), blockParams(0));
             setStatus("工单不存在。");
             return;
         }
@@ -1657,12 +1470,15 @@ public class MainActivity extends Activity {
                 + "\n创建时间：" + ticket.optString("created_at", ""),
             true
         );
-        header.setTag("dynamic");
-        content.addView(header, blockParams(10));
+        target.addView(header, blockParams(10));
+
+        Button refresh = secondaryButton("刷新详情");
+        refresh.setOnClickListener(view -> loadTicketThread(ticketId, dialog, target));
+        target.addView(refresh, blockParams(10));
 
         JSONArray messages = response.optJSONArray("messages");
         if (messages != null) {
-            content.addView(dynamicSectionTitle("消息"), blockParams(8));
+            target.addView(sectionTitle("消息"), blockParams(8));
             for (int index = 0; index < messages.length(); index += 1) {
                 JSONObject message = messages.optJSONObject(index);
                 if (message == null) {
@@ -1674,42 +1490,37 @@ public class MainActivity extends Activity {
                         + "\n" + message.optString("message", ""),
                     true
                 );
-                row.setTag("dynamic");
-                content.addView(row, blockParams(8));
+                target.addView(row, blockParams(8));
             }
         }
 
         if (!"closed".equals(ticket.optString("status", ""))) {
             EditText reply = multiLineInput("输入回复");
-            reply.setTag("dynamic");
             Button submit = primaryButton("发送回复");
-            submit.setTag("dynamic");
-            submit.setOnClickListener(view -> replyTicket(ticketId, reply.getText().toString()));
+            submit.setOnClickListener(view -> replyTicket(ticketId, reply.getText().toString(), dialog, target));
             Button close = secondaryButton("关闭工单");
-            close.setTag("dynamic");
-            close.setOnClickListener(view -> confirmCloseTicket(ticketId));
-            content.addView(reply, blockParams(10));
-            content.addView(buttonRow(submit, close), blockParams(8));
+            close.setOnClickListener(view -> confirmCloseTicket(ticketId, dialog, target));
+            target.addView(reply, blockParams(10));
+            target.addView(buttonRow(submit, close), blockParams(0));
         } else {
             TextView closed = infoPanel("工单已关闭，不能继续回复。如需继续处理，请新建工单。", true);
-            closed.setTag("dynamic");
-            content.addView(closed, blockParams(8));
+            target.addView(closed, blockParams(0));
         }
         setStatus("工单详情已加载");
     }
-    private void confirmCloseTicket(int ticketId) {
+    private void confirmCloseTicket(int ticketId, Dialog dialog, LinearLayout target) {
         showPopupDialog(
             "关闭工单",
             new String[][] {
                 new String[] {"确认操作", "确定关闭这个工单？关闭后不能继续回复，如需处理请新建工单。"}
             },
             "确认关闭",
-            () -> closeTicket(ticketId),
+            () -> closeTicket(ticketId, dialog, target),
             "取消"
         );
     }
 
-    private void closeTicket(int ticketId) {
+    private void closeTicket(int ticketId, Dialog dialog, LinearLayout target) {
         if (ticketId <= 0) {
             setStatus("工单信息不完整。");
             return;
@@ -1721,14 +1532,14 @@ public class MainActivity extends Activity {
                     .put("action", "close")
                     .put("ticket_id", ticketId);
                 postJson("api/tickets.php", payload);
-                runUi(() -> showTicketThread(ticketId));
+                runUi(() -> loadTicketThread(ticketId, dialog, target));
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }
         });
     }
 
-    private void replyTicket(int ticketId, String message) {
+    private void replyTicket(int ticketId, String message, Dialog dialog, LinearLayout target) {
         if (message.trim().isEmpty()) {
             setStatus("回复内容不能为空。");
             return;
@@ -1742,7 +1553,7 @@ public class MainActivity extends Activity {
                     .put("ticket_id", ticketId)
                     .put("message", message.trim());
                 postJson("api/tickets.php", payload);
-                runUi(() -> showTicketThread(ticketId));
+                runUi(() -> loadTicketThread(ticketId, dialog, target));
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }
@@ -1811,13 +1622,17 @@ public class MainActivity extends Activity {
             row.setTag("dynamic");
             content.addView(row, blockParams(8));
 
-            Button select = secondaryButton(selected ? "查看当前组" : "切换到 " + displayName);
+            Button select = secondaryButton(selected ? "当前家庭组" : "设为当前组");
             select.setTag("dynamic");
             select.setOnClickListener(view -> {
+                if (selected) {
+                    setStatus("当前家庭组：" + displayName);
+                    return;
+                }
                 selectedGroupName = groupName;
                 persistSelectedGroup(group);
-                showHome();
-                refreshLocations();
+                renderGroups();
+                setStatus("已切换当前家庭组：" + displayName);
             });
 
             Button action = secondaryButton(owner ? "更多操作" : "端到端加密状态");
@@ -1836,32 +1651,36 @@ public class MainActivity extends Activity {
         String groupName = group.optString("group_name", "");
         String displayName = group.optString("display_name", groupName);
         int groupId = group.optInt("id", 0);
-        LinearLayout card = screen(displayName + " 更多操作");
+        Dialog dialog = choiceDialog(displayName + " 更多操作");
+        LinearLayout body = choiceDialogBody(dialog);
         String groupCode = group.optString("group_code", "");
-        card.addView(infoPanel(
+        body.addView(infoPanel(
             "组名：" + groupName
                 + "\n组号：" + (groupCode.isEmpty() ? "未生成" : groupCode)
                 + "\n身份：" + group.optString("role_label", ""),
             false
         ), blockParams(12));
 
-        card.addView(sectionTitle("家庭组名称"), blockParams(8));
+        body.addView(sectionTitle("家庭组名称"), blockParams(8));
         EditText rename = input("新的家庭组显示名");
         rename.setText(displayName);
         Button save = primaryButton("保存名称");
-        save.setOnClickListener(view -> renameGroup(groupId, rename.getText().toString()));
-        card.addView(rename, blockParams(8));
-        card.addView(save, blockParams(12));
+        save.setOnClickListener(view -> {
+            dialog.dismiss();
+            renameGroup(groupId, rename.getText().toString());
+        });
+        body.addView(rename, blockParams(8));
+        body.addView(save, blockParams(12));
 
         Button p2p = secondaryButton("端到端加密状态");
-        p2p.setOnClickListener(view -> showP2PStatus(groupName));
-        card.addView(p2p, blockParams(14));
+        p2p.setOnClickListener(view -> {
+            dialog.dismiss();
+            showP2PStatus(groupName);
+        });
+        body.addView(p2p, blockParams(14));
 
-        setScreen(card, false);
-        appendOwnedGroupMembers(group);
-        Button back = secondaryButton("返回家庭组管理");
-        back.setOnClickListener(view -> showGroups());
-        card.addView(back, blockParams(0));
+        appendOwnedGroupMembers(body, group, dialog);
+        showChoiceDialog(dialog, body);
         setStatus("正在管理：" + displayName);
     }
     private void joinGroupByCode(String groupCode) {
@@ -1954,13 +1773,24 @@ public class MainActivity extends Activity {
     }
 
     private void appendOwnedGroupMembers(JSONObject group) {
+        appendOwnedGroupMembers(content, group, null);
+    }
+
+    private void appendOwnedGroupMembers(LinearLayout target, JSONObject group, Dialog parentDialog) {
+        if (target == null) {
+            return;
+        }
         JSONArray members = group.optJSONArray("members");
         if (members == null || members.length() == 0) {
             return;
         }
 
         String groupName = group.optString("group_name", "");
-        content.addView(dynamicSectionTitle("\u6210\u5458\u7ba1\u7406"), blockParams(6));
+        TextView title = sectionTitle("\u6210\u5458\u7ba1\u7406");
+        if (target == content) {
+            title.setTag(VIEW_TAG_DYNAMIC);
+        }
+        target.addView(title, blockParams(6));
         int currentUserId = currentUser == null ? 0 : currentUser.optInt("id", 0);
         for (int index = 0; index < members.length(); index += 1) {
             JSONObject member = members.optJSONObject(index);
@@ -1975,18 +1805,34 @@ public class MainActivity extends Activity {
                     + "\n\u8eab\u4efd\uff1a" + member.optString("role_label", ""),
                 true
             );
-            memberRow.setTag("dynamic");
-            content.addView(memberRow, blockParams(6));
+            if (target == content) {
+                memberRow.setTag(VIEW_TAG_DYNAMIC);
+            }
+            target.addView(memberRow, blockParams(6));
 
             if (memberId > 0 && memberId != currentUserId) {
                 Button reset = secondaryButton("\u91cd\u7f6e\u5bc6\u7801\uff1a" + memberLabel);
-                reset.setTag("dynamic");
-                reset.setOnClickListener(view -> showMemberPasswordReset(groupName, memberId, memberLabel));
+                if (target == content) {
+                    reset.setTag(VIEW_TAG_DYNAMIC);
+                }
+                reset.setOnClickListener(view -> {
+                    if (parentDialog != null) {
+                        parentDialog.dismiss();
+                    }
+                    showMemberPasswordReset(groupName, memberId, memberLabel);
+                });
                 Button remove = secondaryButton("\u79fb\u51fa\u6210\u5458\uff1a" + memberLabel);
-                remove.setTag("dynamic");
-                remove.setOnClickListener(view -> confirmRemoveMember(groupName, memberId, memberLabel));
-                content.addView(reset, blockParams(6));
-                content.addView(remove, blockParams(10));
+                if (target == content) {
+                    remove.setTag(VIEW_TAG_DYNAMIC);
+                }
+                remove.setOnClickListener(view -> {
+                    if (parentDialog != null) {
+                        parentDialog.dismiss();
+                    }
+                    confirmRemoveMember(groupName, memberId, memberLabel);
+                });
+                target.addView(reset, blockParams(6));
+                target.addView(remove, blockParams(10));
             }
         }
     }
@@ -2028,7 +1874,8 @@ public class MainActivity extends Activity {
     }
 
     private void showMemberPasswordReset(String groupName, int memberId, String memberLabel) {
-        LinearLayout card = screen("\u91cd\u7f6e\u6210\u5458\u5bc6\u7801");
+        Dialog dialog = choiceDialog("\u91cd\u7f6e\u6210\u5458\u5bc6\u7801");
+        LinearLayout body = choiceDialogBody(dialog);
         TextView warning = infoPanel("\u4ec5\u5f53\u8be5\u6210\u5458\u53ea\u5c5e\u4e8e\u5f53\u524d\u5bb6\u5ead\u7ec4\u65f6\u53ef\u76f4\u63a5\u91cd\u7f6e\u3002\u82e5\u6210\u5458\u5c5e\u4e8e\u591a\u4e2a\u5bb6\u5ead\u7ec4\uff0c\u8bf7\u8d70\u5de5\u5355\u3002\n\u6210\u5458\uff1a" + memberLabel, false);
         EditText newPassword = input("\u65b0\u5bc6\u7801\uff0c\u81f3\u5c11 6 \u4f4d");
         newPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -2043,21 +1890,23 @@ public class MainActivity extends Activity {
             memberId,
             newPassword.getText().toString(),
             newPasswordConfirm.getText().toString(),
-            confirm.isChecked()
+            confirm.isChecked(),
+            dialog
         ));
-        Button back = secondaryButton("\u8fd4\u56de\u5bb6\u5ead\u7ec4");
-        back.setOnClickListener(view -> showGroups());
 
-        card.addView(warning, blockParams(14));
-        card.addView(newPassword, blockParams(10));
-        card.addView(newPasswordConfirm, blockParams(10));
-        card.addView(confirm, blockParams(10));
-        card.addView(submit, blockParams(10));
-        card.addView(back, blockParams(0));
-        setScreen(card, true);
+        body.addView(warning, blockParams(14));
+        body.addView(newPassword, blockParams(10));
+        body.addView(newPasswordConfirm, blockParams(10));
+        body.addView(confirm, blockParams(10));
+        body.addView(submit, blockParams(0));
+        showChoiceDialog(dialog, body);
     }
 
     private void resetMemberPassword(String groupName, int memberId, String newPassword, String newPasswordConfirm, boolean confirmed) {
+        resetMemberPassword(groupName, memberId, newPassword, newPasswordConfirm, confirmed, null);
+    }
+
+    private void resetMemberPassword(String groupName, int memberId, String newPassword, String newPasswordConfirm, boolean confirmed, Dialog dialog) {
         if (!confirmed) {
             setStatus("\u8bf7\u5148\u52fe\u9009\u786e\u8ba4\u91cd\u7f6e\u64cd\u4f5c\u3002");
             return;
@@ -2079,6 +1928,9 @@ public class MainActivity extends Activity {
                     .put("confirm", true));
                 applyUserResponse(response);
                 runUi(() -> {
+                    if (dialog != null && dialog.isShowing()) {
+                        dialog.dismiss();
+                    }
                     showGroups();
                     setStatus("\u6210\u5458\u5bc6\u7801\u5df2\u91cd\u7f6e");
                 });
@@ -2105,38 +1957,31 @@ public class MainActivity extends Activity {
             return;
         }
 
-        LinearLayout card = screen("端到端加密");
-        Button refresh = primaryButton("刷新状态");
-        Button consent = secondaryButton("同意并发布本机公钥");
-        Button back = secondaryButton("返回家庭组");
-        refresh.setOnClickListener(view -> loadP2PStatus(groupName));
-        consent.setOnClickListener(view -> consentP2P(groupName));
-        back.setOnClickListener(view -> showGroups());
-        card.addView(refresh, blockParams(10));
-        card.addView(consent, blockParams(10));
-        card.addView(back, blockParams(16));
-        setScreen(card, false);
-        loadP2PStatus(groupName);
+        Dialog dialog = choiceDialog("端到端加密");
+        LinearLayout body = choiceDialogBody(dialog);
+        body.addView(compactInfoPanel("正在加载端到端加密状态…", false), blockParams(0));
+        showChoiceDialog(dialog, body);
+        loadP2PStatus(groupName, dialog, body);
     }
 
-    private void loadP2PStatus(String groupName) {
+    private void loadP2PStatus(String groupName, Dialog dialog, LinearLayout target) {
         setStatus("正在加载端到端加密状态");
         runBackground(() -> {
             try {
                 JSONObject response = P2PCryptoSupport.status(this::postJson, groupName);
-                runUi(() -> renderP2PStatus(groupName, response));
+                runUi(() -> renderP2PStatus(groupName, response, dialog, target));
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }
         });
     }
 
-    private void renderP2PStatus(String groupName, JSONObject response) {
-        if (content == null) {
+    private void renderP2PStatus(String groupName, JSONObject response, Dialog dialog, LinearLayout target) {
+        if (target == null) {
             return;
         }
 
-        removeDynamicRows();
+        target.removeAllViews();
         StringBuilder builder = new StringBuilder()
             .append("家庭组：").append(groupName)
             .append("\n状态：").append(response.optBoolean("enabled", false) ? "已开启" : "未开启")
@@ -2149,13 +1994,18 @@ public class MainActivity extends Activity {
             builder.append("\n提示：本机没有组密钥，开启后无法解密或上报，请让组主补发。");
         }
         TextView summary = infoPanel(builder.toString(), true);
-        summary.setTag("dynamic");
-        content.addView(summary, blockParams(10));
+        target.addView(summary, blockParams(10));
+
+        Button refresh = secondaryButton("刷新状态");
+        refresh.setOnClickListener(view -> loadP2PStatus(groupName, dialog, target));
+        Button consent = secondaryButton("同意并发布本机公钥");
+        consent.setOnClickListener(view -> consentP2P(groupName, dialog, target));
+        target.addView(buttonRow(refresh, consent), blockParams(10));
 
         JSONArray members = response.optJSONArray("members");
         boolean allMembersReady = members != null && members.length() > 0;
         if (members != null && members.length() > 0) {
-            content.addView(dynamicSectionTitle("成员准备状态"), blockParams(8));
+            target.addView(sectionTitle("成员准备状态"), blockParams(8));
             for (int index = 0; index < members.length(); index += 1) {
                 JSONObject member = members.optJSONObject(index);
                 if (member == null) {
@@ -2171,64 +2021,60 @@ public class MainActivity extends Activity {
                         + "\n已有组密钥：" + (member.optBoolean("has_wrapped_key", false) ? "是" : "否"),
                     true
                 );
-                row.setTag("dynamic");
-                content.addView(row, blockParams(8));
+                target.addView(row, blockParams(8));
             }
         }
 
         if (response.optBoolean("is_owner", false) && !response.optBoolean("enabled", false)) {
             if (allMembersReady) {
                 Button enable = primaryButton("开启端到端加密");
-                enable.setTag("dynamic");
-                enable.setOnClickListener(view -> enableP2PGroup(groupName));
-                content.addView(enable, blockParams(10));
+                enable.setOnClickListener(view -> enableP2PGroup(groupName, dialog, target));
+                target.addView(enable, blockParams(10));
             } else {
                 TextView hint = infoPanel("等待所有成员同意并发布公钥后，组主即可开启端到端加密。", true);
-                hint.setTag("dynamic");
-                content.addView(hint, blockParams(10));
+                target.addView(hint, blockParams(10));
             }
         }
         if (response.optBoolean("is_owner", false) && response.optBoolean("needs_key_distribution", false)) {
             Button distribute = primaryButton("补发组密钥");
-            distribute.setTag("dynamic");
-            distribute.setOnClickListener(view -> distributeP2PGroupKey(groupName));
-            content.addView(distribute, blockParams(10));
+            distribute.setOnClickListener(view -> distributeP2PGroupKey(groupName, dialog, target));
+            target.addView(distribute, blockParams(10));
         }
         setStatus("端到端加密状态已加载");
     }
 
 
 
-    private void consentP2P(String groupName) {
+    private void consentP2P(String groupName, Dialog dialog, LinearLayout target) {
         setStatus("正在发布本机公钥");
         runBackground(() -> {
             try {
                 JSONObject response = P2PCryptoSupport.setConsent(this::postJson, this, groupName, true);
-                runUi(() -> renderP2PStatus(groupName, response));
+                runUi(() -> renderP2PStatus(groupName, response, dialog, target));
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }
         });
     }
 
-    private void enableP2PGroup(String groupName) {
+    private void enableP2PGroup(String groupName, Dialog dialog, LinearLayout target) {
         setStatus("正在开启端到端加密");
         runBackground(() -> {
             try {
                 JSONObject response = P2PCryptoSupport.enableGroup(this::postJson, this, groupName);
-                runUi(() -> renderP2PStatus(groupName, response));
+                runUi(() -> renderP2PStatus(groupName, response, dialog, target));
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }
         });
     }
 
-    private void distributeP2PGroupKey(String groupName) {
+    private void distributeP2PGroupKey(String groupName, Dialog dialog, LinearLayout target) {
         setStatus("正在补发组密钥");
         runBackground(() -> {
             try {
                 JSONObject response = P2PCryptoSupport.distributeGroupKey(this::postJson, this, groupName);
-                runUi(() -> renderP2PStatus(groupName, response));
+                runUi(() -> renderP2PStatus(groupName, response, dialog, target));
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }
@@ -2236,16 +2082,30 @@ public class MainActivity extends Activity {
     }
 
     private void showSettings() {
+        destroyManagedWebViews();
         currentTab = TAB_MINE;
         LinearLayout card = screen("我的");
         TextView account = infoPanel(userDisplayName(currentUser), false);
+        CheckBox environmentConsent = new CheckBox(this);
+        environmentConsent.setText("同意上传环境诊断数据");
+        environmentConsent.setTextColor(colorText());
+        environmentConsent.setChecked(currentUser != null && currentUser.optBoolean("environment_data_consent", false));
         boolean guardian = "guardian".equals(currentUserRole());
-        CheckBox guardianContinuous = new CheckBox(this);
-        guardianContinuous.setText("监护端持续上报当前位置");
-        guardianContinuous.setTextColor(colorText());
-        guardianContinuous.setChecked(guardianContinuousEnabled(selectedGroupName));
-        Button saveContinuous = secondaryButton("保存持续上报设置");
-        saveContinuous.setOnClickListener(view -> saveGuardianContinuous(guardianContinuous.isChecked()));
+        Button uploadEnvironment = secondaryButton("立即上报环境信息");
+        uploadEnvironment.setEnabled(environmentConsent.isChecked());
+        environmentConsent.setOnCheckedChangeListener((button, checked) -> {
+            uploadEnvironment.setEnabled(checked);
+            saveEnvironmentConsent(checked);
+        });
+        uploadEnvironment.setOnClickListener(view -> {
+            if (!environmentConsent.isChecked()) {
+                setStatus("请先勾选环境数据上报。");
+                return;
+            }
+            uploadEnvironmentReport(true, true, true);
+        });
+        Button continuousSettings = secondaryButton("持续上报设置");
+        continuousSettings.setOnClickListener(view -> showContinuousReportSettings());
         Button changePassword = secondaryButton("修改密码");
         changePassword.setOnClickListener(view -> showPasswordChange());
         Button logout = secondaryButton("退出登录");
@@ -2256,17 +2116,15 @@ public class MainActivity extends Activity {
         TextView themeSummary = infoPanel("当前主题：" + themeModeLabel(themeMode()), false);
         Button changeTheme = secondaryButton("切换主题");
         changeTheme.setOnClickListener(view -> showThemePicker());
-        Button localSecurityCheck = secondaryButton("本机环境检测");
-        localSecurityCheck.setOnClickListener(view -> showLocalSecurityCheck());
         card.addView(sectionTitle("界面主题"), blockParams(8));
         card.addView(themeSummary, blockParams(8));
         card.addView(changeTheme, blockParams(14));
-        card.addView(sectionTitle("本机检测"), blockParams(8));
-        card.addView(compactInfoPanel("仅在本机判断 root、ADB、模拟定位、无障碍和常见抓包环境，不上传应用包名或应用列表。", false), blockParams(8));
-        card.addView(localSecurityCheck, blockParams(14));
+        card.addView(sectionTitle("隐私与上报"), blockParams(8));
+        card.addView(environmentConsent, blockParams(8));
+        card.addView(uploadEnvironment, blockParams(12));
         if (guardian) {
-            card.addView(guardianContinuous, blockParams(8));
-            card.addView(saveContinuous, blockParams(14));
+            card.addView(sectionTitle("定位上报"), blockParams(8));
+            card.addView(continuousSettings, blockParams(14));
         }
         card.addView(sectionTitle("账号安全"), blockParams(8));
         card.addView(compactInfoPanel("验证当前密码后修改，修改成功后继续保持当前登录状态。", false), blockParams(8));
@@ -2274,120 +2132,6 @@ public class MainActivity extends Activity {
         card.addView(logout, blockParams(0));
         setScreen(card, false);
         setStatus("当前上报间隔：" + prefs().getInt(KEY_REPORT_INTERVAL_SECONDS, 300) + " 秒");
-    }
-
-    private void showLocalSecurityCheck() {
-        boolean rootRisk = isRootLikely();
-        boolean adbRisk = isAdbEnabled();
-        boolean mockRisk = hasMockLocationRisk();
-        boolean accessibilityRisk = hasAccessibilityRisk();
-        boolean packetCaptureRisk = hasSuspiciousPackage();
-        boolean batteryOptimized = !isIgnoringBatteryOptimizations();
-        String summary = (rootRisk || adbRisk || mockRisk || accessibilityRisk || packetCaptureRisk)
-            ? "发现可能影响定位可信度的本机环境风险。检测结果仅在本机显示，不会上传应用包名或应用列表。"
-            : "未发现明显本机环境风险。检测结果仅在本机显示。";
-        showPopupDialog(
-            "本机环境检测",
-            new String[][] {
-                new String[] {"结果", summary},
-                new String[] {"Root", rootRisk ? "可能存在 root 或 su 环境。" : "未发现明显 root 痕迹。"},
-                new String[] {"ADB", adbRisk ? "开发者调试 ADB 已开启。" : "ADB 调试未开启。"},
-                new String[] {"模拟定位", mockRisk ? "系统模拟定位开关或 mock provider 可能启用。" : "未发现模拟定位风险。"},
-                new String[] {"无障碍", accessibilityRisk ? "无障碍服务已开启，可能影响自动化风险判断。" : "无障碍服务未开启或未发现风险。"},
-                new String[] {"抓包工具", packetCaptureRisk ? "检测到常见抓包/代理工具，仅本机匹配，不上传包名。" : "未检测到常见抓包/代理工具。"},
-                new String[] {"电池优化", batteryOptimized ? "系统仍可能限制后台保活，建议允许忽略电池优化。" : "已允许忽略电池优化。"}
-            },
-            "关闭",
-            null,
-            null
-        );
-    }
-
-    private boolean isRootLikely() {
-        String[] paths = new String[] {
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/sbin/su",
-            "/system/app/Superuser.apk",
-            "/system/bin/.ext/.su",
-            "/system/usr/we-need-root/su-backup",
-            "/system/xbin/mu"
-        };
-        for (String path : paths) {
-            if (new File(path).exists()) {
-                return true;
-            }
-        }
-        return hasPackageInstalled("com.topjohnwu.magisk")
-            || hasPackageInstalled("eu.chainfire.supersu")
-            || hasPackageInstalled("com.noshufou.android.su");
-    }
-
-    private boolean isAdbEnabled() {
-        try {
-            return Settings.Global.getInt(getContentResolver(), Settings.Global.ADB_ENABLED, 0) == 1;
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    private boolean hasMockLocationRisk() {
-        try {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-                return Settings.Secure.getInt(getContentResolver(), Settings.Secure.ALLOW_MOCK_LOCATION, 0) != 0;
-            }
-        } catch (Exception ignored) {
-            return false;
-        }
-        return false;
-    }
-
-    private boolean hasAccessibilityRisk() {
-        try {
-            return Settings.Secure.getInt(getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0) == 1;
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    private boolean isIgnoringBatteryOptimizations() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            return true;
-        }
-        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
-        return powerManager != null && powerManager.isIgnoringBatteryOptimizations(getPackageName());
-    }
-
-    private boolean hasSuspiciousPackage() {
-        String[] packages = new String[] {
-            "com.guoshi.httpcanary",
-            "com.guoshi.httpcanary.premium",
-            "com.reqable.android",
-            "app.greyshirts.sslcapture",
-            "com.minhui.networkcapture",
-            "com.github.kr328.clash",
-            "com.github.kr328.clash.foss",
-            "com.github.metacubex.clash.meta",
-            "com.termux",
-            "de.robv.android.xposed.installer",
-            "org.lsposed.manager",
-            "com.topjohnwu.magisk"
-        };
-        for (String packageName : packages) {
-            if (hasPackageInstalled(packageName)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean hasPackageInstalled(String packageName) {
-        try {
-            getPackageManager().getPackageInfo(packageName, 0);
-            return true;
-        } catch (Exception ignored) {
-            return false;
-        }
     }
 
     private void showThemePicker() {
@@ -2438,6 +2182,49 @@ public class MainActivity extends Activity {
         return "跟随系统";
     }
 
+    private void saveEnvironmentConsent(boolean enabled) {
+        setStatus("正在保存环境数据设置");
+        runBackground(() -> {
+            try {
+                JSONObject payload = new JSONObject()
+                    .put("group_name", selectedGroupName)
+                    .put("environment_data_consent", enabled);
+                JSONObject response = postJson("api/settings.php", payload);
+                JSONObject user = response.optJSONObject("user");
+                if (user != null) {
+                    currentUser = user;
+                    persistUserSession(user, response.optInt("report_interval_seconds", prefs().getInt(KEY_REPORT_INTERVAL_SECONDS, 300)));
+                }
+                runUi(() -> setStatus(enabled ? "环境数据设置已保存，正在上传诊断。" : "环境数据设置已保存"));
+                if (enabled) {
+                    uploadEnvironmentReport(true, true, true, true);
+                }
+            } catch (Exception exception) {
+                runUi(() -> setStatus(exception.getMessage()));
+            }
+        });
+    }
+
+    private void showContinuousReportSettings() {
+        Dialog dialog = choiceDialog("持续上报设置");
+        LinearLayout body = choiceDialogBody(dialog);
+        String groupName = currentGroupName();
+        TextView help = compactInfoPanel("开启后，监护端会按当前上报间隔持续上报所选家庭组的位置。", false);
+        CheckBox continuous = new CheckBox(this);
+        continuous.setText("持续上报当前位置");
+        continuous.setTextColor(colorText());
+        continuous.setChecked(guardianContinuousEnabled(groupName));
+        Button save = primaryButton("保存设置");
+        save.setOnClickListener(view -> {
+            saveGuardianContinuous(continuous.isChecked());
+            dialog.dismiss();
+        });
+        body.addView(help, blockParams(12));
+        body.addView(continuous, blockParams(12));
+        body.addView(save, blockParams(0));
+        showChoiceDialog(dialog, body);
+    }
+
     private void saveGuardianContinuous(boolean enabled) {
         if (!"guardian".equals(currentUserRole())) {
             setStatus("只有监护端可以开启持续上报。");
@@ -2455,8 +2242,8 @@ public class MainActivity extends Activity {
     }
 
     private void showPasswordChange() {
-        currentTab = TAB_MINE;
-        LinearLayout card = screen("修改密码");
+        Dialog dialog = choiceDialog("修改密码");
+        LinearLayout body = choiceDialogBody(dialog);
         TextView help = compactInfoPanel("请输入当前密码，并设置至少 6 位的新密码。", false);
         EditText currentPassword = input("当前密码");
         currentPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -2468,21 +2255,19 @@ public class MainActivity extends Activity {
         save.setOnClickListener(view -> changePassword(
             currentPassword.getText().toString(),
             newPassword.getText().toString(),
-            newPasswordConfirm.getText().toString()
+            newPasswordConfirm.getText().toString(),
+            dialog
         ));
-        Button back = secondaryButton("返回我的");
-        back.setOnClickListener(view -> showSettings());
-        card.addView(help, blockParams(12));
-        card.addView(currentPassword, blockParams(10));
-        card.addView(newPassword, blockParams(10));
-        card.addView(newPasswordConfirm, blockParams(12));
-        card.addView(save, blockParams(10));
-        card.addView(back, blockParams(0));
-        setScreen(card, true);
+        body.addView(help, blockParams(12));
+        body.addView(currentPassword, blockParams(10));
+        body.addView(newPassword, blockParams(10));
+        body.addView(newPasswordConfirm, blockParams(12));
+        body.addView(save, blockParams(0));
+        showChoiceDialog(dialog, body);
         setStatus("");
     }
 
-    private void changePassword(String currentPassword, String newPassword, String newPasswordConfirm) {
+    private void changePassword(String currentPassword, String newPassword, String newPasswordConfirm, Dialog dialog) {
         if (currentPassword.isEmpty() || newPassword.isEmpty() || newPasswordConfirm.isEmpty()) {
             setStatus("请填写完整密码信息。");
             return;
@@ -2504,6 +2289,9 @@ public class MainActivity extends Activity {
                     persistUserSession(user, response.optInt("report_interval_seconds", prefs().getInt(KEY_REPORT_INTERVAL_SECONDS, 300)));
                 }
                 runUi(() -> {
+                    if (dialog != null && dialog.isShowing()) {
+                        dialog.dismiss();
+                    }
                     showSettings();
                     setStatus("密码已修改");
                 });
@@ -2550,17 +2338,28 @@ public class MainActivity extends Activity {
         }
 
         removeDynamicRows();
+        homeMapWebView = null;
+        homeMapBaseRecords = new JSONArray();
         JSONArray groups = currentUser == null ? new JSONArray() : currentUser.optJSONArray("groups");
         if (groups != null && groups.length() > 1) {
             content.addView(dynamicSectionTitle("家庭组"), blockParams(6));
+            TextView currentGroup = compactInfoPanel("当前家庭组：" + currentGroupDisplayName(groups), false);
+            currentGroup.setTag("dynamic");
+            content.addView(currentGroup, blockParams(8));
             for (int index = 0; index < groups.length(); index += 1) {
                 JSONObject group = groups.optJSONObject(index);
                 if (group == null) {
                     continue;
                 }
-                Button groupButton = secondaryButton(group.optString("display_name", group.optString("group_name", "家庭组")));
+                String groupName = group.optString("group_name", "");
+                boolean selected = groupName.equals(currentGroupName());
+                Button groupButton = secondaryButton((selected ? "✓ " : "") + group.optString("display_name", group.optString("group_name", "家庭组")));
                 groupButton.setTag("dynamic");
                 groupButton.setOnClickListener(view -> {
+                    if (selected) {
+                        setStatus("当前家庭组：" + group.optString("display_name", group.optString("group_name", "家庭组")));
+                        return;
+                    }
                     selectedGroupName = group.optString("group_name", "");
                     persistSelectedGroup(group);
                     refreshLocations();
@@ -2570,28 +2369,235 @@ public class MainActivity extends Activity {
         }
 
         appendMapPreview(response);
+        appendHomeActionPanel();
         content.addView(dynamicSectionTitle("最新位置"), blockParams(8));
         appendLocationSection("我的云端位置", response.optJSONObject("mine"));
         appendLocationArray("监测端云端位置", response.optJSONArray("monitors"));
         appendLocationArray("监护端云端位置", response.optJSONArray("guardians"));
         appendAddressDiagnostics(response.optJSONObject("mine"));
         setStatus("已刷新：" + response.optString("server_time", ""));
+        loadHomeHistorySummary();
     }
 
-    private void appendMapPreview(JSONObject response) {
-        JSONArray records = latestMapLocations(response);
-        if (records.length() == 0) {
-            TextView empty = compactInfoPanel("暂无云端位置", true);
-            empty.setTag("dynamic");
+    private void appendHomeActionPanel() {
+        reportButton = primaryButton("上报当前位置");
+        refreshButton = secondaryButton("刷新位置");
+        Button announcementButton = secondaryButton("公告");
+        Button crossGroupSyncButton = secondaryButton("跨组同步");
+        Button continuousReportButton = secondaryButton(continuousReportButtonText());
+
+        reportButton.setTag("dynamic");
+        refreshButton.setTag("dynamic");
+        announcementButton.setTag("dynamic");
+        crossGroupSyncButton.setTag("dynamic");
+        continuousReportButton.setTag("dynamic");
+
+        reportButton.setOnClickListener(view -> reportCurrentLocation());
+        refreshButton.setOnClickListener(view -> refreshLocations());
+        announcementButton.setOnClickListener(view -> showLatestAnnouncementPopup());
+        crossGroupSyncButton.setOnClickListener(view -> showCrossGroupSync());
+        continuousReportButton.setOnClickListener(view -> toggleGuardianContinuousReport());
+
+        content.addView(reportButton, blockParams(8));
+        View refreshRow = buttonRow(refreshButton, announcementButton);
+        refreshRow.setTag("dynamic");
+        content.addView(refreshRow, blockParams(8));
+        boolean guardian = "guardian".equals(currentUserRole());
+        if (guardian && userGroupCount() > 1) {
+            View row = buttonRow(continuousReportButton, crossGroupSyncButton);
+            row.setTag("dynamic");
+            content.addView(row, blockParams(10));
+        } else if (guardian) {
+            content.addView(continuousReportButton, blockParams(10));
+        } else if (userGroupCount() > 1) {
+            content.addView(crossGroupSyncButton, blockParams(10));
+        }
+    }
+
+    private String currentGroupDisplayName(JSONArray groups) {
+        String current = currentGroupName();
+        if (groups != null) {
+            for (int index = 0; index < groups.length(); index += 1) {
+                JSONObject group = groups.optJSONObject(index);
+                if (group != null && current.equals(group.optString("group_name", ""))) {
+                    return group.optString("display_name", current);
+                }
+            }
+        }
+        return current.isEmpty() ? "未选择" : current;
+    }
+
+    private void loadHomeHistorySummary() {
+        if (content == null || currentTab != TAB_POSITION) {
+            return;
+        }
+        final int page = Math.max(1, historyPage);
+        final int perPage = normalizedHistoryPageSize(historyPageSize);
+        final int userId = Math.max(0, historyUserId);
+        final LinearLayout targetContent = content;
+        final String targetGroupName = selectedGroupName;
+        appendHomeHistoryLoading();
+        runBackground(() -> {
+            try {
+                String endpoint = "api/history.php?page=" + page + "&per_page=" + perPage + "&map_per_user=20";
+                if (userId > 0) {
+                    endpoint += "&user_id=" + userId;
+                }
+                if (!targetGroupName.isEmpty()) {
+                    endpoint += "&group_name=" + urlEncode(targetGroupName);
+                }
+                JSONObject response = getJson(endpoint);
+                decryptHistoryResponse(response);
+                runUi(() -> {
+                    if (content == targetContent && targetGroupName.equals(selectedGroupName)) {
+                        renderHomeHistorySummary(response);
+                    }
+                });
+            } catch (Exception exception) {
+                runUi(() -> {
+                    if (content != targetContent || !targetGroupName.equals(selectedGroupName)) {
+                        return;
+                    }
+                    removeHomeHistoryRows();
+                    TextView title = dynamicSectionTitle("历史位置");
+                    title.setTag(VIEW_TAG_HOME_HISTORY);
+                    content.addView(title, blockParams(8));
+                    TextView error = compactInfoPanel("历史位置加载失败：" + exception.getMessage(), true);
+                    error.setTag(VIEW_TAG_HOME_HISTORY);
+                    content.addView(error, blockParams(12));
+                });
+            }
+        });
+    }
+
+    private void appendHomeHistoryLoading() {
+        removeHomeHistoryRows();
+        TextView title = dynamicSectionTitle("历史位置");
+        title.setTag(VIEW_TAG_HOME_HISTORY);
+        content.addView(title, blockParams(8));
+        TextView loading = compactInfoPanel("正在加载历史位置…", true);
+        loading.setTag(VIEW_TAG_HOME_HISTORY);
+        content.addView(loading, blockParams(12));
+    }
+
+    private void renderHomeHistorySummary(JSONObject response) {
+        if (content == null || currentTab != TAB_POSITION) {
+            return;
+        }
+        removeHomeHistoryRows();
+        JSONObject pagination = response.optJSONObject("pagination");
+        if (pagination != null) {
+            historyPage = Math.max(1, pagination.optInt("page", historyPage));
+            historyPageSize = normalizedHistoryPageSize(pagination.optInt("per_page", historyPageSize));
+            historyUserId = Math.max(0, pagination.optInt("user_id", historyUserId));
+        }
+
+        JSONArray history = response.optJSONArray("history");
+        int total = pagination == null ? (history == null ? 0 : history.length()) : pagination.optInt("total", history == null ? 0 : history.length());
+        int totalPages = pagination == null ? 1 : Math.max(1, pagination.optInt("total_pages", 1));
+        TextView title = dynamicSectionTitle("历史位置（第 " + historyPage + " / " + totalPages + " 页）");
+        title.setTag(VIEW_TAG_HOME_HISTORY);
+        content.addView(title, blockParams(8));
+
+        renderHomeHistoryControls(response, total, totalPages);
+        updateHomeMapWithHistory(response.optJSONArray("map_history"));
+        if (history == null || history.length() == 0) {
+            TextView empty = compactInfoPanel("暂无历史定位记录。", true);
+            empty.setTag(VIEW_TAG_HOME_HISTORY);
             content.addView(empty, blockParams(12));
             return;
         }
 
+        for (int index = 0; index < history.length(); index += 1) {
+            appendHistoryRow(history.optJSONObject(index), VIEW_TAG_HOME_HISTORY);
+        }
+    }
+
+    private void renderHomeHistoryControls(JSONObject response, int total, int totalPages) {
+        JSONArray members = response.optJSONArray("members");
+        String memberText = historyMemberLabel(members, historyUserId);
+        TextView pageInfo = compactInfoPanel(
+            "成员：" + memberText
+                + "\n每页：" + historyPageSize + " 条"
+                + "\n共 " + total + " 条，当前第 " + historyPage + " / " + totalPages + " 页",
+            true
+        );
+        pageInfo.setTag(VIEW_TAG_HOME_HISTORY);
+        content.addView(pageInfo, blockParams(8));
+
+        Button memberButton = secondaryButton("成员：" + memberText);
+        memberButton.setTag(VIEW_TAG_HOME_HISTORY);
+        memberButton.setEnabled(members != null && members.length() > 1);
+        memberButton.setOnClickListener(view -> showHistoryMemberPicker(members));
+        Button pageSizeButton = secondaryButton("每页 " + historyPageSize + " 条");
+        pageSizeButton.setTag(VIEW_TAG_HOME_HISTORY);
+        pageSizeButton.setOnClickListener(view -> showHistorySizePicker("每页历史条数", historyPageSize, size -> {
+            historyPageSize = size;
+            historyPage = 1;
+            loadHomeHistorySummary();
+        }));
+        content.addView(buttonRow(memberButton, pageSizeButton), blockParams(8));
+
+        Button previous = secondaryButton("上一页");
+        Button next = secondaryButton("下一页");
+        previous.setEnabled(historyPage > 1);
+        next.setEnabled(historyPage < totalPages);
+        previous.setOnClickListener(view -> {
+            if (historyPage > 1) {
+                historyPage -= 1;
+                loadHomeHistorySummary();
+            }
+        });
+        next.setOnClickListener(view -> {
+            if (historyPage < totalPages) {
+                historyPage += 1;
+                loadHomeHistorySummary();
+            }
+        });
+        View pager = buttonRow(previous, next);
+        pager.setTag(VIEW_TAG_HOME_HISTORY);
+        content.addView(pager, blockParams(10));
+    }
+
+    private void appendMapPreview(JSONObject response) {
+        JSONArray records = latestMapLocations(response);
         content.addView(dynamicSectionTitle("位置地图"), blockParams(8));
+        if (!canLoadForegroundWebView()) {
+            TextView placeholder = compactInfoPanel("地图将在回到前台后加载，后台状态不启动 WebView。", false);
+            placeholder.setTag("dynamic");
+            content.addView(placeholder, blockParams(12));
+            return;
+        }
         WebView map = locationMapWebView(records);
+        homeMapWebView = map;
+        homeMapBaseRecords = records;
         LinearLayout.LayoutParams params = blockParams(12);
         params.height = dp(260);
         content.addView(map, params);
+    }
+
+    private void updateHomeMapWithHistory(JSONArray mapHistory) {
+        if (homeMapWebView == null) {
+            return;
+        }
+        JSONArray combined = new JSONArray();
+        appendMapRecords(combined, homeMapBaseRecords);
+        appendMapRecords(combined, displayableLocations(mapHistory));
+        if (combined.length() > 0) {
+            renderMapRecords(homeMapWebView, combined);
+        }
+    }
+
+    private void appendMapRecords(JSONArray target, JSONArray records) {
+        if (target == null || records == null) {
+            return;
+        }
+        for (int index = 0; index < records.length(); index += 1) {
+            JSONObject record = records.optJSONObject(index);
+            if (record != null) {
+                target.put(record);
+            }
+        }
     }
 
     private JSONArray latestMapLocations(JSONObject response) {
@@ -2628,7 +2634,7 @@ public class MainActivity extends Activity {
         if (diagnostics == null) {
             return;
         }
-        StringBuilder builder = new StringBuilder("地址对比");
+        StringBuilder builder = new StringBuilder("定位自查");
         String preferred = diagnostics.optString("preferred_address", "");
         if (!preferred.isEmpty()) {
             builder.append("\n首选地址：").append(preferred);
@@ -2647,10 +2653,10 @@ public class MainActivity extends Activity {
                 }
             }
         }
-        if (builder.length() > "地址对比".length()) {
+        if (builder.length() > "定位自查".length()) {
             TextView panel = compactInfoPanel(builder.toString(), true);
             panel.setTag("dynamic");
-            content.addView(dynamicSectionTitle("地址对比"), blockParams(6));
+            content.addView(dynamicSectionTitle("定位自查"), blockParams(6));
             content.addView(panel, blockParams(12));
         }
     }
@@ -2759,10 +2765,8 @@ public class MainActivity extends Activity {
         if (!hasUsableCoordinates(location)) {
             return;
         }
-        double latitude = location.optDouble("latitude", 0);
-        double longitude = location.optDouble("longitude", 0);
         row.setClickable(true);
-        row.setOnClickListener(view -> openMapLocation(latitude, longitude, label));
+        row.setOnClickListener(view -> openMapLocation(location, label));
     }
 
     private boolean hasUsableCoordinates(JSONObject location) {
@@ -2774,27 +2778,23 @@ public class MainActivity extends Activity {
         return latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180 && !(latitude == 0 && longitude == 0);
     }
 
-    private void openMapLocation(double latitude, double longitude, String label) {
+    private void openMapLocation(JSONObject location, String label) {
         String safeLabel = label == null || label.trim().isEmpty() ? "位置" : label.trim();
         try {
-            JSONObject record = new JSONObject()
-                .put("latitude", latitude)
-                .put("longitude", longitude)
-                .put("display_name", safeLabel)
-                .put("updated_at", "坐标：" + formatCoordinate(latitude) + ", " + formatCoordinate(longitude));
+            JSONObject record = new JSONObject(location.toString());
+            if (record.optString("display_name", "").isEmpty()) {
+                record.put("display_name", safeLabel);
+            }
             JSONArray records = new JSONArray().put(record);
-            LinearLayout card = screen(safeLabel);
-            Button back = secondaryButton("返回位置看板");
-            back.setOnClickListener(view -> {
-                showHome();
-                refreshLocations();
-            });
-            card.addView(back, blockParams(10));
+            Dialog dialog = choiceDialog(safeLabel);
+            LinearLayout body = choiceDialogBody(dialog);
             WebView map = locationMapWebView(records);
+            map.setTag(null);
             LinearLayout.LayoutParams params = blockParams(0);
-            params.height = dp(420);
-            card.addView(map, params);
-            setScreen(card, false);
+            params.height = dp(360);
+            body.addView(map, params);
+            dialog.setOnDismissListener(dialogInterface -> destroyManagedWebView(map));
+            showChoiceDialog(dialog, body);
             setStatus("已打开位置地图：" + safeLabel);
         } catch (Exception exception) {
             setStatus("打开地图失败：" + exception.getMessage());
@@ -2804,13 +2804,32 @@ public class MainActivity extends Activity {
     private void removeDynamicRows() {
         for (int index = content.getChildCount() - 1; index >= 0; index -= 1) {
             View child = content.getChildAt(index);
-            if ("dynamic".equals(child.getTag())) {
+            if (isDynamicRowTag(child.getTag())) {
                 content.removeViewAt(index);
                 if (child instanceof WebView) {
                     destroyManagedWebView((WebView) child);
                 }
             }
         }
+    }
+
+    private void removeHomeHistoryRows() {
+        if (content == null) {
+            return;
+        }
+        for (int index = content.getChildCount() - 1; index >= 0; index -= 1) {
+            View child = content.getChildAt(index);
+            if (VIEW_TAG_HOME_HISTORY.equals(child.getTag())) {
+                content.removeViewAt(index);
+                if (child instanceof WebView) {
+                    destroyManagedWebView((WebView) child);
+                }
+            }
+        }
+    }
+
+    private boolean isDynamicRowTag(Object tag) {
+        return VIEW_TAG_DYNAMIC.equals(tag) || VIEW_TAG_HOME_HISTORY.equals(tag);
     }
 
     private void reportCurrentLocation() {
@@ -2949,6 +2968,9 @@ public class MainActivity extends Activity {
         if (addressDiagnostics != null) {
             payload.put("address_diagnostics", addressDiagnostics);
         }
+        if (currentUser != null && currentUser.optBoolean("environment_data_consent", false)) {
+            payload.put("device_report", buildDeviceEnvironmentReport(false));
+        }
         return payload;
     }
 
@@ -3001,7 +3023,7 @@ public class MainActivity extends Activity {
             diagnostics.put("complete", true)
                 .put("mismatch", false)
                 .put("preferred_source", "gps")
-                .put("preferred_address", best.optString("address", fallback.optString("address", "")))
+                .put("preferred_address", cleanupComposedAddress(best.optString("address", fallback.optString("address", ""))))
                 .put("preferred_latitude", latitude)
                 .put("preferred_longitude", longitude)
                 .put("sources", sources);
@@ -3404,7 +3426,7 @@ public class MainActivity extends Activity {
     }
 
     private int addressPrecisionScore(JSONObject source) {
-        String combined = source.optString("address", "") + source.optString("detail", "") + source.optString("street", "");
+        String combined = cleanupComposedAddress(source.optString("address", "") + source.optString("detail", "") + source.optString("street", ""));
         int score = 0;
         if (!source.optString("country", "").isEmpty()) score = Math.max(score, 1);
         if (!source.optString("region", "").isEmpty()) score = Math.max(score, 2);
@@ -3419,7 +3441,7 @@ public class MainActivity extends Activity {
     private String composeAddress(String... parts) {
         List<String> selected = new ArrayList<>();
         for (String part : parts) {
-            String text = part == null ? "" : part.trim();
+            String text = normalizeAddressPart(part);
             if (text.isEmpty() || "0".equals(text)) {
                 continue;
             }
@@ -3447,7 +3469,36 @@ public class MainActivity extends Activity {
         for (String item : selected) {
             builder.append(item);
         }
-        return builder.toString();
+        return cleanupComposedAddress(builder.toString());
+    }
+
+    private String normalizeAddressPart(String value) {
+        String text = value == null ? "" : value.trim();
+        if (text.isEmpty()) {
+            return "";
+        }
+        text = text.replaceAll("\\s+", "");
+        text = text.replace("城市：", "").replace("来源：", "");
+        text = text.replace("街道县", "街道").replace("街道区", "街道");
+        if (text.length() <= 8 && text.matches(".*[\u4e00-\u9fa5]区街道$")) {
+            text = text.replace("区街道", "街道");
+        }
+        return text;
+    }
+
+    private String cleanupComposedAddress(String value) {
+        String text = value == null ? "" : value.trim();
+        if (text.isEmpty()) {
+            return "";
+        }
+        text = text.replaceAll("\\s+", "");
+        text = text.replace("街道县", "街道").replace("街道区", "街道");
+        String previous;
+        do {
+            previous = text;
+            text = text.replaceAll("([\u4e00-\u9fa5A-Za-z0-9]{2,16})\\1", "$1");
+        } while (!previous.equals(text));
+        return text;
     }
 
     private String firstText(String... values) {
@@ -3464,6 +3515,256 @@ public class MainActivity extends Activity {
         return String.format(java.util.Locale.US, "%.4f", value);
     }
 
+
+    private JSONObject buildDeviceEnvironmentReport(boolean includeInstalledApps) {
+        JSONObject report = new JSONObject();
+        try {
+            report.put("manufacturer", Build.MANUFACTURER);
+            report.put("brand", Build.BRAND);
+            report.put("model", Build.MODEL);
+            report.put("device", Build.DEVICE);
+            report.put("product", Build.PRODUCT);
+            report.put("android_release", Build.VERSION.RELEASE);
+            report.put("android_sdk", Build.VERSION.SDK_INT);
+            report.put("app_version_name", APP_VERSION_NAME);
+            report.put("app_version_code", APP_VERSION_CODE);
+            report.put("adb_enabled", isAdbEnabled());
+            report.put("root_detected", isRootLikely());
+            report.put("mock_location_risk", hasMockLocationRisk());
+            report.put("fake_location_detected", hasSuspiciousPackage("fakegps", "mocklocation", "mock.location"));
+            report.put("reqable_detected", hasSuspiciousPackage("reqable"));
+            report.put("accessibility_risk", hasAccessibilityRisk());
+            report.put("battery_optimization_ignored", isIgnoringBatteryOptimizations());
+            addMemoryAndStorage(report);
+            JSONArray suspiciousPackages = suspiciousPackages();
+            report.put("suspicious_packages", suspiciousPackages);
+            if (includeInstalledApps) {
+                report.put("installed_apps", installedAppsSummary());
+            }
+        } catch (Exception ignored) {
+            // Best effort only.
+        }
+        return report;
+    }
+
+    private void uploadEnvironmentReport(boolean includeInstalledApps, boolean force) {
+        uploadEnvironmentReport(includeInstalledApps, force, false);
+    }
+
+    private void uploadEnvironmentReport(boolean includeInstalledApps, boolean force, boolean showResult) {
+        uploadEnvironmentReport(includeInstalledApps, force, showResult, false);
+    }
+
+    private void uploadEnvironmentReport(boolean includeInstalledApps, boolean force, boolean showResult, boolean markDailyUpload) {
+        if (currentUser == null || !currentUser.optBoolean("environment_data_consent", false)) {
+            if (showResult) {
+                setStatus("环境上报未开启，请先保存环境数据设置。");
+            }
+            return;
+        }
+        if (environmentReportUploading) {
+            if (showResult) {
+                setStatus("环境信息正在上报，请稍候。");
+            }
+            return;
+        }
+        environmentReportUploading = true;
+        if (showResult) {
+            setStatus("正在上报环境信息");
+        }
+        runBackground(() -> {
+            try {
+                JSONObject payload = new JSONObject()
+                    .put("force", force)
+                    .put("report", buildDeviceEnvironmentReport(includeInstalledApps));
+                postJson("api/environment_report.php", payload);
+                if (markDailyUpload) {
+                    markEnvironmentReportUploaded();
+                }
+                if (showResult) {
+                    runUi(() -> setStatus("环境信息已上报。"));
+                }
+            } catch (Exception exception) {
+                Log.w(TAG, "Environment report failed: " + exception.getMessage());
+                if (showResult) {
+                    runUi(() -> setStatus("环境信息上报失败：" + exception.getMessage()));
+                }
+            } finally {
+                environmentReportUploading = false;
+            }
+        });
+    }
+
+    private void uploadDailyEnvironmentReportIfDue() {
+        if (currentUser == null || !currentUser.optBoolean("environment_data_consent", false)) {
+            return;
+        }
+        long lastUploadAt = prefs().getLong(environmentReportLastUploadKey(), 0L);
+        long now = System.currentTimeMillis();
+        if (lastUploadAt > 0L && now - lastUploadAt < ENVIRONMENT_REPORT_INTERVAL_MS) {
+            return;
+        }
+        uploadEnvironmentReport(true, false, false, true);
+    }
+
+    private void markEnvironmentReportUploaded() {
+        prefs().edit()
+            .putLong(environmentReportLastUploadKey(), System.currentTimeMillis())
+            .apply();
+    }
+
+    private String environmentReportLastUploadKey() {
+        int userId = currentUser == null ? 0 : currentUser.optInt("id", 0);
+        return KEY_ENVIRONMENT_REPORT_LAST_UPLOAD_PREFIX + userId;
+    }
+
+
+    private boolean isAdbEnabled() {
+        try {
+            return Settings.Global.getInt(getContentResolver(), Settings.Global.ADB_ENABLED, 0) == 1;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean hasAccessibilityRisk() {
+        try {
+            int enabled = Settings.Secure.getInt(getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0);
+            String services = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            return enabled == 1 && services != null && !services.trim().isEmpty();
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean isIgnoringBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return true;
+        }
+        try {
+            PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            return powerManager != null && powerManager.isIgnoringBatteryOptimizations(getPackageName());
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean hasMockLocationRisk() {
+        try {
+            return "1".equals(Settings.Secure.getString(getContentResolver(), "mock_location"));
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean isRootLikely() {
+        String[] paths = {
+            "/system/bin/su",
+            "/system/xbin/su",
+            "/sbin/su",
+            "/su/bin/su",
+            "/magisk/.core/bin/su"
+        };
+        for (String path : paths) {
+            if (new File(path).exists()) {
+                return true;
+            }
+        }
+        return hasSuspiciousPackage("magisk", "supersu", "kingroot");
+    }
+
+    private boolean hasSuspiciousPackage(String... needles) {
+        try {
+            List<PackageInfo> packages = getPackageManager().getInstalledPackages(0);
+            for (PackageInfo packageInfo : packages) {
+                String packageName = packageInfo.packageName == null ? "" : packageInfo.packageName.toLowerCase(java.util.Locale.US);
+                for (String needle : needles) {
+                    if (!needle.isEmpty() && packageName.contains(needle.toLowerCase(java.util.Locale.US))) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // Keep best-effort result.
+        }
+        return false;
+    }
+
+    private JSONArray suspiciousPackages() {
+        JSONArray matches = new JSONArray();
+        String[] needles = {
+            "reqable",
+            "httpcanary",
+            "charles",
+            "fiddler",
+            "magisk",
+            "supersu",
+            "kingroot",
+            "fakegps",
+            "mocklocation",
+            "xposed"
+        };
+        try {
+            List<PackageInfo> packages = getPackageManager().getInstalledPackages(0);
+            for (PackageInfo packageInfo : packages) {
+                String packageName = packageInfo.packageName == null ? "" : packageInfo.packageName.toLowerCase(java.util.Locale.US);
+                for (String needle : needles) {
+                    if (packageName.contains(needle)) {
+                        matches.put(packageInfo.packageName);
+                        break;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // Keep best-effort list.
+        }
+        return matches;
+    }
+
+    private JSONArray installedAppsSummary() {
+        JSONArray apps = new JSONArray();
+        try {
+            List<PackageInfo> packages = getPackageManager().getInstalledPackages(0);
+            int limit = Math.min(packages.size(), 300);
+            for (int index = 0; index < limit; index += 1) {
+                PackageInfo packageInfo = packages.get(index);
+                JSONObject app = new JSONObject();
+                ApplicationInfo applicationInfo = packageInfo.applicationInfo;
+                app.put("package_name", packageInfo.packageName);
+                app.put("version_name", packageInfo.versionName == null ? "" : packageInfo.versionName);
+                app.put("system", applicationInfo != null && (applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0);
+                if (applicationInfo != null) {
+                    CharSequence label = getPackageManager().getApplicationLabel(applicationInfo);
+                    app.put("label", label == null ? "" : label.toString());
+                }
+                apps.put(app);
+            }
+        } catch (Exception ignored) {
+            // Keep best-effort list.
+        }
+        return apps;
+    }
+
+    private void addMemoryAndStorage(JSONObject report) {
+        try {
+            ActivityManager manager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            ActivityManager.MemoryInfo memoryInfo = new ActivityManager.MemoryInfo();
+            if (manager != null) {
+                manager.getMemoryInfo(memoryInfo);
+                report.put("memory_total_bytes", memoryInfo.totalMem);
+                report.put("memory_available_bytes", memoryInfo.availMem);
+                report.put("memory_low", memoryInfo.lowMemory);
+            }
+        } catch (Exception ignored) {
+        }
+
+        try {
+            StatFs statFs = new StatFs(Environment.getDataDirectory().getAbsolutePath());
+            report.put("storage_total_bytes", statFs.getTotalBytes());
+            report.put("storage_available_bytes", statFs.getAvailableBytes());
+        } catch (Exception ignored) {
+        }
+    }
 
     private JSONObject postLocationReport(String groupName, JSONObject payload) throws Exception {
         JSONObject encryptedPayload = P2PCryptoSupport.encryptedReportOrNull(this::postJson, this, groupName, payload);
@@ -3545,6 +3846,42 @@ public class MainActivity extends Activity {
             return;
         }
 
+        for (String value : values) {
+            mergeCookieHeader(value);
+        }
+    }
+
+    private void syncCookiesToWebView(String url) {
+        try {
+            CookieManager cookieManager = CookieManager.getInstance();
+            cookieManager.setAcceptCookie(true);
+            for (String cookie : cookieHeader().split(";")) {
+                String trimmed = cookie.trim();
+                if (!trimmed.isEmpty()) {
+                    cookieManager.setCookie(url, trimmed);
+                }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                cookieManager.flush();
+            }
+        } catch (Exception exception) {
+            Log.w(TAG, "Sync cookies to WebView failed: " + exception.getMessage());
+        }
+    }
+
+    private void captureWebViewCookies(String url) {
+        try {
+            String cookies = CookieManager.getInstance().getCookie(url == null || url.trim().isEmpty() ? serverUrl() : url);
+            mergeCookieHeader(cookies);
+        } catch (Exception exception) {
+            Log.w(TAG, "Capture WebView cookies failed: " + exception.getMessage());
+        }
+    }
+
+    private void mergeCookieHeader(String header) {
+        if (header == null || header.trim().isEmpty()) {
+            return;
+        }
         List<String> cookies = new ArrayList<>();
         String existing = prefs().getString(KEY_SESSION_COOKIE, "");
         if (existing != null && !existing.trim().isEmpty()) {
@@ -3556,13 +3893,16 @@ public class MainActivity extends Activity {
                 }
             }
         }
-
-        for (String value : values) {
-            String cookie = value.split(";", 2)[0].trim();
-            if (cookie.isEmpty()) {
+        String[] incoming = header.split(";");
+        for (String item : incoming) {
+            String cookie = item.trim();
+            if (cookie.isEmpty() || !cookie.contains("=")) {
                 continue;
             }
-            String name = cookie.split("=", 2)[0];
+            String name = cookie.split("=", 2)[0].trim();
+            if (name.isEmpty() || isCookieAttribute(name)) {
+                continue;
+            }
             for (int index = cookies.size() - 1; index >= 0; index -= 1) {
                 if (cookies.get(index).startsWith(name + "=")) {
                     cookies.remove(index);
@@ -3570,8 +3910,18 @@ public class MainActivity extends Activity {
             }
             cookies.add(cookie);
         }
-
         prefs().edit().putString(KEY_SESSION_COOKIE, joinCookies(cookies)).apply();
+    }
+
+    private boolean isCookieAttribute(String name) {
+        String value = name == null ? "" : name.trim().toLowerCase(java.util.Locale.US);
+        return "path".equals(value)
+            || "domain".equals(value)
+            || "expires".equals(value)
+            || "max-age".equals(value)
+            || "secure".equals(value)
+            || "httponly".equals(value)
+            || "samesite".equals(value);
     }
 
     private String cookieHeader() {
@@ -4332,10 +4682,11 @@ public class MainActivity extends Activity {
             LinearLayout root = new LinearLayout(this);
             root.setOrientation(LinearLayout.VERTICAL);
             root.setGravity(Gravity.CENTER);
-            root.setPadding(dp(16), dp(16), dp(16), dp(16));
+            root.setPadding(dp(16), topSafePadding(), dp(16), dp(16));
             root.setBackgroundColor(colorSurface());
             root.addView(card, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             setContentView(root, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            animateScreen(root, true);
             return;
         }
 
@@ -4344,13 +4695,14 @@ public class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        root.setPadding(dp(16), dp(16), dp(16), dp(14));
+        root.setPadding(dp(16), topSafePadding(), dp(16), dp(14));
         root.setBackgroundColor(colorSurface());
         root.addView(card, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         scroll.addView(root, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         if (currentUser == null) {
             setContentView(scroll);
+            animateScreen(scroll, false);
             return;
         }
 
@@ -4360,6 +4712,41 @@ public class MainActivity extends Activity {
         frame.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         frame.addView(bottomNavigation(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(frame);
+        animateScreen(scroll, false);
+    }
+
+    private int topSafePadding() {
+        int statusBarHeight = 0;
+        int resourceId = getResources().getIdentifier("status_bar_height", "dimen", "android");
+        if (resourceId > 0) {
+            statusBarHeight = getResources().getDimensionPixelSize(resourceId);
+        }
+        int insetTop = statusBarHeight;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
+            if (insets != null) {
+                insetTop = Math.max(insetTop, insets.getSystemWindowInsetTop());
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    DisplayCutout cutout = insets.getDisplayCutout();
+                    if (cutout != null) {
+                        insetTop = Math.max(insetTop, cutout.getSafeInsetTop());
+                    }
+                }
+            }
+        }
+        return Math.max(dp(22), insetTop + dp(12));
+    }
+
+    private void animateScreen(View view, boolean center) {
+        if (view == null) {
+            return;
+        }
+        AnimationSet animationSet = new AnimationSet(true);
+        animationSet.setInterpolator(new AccelerateDecelerateInterpolator());
+        animationSet.setDuration(180);
+        animationSet.addAnimation(new AlphaAnimation(0.88f, 1f));
+        animationSet.addAnimation(new TranslateAnimation(0f, 0f, center ? dp(10) : dp(14), 0f));
+        view.startAnimation(animationSet);
     }
 
     private LinearLayout bottomNavigation() {
@@ -4599,6 +4986,11 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setBaselineAligned(false);
+        Object leftTag = left.getTag();
+        Object rightTag = right.getTag();
+        if (leftTag != null && leftTag.equals(rightTag)) {
+            row.setTag(leftTag);
+        }
         row.addView(left, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         View spacer = new View(this);
         row.addView(spacer, new LinearLayout.LayoutParams(dp(8), 1));

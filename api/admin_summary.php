@@ -10,6 +10,57 @@ if (!is_admin_logged_in()) {
     json_response(['ok' => false, 'message' => '请先登录后台。'], 401);
 }
 
+function admin_environment_report_payload(array $row): array
+{
+    $report = json_decode((string) ($row['report_json'] ?? ''), true);
+    if (!is_array($report)) {
+        $report = [];
+    }
+
+    $installedApps = [];
+    $rawApps = $report['installed_apps'] ?? [];
+    if (is_array($rawApps)) {
+        foreach (array_slice($rawApps, 0, 120) as $app) {
+            if (!is_array($app)) {
+                continue;
+            }
+            $installedApps[] = [
+                'label' => (string) ($app['label'] ?? $app['app_name'] ?? $app['name'] ?? ''),
+                'package_name' => (string) ($app['package_name'] ?? $app['package'] ?? ''),
+                'version_name' => (string) ($app['version_name'] ?? ''),
+            ];
+        }
+    }
+
+    $safeReport = $report;
+    if (isset($safeReport['installed_apps']) && is_array($safeReport['installed_apps'])) {
+        $safeReport['installed_apps'] = $installedApps;
+        $safeReport['installed_apps_truncated'] = count($rawApps) > count($installedApps);
+    }
+
+    return [
+        'user_id' => (int) $row['user_id'],
+        'created_at' => format_datetime((string) $row['created_at']),
+        'device' => [
+            'manufacturer' => (string) ($report['manufacturer'] ?? ''),
+            'brand' => (string) ($report['brand'] ?? ''),
+            'model' => (string) ($report['model'] ?? ''),
+            'device' => (string) ($report['device'] ?? ''),
+            'product' => (string) ($report['product'] ?? ''),
+            'android_release' => (string) ($report['android_release'] ?? ''),
+            'android_sdk' => (string) ($report['android_sdk'] ?? ''),
+            'app_version_name' => (string) ($report['app_version_name'] ?? ''),
+            'app_version_code' => (string) ($report['app_version_code'] ?? ''),
+            'adb_enabled' => $report['adb_enabled'] ?? null,
+            'root_detected' => $report['root_detected'] ?? null,
+            'mock_location_enabled' => $report['mock_location_enabled'] ?? null,
+        ],
+        'installed_apps_count' => is_array($rawApps) ? count($rawApps) : 0,
+        'installed_apps' => $installedApps,
+        'report' => $safeReport,
+    ];
+}
+
 try {
     $pdo = db();
 
@@ -98,6 +149,22 @@ try {
         ];
     }, $usersStmt->fetchAll());
 
+    $environmentReportsByUser = [];
+    $environmentReportsStmt = $pdo->query('
+        SELECT er.user_id, er.report_json, er.created_at
+        FROM environment_reports er
+        INNER JOIN (
+            SELECT user_id, MAX(id) AS id
+            FROM environment_reports
+            GROUP BY user_id
+        ) latest ON latest.id = er.id
+        ORDER BY er.created_at DESC
+        LIMIT 200
+    ');
+    foreach ($environmentReportsStmt->fetchAll() as $reportRow) {
+        $environmentReportsByUser[(int) $reportRow['user_id']] = admin_environment_report_payload($reportRow);
+    }
+
     $locationsStmt = $pdo->query('
         SELECT
             ll.latest_location_id AS id,
@@ -127,9 +194,13 @@ try {
         LIMIT 100
     ');
 
-    $locations = array_map(static function (array $location): array {
+    $locations = array_map(static function (array $location) use ($environmentReportsByUser): array {
         $payload = location_payload($location) ?? [];
         $payload['id'] = isset($location['id']) ? (int) $location['id'] : 0;
+        $userId = (int) ($payload['user_id'] ?? 0);
+        if ($userId > 0 && isset($environmentReportsByUser[$userId])) {
+            $payload['environment_report'] = $environmentReportsByUser[$userId];
+        }
         return $payload;
     }, $locationsStmt->fetchAll());
 
@@ -221,6 +292,45 @@ try {
         ];
     }, $devicesStmt->fetchAll());
 
+    $logsStmt = $pdo->query('
+        SELECT
+            ul.id,
+            ul.user_id,
+            ul.group_name,
+            ul.event_type,
+            ul.message,
+            ul.meta_json,
+            ul.ip,
+            ul.user_agent,
+            ul.created_at,
+            u.username,
+            u.display_name
+        FROM user_logs ul
+        LEFT JOIN users u ON u.id = ul.user_id
+        ORDER BY ul.created_at DESC, ul.id DESC
+        LIMIT 60
+    ');
+    $logs = array_map(static function (array $log): array {
+        $meta = [];
+        $decodedMeta = json_decode((string) ($log['meta_json'] ?? ''), true);
+        if (is_array($decodedMeta)) {
+            $meta = $decodedMeta;
+        }
+        return [
+            'id' => (int) $log['id'],
+            'user_id' => isset($log['user_id']) ? (int) $log['user_id'] : 0,
+            'username' => (string) ($log['username'] ?? ''),
+            'display_name' => (string) ($log['display_name'] ?? ''),
+            'group_name' => (string) ($log['group_name'] ?? ''),
+            'event_type' => (string) $log['event_type'],
+            'message' => (string) ($log['message'] ?? ''),
+            'meta' => $meta,
+            'ip' => (string) ($log['ip'] ?? ''),
+            'user_agent' => (string) ($log['user_agent'] ?? ''),
+            'created_at' => format_datetime((string) $log['created_at']),
+        ];
+    }, $logsStmt->fetchAll());
+
     $ticketsStmt = $pdo->query('
         SELECT
             t.*,
@@ -258,9 +368,12 @@ try {
         'stats' => $stats,
         'groups' => $groups,
         'memberships' => $memberships,
+        'security_settings' => security_policy_settings(),
         'users' => $users,
         'locations' => $locations,
+        'environment_reports' => array_values($environmentReportsByUser),
         'devices' => $devices,
+        'logs' => $logs,
         'announcement' => $announcementPayload,
         'invites' => $invites,
         'tickets' => $tickets,

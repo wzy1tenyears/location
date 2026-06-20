@@ -4,9 +4,20 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../private/lib/bootstrap.php';
 
-require_app_user_agent();
+$requestedVersion = (int) ($_GET['v'] ?? 0);
+$expires = (int) ($_GET['expires'] ?? 0);
+$token = (string) ($_GET['token'] ?? '');
+$expectedToken = hash_hmac('sha256', 'admin-apk|' . $requestedVersion . '|' . $expires, DB_PASS);
+$hasDownloadToken = $requestedVersion === ANDROID_ADMIN_VERSION_CODE
+    && $expires >= time()
+    && $token !== ''
+    && hash_equals($expectedToken, $token);
 
-if (!is_admin_logged_in()) {
+if (!$hasDownloadToken) {
+    require_app_user_agent();
+}
+
+if (!$hasDownloadToken && !is_admin_logged_in()) {
     json_response([
         'ok' => false,
         'message' => '请先登录后台。',

@@ -16,10 +16,13 @@ if (!is_admin_logged_in()) {
 $currentVersionCode = (int) ($_GET['version_code'] ?? 0);
 $apkFile = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . ANDROID_ADMIN_APK_FILENAME;
 $apkPath = '/api/admin_apk.php';
-$scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-$host = (string) ($_SERVER['HTTP_HOST'] ?? '');
-$apkUrl = ($host === '' ? $apkPath : $scheme . '://' . $host . $apkPath)
-    . '?v=' . rawurlencode((string) ANDROID_ADMIN_VERSION_CODE);
+$apkExpires = time() + 600;
+$apkTokenPayload = 'admin-apk|' . ANDROID_ADMIN_VERSION_CODE . '|' . $apkExpires;
+$apkToken = hash_hmac('sha256', $apkTokenPayload, DB_PASS);
+$apkUrl = public_url($apkPath)
+    . '?v=' . rawurlencode((string) ANDROID_ADMIN_VERSION_CODE)
+    . '&expires=' . rawurlencode((string) $apkExpires)
+    . '&token=' . rawurlencode($apkToken);
 $apkExists = is_file($apkFile);
 
 json_response([

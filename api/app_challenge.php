@@ -225,11 +225,9 @@ function app_challenge_is_verified(string $challengeId): bool
 
 function app_challenge_public_url(string $challengeId): string
 {
-    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-    $host = (string) ($_SERVER['HTTP_HOST'] ?? '');
     $path = '/api/app_challenge.php?id=' . rawurlencode($challengeId);
 
-    return $host === '' ? $path : $scheme . '://' . $host . $path;
+    return public_url($path);
 }
 
 function app_challenge_config(): array

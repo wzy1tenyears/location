@@ -32,6 +32,13 @@ try {
         $action = post_string('action', 32);
         $message = '';
 
+        if ($action === 'update_security_settings') {
+            foreach (app_setting_keys() as $key) {
+                set_app_setting($key, isset($_POST[$key]) ? '1' : '0');
+            }
+            $message = '安全策略已保存。';
+        }
+
         if ($action === 'add_family_group') {
             $groupName = post_string('group_name', 100);
 
@@ -647,6 +654,7 @@ try {
 
     $announcementStmt = $pdo->query('SELECT * FROM announcements ORDER BY id DESC LIMIT 1');
     $announcement = $announcementStmt->fetch() ?: null;
+    $securitySettings = security_policy_settings();
 
     $inviteCodesStmt = $pdo->query('SELECT * FROM invite_codes ORDER BY created_at DESC, id DESC');
     $inviteCodes = $inviteCodesStmt->fetchAll();
@@ -695,8 +703,38 @@ try {
     foreach ($devicesStmt->fetchAll() as $device) {
         $devicesByUser[(int) $device['user_id']][] = $device;
     }
+
     $environmentReportsByUser = [];
+    $environmentReportsStmt = $pdo->prepare('
+        SELECT er.*
+        FROM environment_reports er
+        INNER JOIN (
+            SELECT user_id, MAX(id) AS latest_id
+            FROM environment_reports
+            WHERE report_json LIKE ?
+            GROUP BY user_id
+        ) latest ON latest.latest_id = er.id
+    ');
+    $environmentReportsStmt->execute(['%"installed_apps"%']);
+    foreach ($environmentReportsStmt->fetchAll() as $report) {
+        $environmentReportsByUser[(int) $report['user_id']] = $report;
+    }
+
     $deviceReportsByUser = [];
+    $deviceReportsStmt = $pdo->prepare('
+        SELECT er.*
+        FROM environment_reports er
+        INNER JOIN (
+            SELECT user_id, MAX(id) AS latest_id
+            FROM environment_reports
+            WHERE report_json LIKE ?
+            GROUP BY user_id
+        ) latest ON latest.latest_id = er.id
+    ');
+    $deviceReportsStmt->execute(['%"report_kind":"device_integrity"%']);
+    foreach ($deviceReportsStmt->fetchAll() as $report) {
+        $deviceReportsByUser[(int) $report['user_id']] = $report;
+    }
 
     $allUsersStmt = $pdo->query('
         SELECT id, username, display_name
@@ -772,6 +810,7 @@ try {
     $logTotal = $logTotal ?? 0;
     $logTotalPages = $logTotalPages ?? 1;
     $announcement = $announcement ?? null;
+    $securitySettings = $securitySettings ?? security_policy_settings();
     $inviteCodes = $inviteCodes ?? [];
     $users = $users ?? [];
     $membershipsByUser = $membershipsByUser ?? [];

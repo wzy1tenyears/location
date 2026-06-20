@@ -87,7 +87,12 @@ try {
     $action = admin_manage_string($data, 'action', 64);
     $message = '';
 
-    if ($action === 'add_family_group') {
+    if ($action === 'update_security_settings') {
+        foreach (app_setting_keys() as $settingKey) {
+            set_app_setting($settingKey, !empty($data[$settingKey]) ? '1' : '0');
+        }
+        $message = '安全策略已保存。';
+    } elseif ($action === 'add_family_group') {
         $groupName = admin_manage_string($data, 'group_name', 100);
         if ($groupName === '') {
             throw new RuntimeException('家庭组名称不能为空。');

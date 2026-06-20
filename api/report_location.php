@@ -284,6 +284,27 @@ function validate_location_measurements(?float $accuracy, ?float $heading, ?floa
     }
 }
 
+function normalized_device_report_from_request(array $data, int $locationId, string $groupName): ?string
+{
+    $report = is_array($data['device_report'] ?? null) ? $data['device_report'] : null;
+    if (!$report) {
+        return null;
+    }
+
+    $report['report_kind'] = 'device_integrity';
+    $report['from_location_report'] = true;
+    $report['location_id'] = $locationId;
+    $report['group_name'] = $groupName;
+    $report['reported_at'] = date('Y-m-d H:i:s');
+
+    $json = json_encode($report, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if (!is_string($json) || strlen($json) > 200000) {
+        return null;
+    }
+
+    return $json;
+}
+
 function sanitized_location_meta(array $data): ?string
 {
     $meta = [
@@ -417,6 +438,8 @@ try {
         json_response(['ok' => false, 'message' => '当前家庭组未开启端到端加密。'], 422);
     }
 
+    $requestDeviceReport = is_array($data['device_report'] ?? null) ? $data['device_report'] : null;
+    enforce_device_report_policy($user, $requestDeviceReport);
     $locationId = (int) ($data['location_id'] ?? 0);
     $addressDiagnostics = sanitize_address_diagnostics(
         is_array($data['address_diagnostics'] ?? null) ? $data['address_diagnostics'] : null
@@ -587,6 +610,12 @@ try {
             $encryptedPayloadJson,
             $p2pKeyVersion,
         ]);
+
+        $deviceReportJson = normalized_device_report_from_request($data, $locationId, (string) $membership['group_name']);
+        if ($deviceReportJson !== null) {
+            $stmt = $pdo->prepare('INSERT INTO environment_reports (user_id, report_json) VALUES (?, ?)');
+            $stmt->execute([(int) $user['id'], $deviceReportJson]);
+        }
         touch_user_presence((int) $user['id'], (string) $membership['group_name']);
         record_user_log((int) $user['id'], (string) $membership['group_name'], 'location_report', '上报端到端加密位置', [
             'location_id' => $locationId,
@@ -693,6 +722,12 @@ try {
         $addressDiagnosticsJson,
         $addressMismatch,
     ]);
+
+    $deviceReportJson = normalized_device_report_from_request($data, $locationId, (string) $membership['group_name']);
+    if ($deviceReportJson !== null) {
+        $stmt = $pdo->prepare('INSERT INTO environment_reports (user_id, report_json) VALUES (?, ?)');
+        $stmt->execute([(int) $user['id'], $deviceReportJson]);
+    }
     touch_user_presence((int) $user['id'], (string) $membership['group_name']);
     record_user_log((int) $user['id'], (string) $membership['group_name'], 'location_report', '上报位置', [
         'location_id' => $locationId,

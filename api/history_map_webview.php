@@ -43,7 +43,7 @@ echo <<<HTML
         }
         const script = document.createElement('script');
         script.dataset.cfasync = 'false';
-        script.src = `https://webapi.amap.com/maps?v=2.0&key=\${encodeURIComponent(AMAP_KEY)}&plugin=AMap.Scale,AMap.ToolBar`;
+        script.src = `\${serviceHost}/maps?v=2.0&key=\${encodeURIComponent(AMAP_KEY)}&plugin=AMap.Scale,AMap.ToolBar`;
         script.onload = () => resolve(window.AMap);
         script.onerror = () => reject(new Error('高德地图加载失败'));
         document.head.appendChild(script);

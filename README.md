@@ -61,11 +61,11 @@ https://example.com/
 ## 安全说明
 
 - 根路径不提供用户网页，用户端通过原生 App 使用。
-- API 默认限制 `loc-app` User-Agent，`api/app_challenge.php` 作为浏览器 Turnstile 质询页例外开放。
+- API 默认限制 `loc-app` User-Agent，`api/app_challenge.php` 作为 App 前台 WebView Turnstile 质询页例外开放。
 - 登录失败多次会临时锁定账号。
 - 未同意用户协议、隐私条约和跨境加密传输协议的账号请求会被拒绝。
 - 位置上报会做基础字段校验、地址一致性记录和异常日志。
-- 原生 App 登录/注册可通过 `api/app_challenge.php` 桥接 Cloudflare Turnstile。
+- 原生 App 登录/注册可通过 `api/app_challenge.php` 桥接 Cloudflare Turnstile；App API 请求只处理 JSON，地图/逆地理和 Turnstile 质询才在前台按需加载 WebView。
 
 ## 免责声明
 

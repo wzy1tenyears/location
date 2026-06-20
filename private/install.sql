@@ -14,11 +14,22 @@ CREATE TABLE IF NOT EXISTS users (
     user_agreement_accepted_at DATETIME NULL,
     privacy_policy_accepted_at DATETIME NULL,
     cross_border_transfer_accepted_at DATETIME NULL,
+    environment_data_consent_at DATETIME NULL,
     debug_mode TINYINT(1) NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_users_group_role (group_name, role)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS environment_reports (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNSIGNED NOT NULL,
+    report_json LONGTEXT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_environment_reports_user_created (user_id, created_at),
+    CONSTRAINT fk_environment_reports_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS user_devices (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     user_id INT UNSIGNED NOT NULL,
@@ -31,6 +42,7 @@ CREATE TABLE IF NOT EXISTS user_devices (
     INDEX idx_user_devices_user_seen (user_id, last_seen_at),
     CONSTRAINT fk_user_devices_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS support_tickets (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     user_id INT UNSIGNED NOT NULL,
@@ -43,6 +55,7 @@ CREATE TABLE IF NOT EXISTS support_tickets (
     INDEX idx_support_tickets_status_updated (status, updated_at),
     CONSTRAINT fk_support_tickets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS support_ticket_messages (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     ticket_id BIGINT UNSIGNED NOT NULL,
@@ -52,6 +65,7 @@ CREATE TABLE IF NOT EXISTS support_ticket_messages (
     INDEX idx_ticket_messages_ticket_created (ticket_id, created_at),
     CONSTRAINT fk_ticket_messages_ticket FOREIGN KEY (ticket_id) REFERENCES support_tickets(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS family_groups (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     group_name VARCHAR(100) NOT NULL UNIQUE,
@@ -64,6 +78,7 @@ CREATE TABLE IF NOT EXISTS family_groups (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS user_groups (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     user_id INT UNSIGNED NOT NULL,
@@ -75,6 +90,7 @@ CREATE TABLE IF NOT EXISTS user_groups (
     INDEX idx_user_groups_group_role (group_name, role),
     CONSTRAINT fk_user_groups_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS locations (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     user_id INT UNSIGNED NOT NULL,
@@ -98,6 +114,7 @@ CREATE TABLE IF NOT EXISTS locations (
     INDEX idx_locations_user_created (user_id, created_at),
     CONSTRAINT fk_locations_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS latest_group_locations (
     user_id INT UNSIGNED NOT NULL,
     group_name VARCHAR(100) NOT NULL,
@@ -122,6 +139,7 @@ CREATE TABLE IF NOT EXISTS latest_group_locations (
     INDEX idx_latest_group_role (group_name, role),
     INDEX idx_latest_updated (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS p2p_user_keys (
     user_id INT UNSIGNED NOT NULL PRIMARY KEY,
     public_key_jwk LONGTEXT NOT NULL,
@@ -129,6 +147,7 @@ CREATE TABLE IF NOT EXISTS p2p_user_keys (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_p2p_user_keys_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS p2p_group_members (
     group_name VARCHAR(100) NOT NULL,
     user_id INT UNSIGNED NOT NULL,
@@ -141,6 +160,7 @@ CREATE TABLE IF NOT EXISTS p2p_group_members (
     INDEX idx_p2p_group_members_user (user_id),
     CONSTRAINT fk_p2p_group_members_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS announcements (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     title VARCHAR(120) NOT NULL DEFAULT '',
@@ -151,6 +171,7 @@ CREATE TABLE IF NOT EXISTS announcements (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_announcements_active_updated (is_active, updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS invite_codes (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     code VARCHAR(255) NOT NULL UNIQUE,
@@ -165,6 +186,7 @@ CREATE TABLE IF NOT EXISTS invite_codes (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_invite_codes_active (is_active, invite_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS user_presence (
     user_id INT UNSIGNED NOT NULL PRIMARY KEY,
     last_seen_at DATETIME NOT NULL,
@@ -174,6 +196,7 @@ CREATE TABLE IF NOT EXISTS user_presence (
     CONSTRAINT fk_user_presence_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     INDEX idx_user_presence_last_seen (last_seen_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS user_logs (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     user_id INT UNSIGNED NULL,
@@ -190,11 +213,13 @@ CREATE TABLE IF NOT EXISTS user_logs (
     INDEX idx_user_logs_type_created (event_type, created_at),
     CONSTRAINT fk_user_logs_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS app_settings (
     setting_key VARCHAR(80) NOT NULL PRIMARY KEY,
     setting_value TEXT NOT NULL,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS admin_login_failures (
     ip VARCHAR(45) NOT NULL PRIMARY KEY,
     failed_count INT UNSIGNED NOT NULL DEFAULT 0,
@@ -202,6 +227,7 @@ CREATE TABLE IF NOT EXISTS admin_login_failures (
     last_failed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS group_join_failures (
     user_id INT UNSIGNED NOT NULL,
     ip VARCHAR(45) NOT NULL,
@@ -213,6 +239,7 @@ CREATE TABLE IF NOT EXISTS group_join_failures (
     INDEX idx_group_join_failures_ip (ip, last_failed_at),
     CONSTRAINT fk_group_join_failures_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS api_rate_limits (
     bucket VARCHAR(80) NOT NULL,
     identity_hash CHAR(64) NOT NULL,
@@ -222,6 +249,7 @@ CREATE TABLE IF NOT EXISTS api_rate_limits (
     PRIMARY KEY (bucket, identity_hash),
     INDEX idx_api_rate_limits_updated (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS app_challenges (
     id CHAR(32) NOT NULL PRIMARY KEY,
     secret_hash CHAR(64) NOT NULL,

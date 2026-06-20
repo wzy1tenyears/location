@@ -9,10 +9,7 @@ require_app_user_agent();
 $currentVersionCode = (int) ($_GET['version_code'] ?? 0);
 $apkPath = '/' . ltrim(ANDROID_APK_FILENAME, '/');
 $apkFile = dirname(__DIR__) . DIRECTORY_SEPARATOR . ANDROID_APK_FILENAME;
-$scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-$host = (string) ($_SERVER['HTTP_HOST'] ?? '');
-$apkUrl = ($host === '' ? $apkPath : $scheme . '://' . $host . $apkPath)
-    . '?v=' . rawurlencode((string) ANDROID_VERSION_CODE);
+$apkUrl = public_url($apkPath) . '?v=' . rawurlencode((string) ANDROID_VERSION_CODE);
 $apkExists = is_file($apkFile);
 
 json_response([

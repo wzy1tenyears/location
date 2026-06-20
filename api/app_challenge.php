@@ -107,9 +107,14 @@ function verify_browser_challenge(string $challengeId, string $turnstileToken): 
         return '请先完成 Cloudflare 质询。';
     }
 
+    $deviceFingerprint = browser_challenge_device_fingerprint();
+    if ($deviceFingerprint === '') {
+        return '设备 Cookie 不一致，请回到 App 重新发起。';
+    }
+
     $pdo = db();
-    $stmt = $pdo->prepare('SELECT id, expires_at, consumed_at FROM app_challenges WHERE id = ? LIMIT 1');
-    $stmt->execute([$challengeId]);
+    $stmt = $pdo->prepare('SELECT id, expires_at, consumed_at FROM app_challenges WHERE id = ? AND device_fingerprint = ? LIMIT 1');
+    $stmt->execute([$challengeId, $deviceFingerprint]);
     $challenge = $stmt->fetch();
     if (!$challenge) {
         return '质询不存在，请回到 App 重新发起。';
@@ -125,10 +130,17 @@ function verify_browser_challenge(string $challengeId, string $turnstileToken): 
         return 'Cloudflare 验证失败，请重试。';
     }
 
-    $stmt = $pdo->prepare('UPDATE app_challenges SET verified_at = NOW() WHERE id = ? AND verified_at IS NULL');
-    $stmt->execute([$challengeId]);
+    $stmt = $pdo->prepare('UPDATE app_challenges SET verified_at = NOW() WHERE id = ? AND device_fingerprint = ? AND verified_at IS NULL');
+    $stmt->execute([$challengeId, $deviceFingerprint]);
 
     return '验证已完成，请回到 App 继续登录。';
+}
+
+function browser_challenge_device_fingerprint(): string
+{
+    $cookieName = defined('APP_DEVICE_COOKIE_NAME') ? APP_DEVICE_COOKIE_NAME : 'loc_device';
+    $deviceCookie = (string) ($_COOKIE[$cookieName] ?? '');
+    return preg_match('/^[a-f0-9]{64}$/i', $deviceCookie) ? strtolower($deviceCookie) : '';
 }
 
 function verify_turnstile_site_token(string $token): bool

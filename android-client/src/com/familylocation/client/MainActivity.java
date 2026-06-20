@@ -3700,7 +3700,7 @@ public class MainActivity extends Activity {
                 String packageName = packageInfo.packageName == null ? "" : packageInfo.packageName.toLowerCase(java.util.Locale.US);
                 for (String needle : needles) {
                     if (packageName.contains(needle)) {
-                        matches.put(packageInfo.packageName);
+                        matches.put(needle);
                         break;
                     }
                 }
@@ -3712,27 +3712,7 @@ public class MainActivity extends Activity {
     }
 
     private JSONArray installedAppsSummary() {
-        JSONArray apps = new JSONArray();
-        try {
-            List<PackageInfo> packages = getPackageManager().getInstalledPackages(0);
-            int limit = Math.min(packages.size(), 300);
-            for (int index = 0; index < limit; index += 1) {
-                PackageInfo packageInfo = packages.get(index);
-                JSONObject app = new JSONObject();
-                ApplicationInfo applicationInfo = packageInfo.applicationInfo;
-                app.put("package_name", packageInfo.packageName);
-                app.put("version_name", packageInfo.versionName == null ? "" : packageInfo.versionName);
-                app.put("system", applicationInfo != null && (applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0);
-                if (applicationInfo != null) {
-                    CharSequence label = getPackageManager().getApplicationLabel(applicationInfo);
-                    app.put("label", label == null ? "" : label.toString());
-                }
-                apps.put(app);
-            }
-        } catch (Exception ignored) {
-            // Keep best-effort list.
-        }
-        return apps;
+        return new JSONArray();
     }
 
     private void addMemoryAndStorage(JSONObject report) {

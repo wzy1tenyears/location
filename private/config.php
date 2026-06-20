@@ -3,8 +3,8 @@
 declare(strict_types=1);
 
 const APP_NAME = '位置';
-const ANDROID_VERSION_CODE = 65;
-const ANDROID_VERSION_NAME = '2.0.32';
+const ANDROID_VERSION_CODE = 66;
+const ANDROID_VERSION_NAME = '2.0.33';
 const ANDROID_APK_FILENAME = 'location-release.apk';
 const ANDROID_ADMIN_VERSION_CODE = 51;
 const ANDROID_ADMIN_VERSION_NAME = '2.0.18';

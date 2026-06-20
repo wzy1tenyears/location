@@ -88,8 +88,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 65;
-    private static final String APP_VERSION_NAME = "2.0.32";
+    private static final int APP_VERSION_CODE = 66;
+    private static final String APP_VERSION_NAME = "2.0.33";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -100,6 +100,7 @@ public class MainActivity extends Activity {
     private static final String KEY_REPORT_INTERVAL_SECONDS = "report_interval_seconds";
     private static final String KEY_THEME_MODE = "theme_mode";
     private static final String KEY_PENDING_UPDATE_INSTALL_ID = "pending_update_install_id";
+    private static final String KEY_BACKGROUND_LOCATION_PROMPT_SHOWN = "background_location_prompt_shown";
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
     private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String KEY_SEEN_ANNOUNCEMENT_PREFIX = "announcement_seen_";
@@ -133,6 +134,9 @@ public class MainActivity extends Activity {
     private volatile boolean activityForeground;
     private boolean batteryOptimizationPromptShown;
     private boolean exactAlarmPromptShown;
+    private boolean notificationPermissionRequestInFlight;
+    private boolean locationPermissionRequestInFlight;
+    private boolean backgroundLocationPermissionRequestInFlight;
     private volatile int challengeGeneration;
     private volatile boolean challengeCancelled;
     private String loginDraftUsername = "";
@@ -3790,8 +3794,7 @@ public class MainActivity extends Activity {
     }
 
     private void requestStartupPermissions() {
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, REQUEST_NOTIFICATION);
+        if (requestNotificationPermissionIfNeeded()) {
             return;
         }
         if (requestForegroundLocationPermissionIfNeeded()) {
@@ -3804,10 +3807,26 @@ public class MainActivity extends Activity {
         requestExactAlarmPermission();
     }
 
+    private boolean requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            return false;
+        }
+        if (notificationPermissionRequestInFlight) {
+            return true;
+        }
+        notificationPermissionRequestInFlight = true;
+        requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, REQUEST_NOTIFICATION);
+        return true;
+    }
+
     private boolean requestForegroundLocationPermissionIfNeeded() {
         if (hasFineLocationPermission()) {
             return false;
         }
+        if (locationPermissionRequestInFlight) {
+            return true;
+        }
+        locationPermissionRequestInFlight = true;
         requestPermissions(new String[] { Manifest.permission.ACCESS_FINE_LOCATION }, REQUEST_LOCATION);
         return true;
     }
@@ -3819,10 +3838,18 @@ public class MainActivity extends Activity {
         if (!hasFineLocationPermission()) {
             return false;
         }
+        if (backgroundLocationPermissionRequestInFlight) {
+            return true;
+        }
         if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q) {
+            backgroundLocationPermissionRequestInFlight = true;
             requestPermissions(new String[] { Manifest.permission.ACCESS_BACKGROUND_LOCATION }, REQUEST_BACKGROUND_LOCATION);
             return true;
         }
+        if (prefs().getBoolean(KEY_BACKGROUND_LOCATION_PROMPT_SHOWN, false)) {
+            return false;
+        }
+        prefs().edit().putBoolean(KEY_BACKGROUND_LOCATION_PROMPT_SHOWN, true).apply();
         showPopupDialog(
             "\u5141\u8bb8\u540e\u53f0\u5b9a\u4f4d",
             new String[][] {
@@ -3879,10 +3906,13 @@ public class MainActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQUEST_NOTIFICATION) {
+            notificationPermissionRequestInFlight = false;
             requestStartupPermissions();
         } else if (requestCode == REQUEST_LOCATION) {
+            locationPermissionRequestInFlight = false;
             requestStartupPermissions();
         } else if (requestCode == REQUEST_BACKGROUND_LOCATION) {
+            backgroundLocationPermissionRequestInFlight = false;
             requestBatteryOptimizationPermission();
             requestExactAlarmPermission();
         }

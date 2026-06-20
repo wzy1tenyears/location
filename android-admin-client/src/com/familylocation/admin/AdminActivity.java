@@ -2316,6 +2316,10 @@ public class AdminActivity extends Activity {
     }
 
     private void setStatus(String message) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post(() -> setStatus(message));
+            return;
+        }
         if (statusView != null) {
             String value = message == null ? "" : message.trim();
             statusView.setText(value);

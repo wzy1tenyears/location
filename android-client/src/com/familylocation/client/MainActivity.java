@@ -41,14 +41,12 @@ import android.text.method.LinkMovementMethod;
 import android.text.style.ClickableSpan;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.DisplayCutout;
 import android.view.WindowInsets;
 import android.view.animation.AccelerateDecelerateInterpolator;
-import android.view.animation.AlphaAnimation;
-import android.view.animation.AnimationSet;
-import android.view.animation.TranslateAnimation;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.RenderProcessGoneDetail;
@@ -101,7 +99,6 @@ public class MainActivity extends Activity {
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
     private static final String KEY_GROUP_NAME = "group_name";
-    private static final String KEY_GUARDIAN_CONTINUOUS_REPORTING = "guardian_continuous_reporting";
     private static final String KEY_GROUP_SESSIONS = "group_sessions_json";
     private static final String KEY_CROSS_GROUP_SYNC = "cross_group_sync_json";
     private static final String KEY_REPORT_INTERVAL_SECONDS = "report_interval_seconds";
@@ -741,7 +738,7 @@ public class MainActivity extends Activity {
 
     private void showHome() {
         currentTab = TAB_POSITION;
-        LinearLayout card = screen("位置");
+        LinearLayout card = screenWithAction("位置", announcementIconButton());
         TextView userLine = compactInfoPanel(compactUserDisplayName(currentUser), false);
         reportButton = null;
         refreshButton = null;
@@ -1017,6 +1014,7 @@ public class MainActivity extends Activity {
             shownWindow.setAttributes(params);
             int width = Math.min(getResources().getDisplayMetrics().widthPixels - dp(44), dp(520));
             shownWindow.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+            animateDialog(shownWindow.getDecorView());
         }
     }
     private WebView locationMapWebView(JSONArray records) {
@@ -2080,7 +2078,6 @@ public class MainActivity extends Activity {
         environmentConsent.setText("同意上传环境诊断数据");
         environmentConsent.setTextColor(colorText());
         environmentConsent.setChecked(currentUser != null && currentUser.optBoolean("environment_data_consent", false));
-        boolean guardian = "guardian".equals(currentUserRole());
         Button uploadEnvironment = secondaryButton("立即上报环境信息");
         uploadEnvironment.setEnabled(environmentConsent.isChecked());
         environmentConsent.setOnCheckedChangeListener((button, checked) -> {
@@ -2094,8 +2091,6 @@ public class MainActivity extends Activity {
             }
             uploadEnvironmentReport(true, true, true);
         });
-        Button continuousSettings = secondaryButton("持续上报设置");
-        continuousSettings.setOnClickListener(view -> showContinuousReportSettings());
         Button changePassword = secondaryButton("修改密码");
         changePassword.setOnClickListener(view -> showPasswordChange());
         Button logout = secondaryButton("退出登录");
@@ -2112,16 +2107,12 @@ public class MainActivity extends Activity {
         card.addView(sectionTitle("隐私与上报"), blockParams(8));
         card.addView(environmentConsent, blockParams(8));
         card.addView(uploadEnvironment, blockParams(12));
-        if (guardian) {
-            card.addView(sectionTitle("定位上报"), blockParams(8));
-            card.addView(continuousSettings, blockParams(14));
-        }
         card.addView(sectionTitle("账号安全"), blockParams(8));
         card.addView(compactInfoPanel("验证当前密码后修改，修改成功后继续保持当前登录状态。", false), blockParams(8));
         card.addView(changePassword, blockParams(14));
         card.addView(logout, blockParams(0));
         setScreen(card, false);
-        setStatus("当前上报间隔：" + prefs().getInt(KEY_REPORT_INTERVAL_SECONDS, 300) + " 秒");
+        setStatus("");
     }
 
     private void showThemePicker() {
@@ -2195,34 +2186,13 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void showContinuousReportSettings() {
-        Dialog dialog = choiceDialog("持续上报设置");
-        LinearLayout body = choiceDialogBody(dialog);
-        String groupName = currentGroupName();
-        TextView help = compactInfoPanel("开启后，监护端会按当前上报间隔持续上报所选家庭组的位置。", false);
-        CheckBox continuous = new CheckBox(this);
-        continuous.setText("持续上报当前位置");
-        continuous.setTextColor(colorText());
-        continuous.setChecked(guardianContinuousEnabled(groupName));
-        Button save = primaryButton("保存设置");
-        save.setOnClickListener(view -> {
-            saveGuardianContinuous(continuous.isChecked());
-            dialog.dismiss();
-        });
-        body.addView(help, blockParams(12));
-        body.addView(continuous, blockParams(12));
-        body.addView(save, blockParams(0));
-        showChoiceDialog(dialog, body);
-    }
-
     private void saveGuardianContinuous(boolean enabled) {
         if (!"guardian".equals(currentUserRole())) {
             setStatus("只有监护端可以开启持续上报。");
             return;
         }
         String groupName = selectedGroupName.isEmpty() && currentUser != null ? currentUser.optString("group_name", "") : selectedGroupName;
-        SharedPreferences.Editor editor = prefs().edit()
-            .putBoolean(KEY_GUARDIAN_CONTINUOUS_REPORTING, enabled);
+        SharedPreferences.Editor editor = prefs().edit();
         if (!groupName.isEmpty()) {
             editor.putBoolean("guardian_continuous_reporting_" + groupName, enabled);
         }
@@ -2372,35 +2342,35 @@ public class MainActivity extends Activity {
     private void appendHomeActionPanel() {
         reportButton = primaryButton("上报当前位置");
         refreshButton = secondaryButton("刷新位置");
-        Button announcementButton = secondaryButton("公告");
-        Button crossGroupSyncButton = secondaryButton("跨组同步");
+        Button crossGroupSyncButton = secondaryButton("同步上报");
         Button continuousReportButton = secondaryButton(continuousReportButtonText());
 
         reportButton.setTag("dynamic");
         refreshButton.setTag("dynamic");
-        announcementButton.setTag("dynamic");
         crossGroupSyncButton.setTag("dynamic");
         continuousReportButton.setTag("dynamic");
 
         reportButton.setOnClickListener(view -> reportCurrentLocation());
         refreshButton.setOnClickListener(view -> refreshLocations());
-        announcementButton.setOnClickListener(view -> showLatestAnnouncementPopup());
         crossGroupSyncButton.setOnClickListener(view -> showCrossGroupSync());
         continuousReportButton.setOnClickListener(view -> toggleGuardianContinuousReport());
 
         content.addView(reportButton, blockParams(8));
-        View refreshRow = buttonRow(refreshButton, announcementButton);
-        refreshRow.setTag("dynamic");
-        content.addView(refreshRow, blockParams(8));
         boolean guardian = "guardian".equals(currentUserRole());
         if (guardian && userGroupCount() > 1) {
+            content.addView(refreshButton, blockParams(8));
             View row = buttonRow(continuousReportButton, crossGroupSyncButton);
             row.setTag("dynamic");
             content.addView(row, blockParams(10));
         } else if (guardian) {
+            content.addView(refreshButton, blockParams(8));
             content.addView(continuousReportButton, blockParams(10));
         } else if (userGroupCount() > 1) {
-            content.addView(crossGroupSyncButton, blockParams(10));
+            View row = buttonRow(refreshButton, crossGroupSyncButton);
+            row.setTag("dynamic");
+            content.addView(row, blockParams(10));
+        } else {
+            content.addView(refreshButton, blockParams(10));
         }
     }
 
@@ -4007,7 +3977,7 @@ public class MainActivity extends Activity {
 
     private boolean guardianContinuousEnabled(String groupName) {
         if (groupName == null || groupName.isEmpty()) {
-            return prefs().getBoolean(KEY_GUARDIAN_CONTINUOUS_REPORTING, false);
+            return false;
         }
         return prefs().getBoolean("guardian_continuous_reporting_" + groupName, false);
     }
@@ -4619,20 +4589,32 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout screen(String titleText) {
+        return screenWithAction(titleText, null);
+    }
+
+    private LinearLayout screenWithAction(String titleText, View actionView) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.setPadding(dp(14), dp(14), dp(14), dp(14));
         card.setBackground(cardBackground());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             card.setElevation(dp(4));
         }
 
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+
         TextView title = new TextView(this);
         title.setText(titleText);
-        title.setTextSize(22);
+        title.setTextSize(20);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextColor(colorText());
-        card.addView(title, blockParams(8));
+        header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        if (actionView != null) {
+            header.addView(actionView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+        card.addView(header, blockParams(8));
 
         statusView = body("");
         statusView.setPadding(dp(12), dp(8), dp(12), dp(8));
@@ -4640,6 +4622,17 @@ public class MainActivity extends Activity {
         statusView.setVisibility(View.GONE);
         card.addView(statusView, blockParams(16));
         return card;
+    }
+
+    private Button announcementIconButton() {
+        Button button = secondaryButton("🔔");
+        button.setContentDescription("公告");
+        button.setTextSize(15);
+        button.setMinWidth(dp(40));
+        button.setMinHeight(dp(34));
+        button.setPadding(dp(8), 0, dp(8), 0);
+        button.setOnClickListener(view -> showLatestAnnouncementPopup());
+        return button;
     }
 
     private void setScreen(LinearLayout card) {
@@ -4711,24 +4704,74 @@ public class MainActivity extends Activity {
         if (view == null) {
             return;
         }
-        AnimationSet animationSet = new AnimationSet(true);
-        animationSet.setInterpolator(new AccelerateDecelerateInterpolator());
-        animationSet.setDuration(180);
-        animationSet.addAnimation(new AlphaAnimation(0.88f, 1f));
-        animationSet.addAnimation(new TranslateAnimation(0f, 0f, center ? dp(10) : dp(14), 0f));
-        view.startAnimation(animationSet);
+        view.setAlpha(0.9f);
+        view.setTranslationY(center ? dp(8) : dp(12));
+        view.setScaleX(center ? 0.985f : 1f);
+        view.setScaleY(center ? 0.985f : 1f);
+        view.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(190)
+            .setInterpolator(new AccelerateDecelerateInterpolator())
+            .start();
+    }
+
+    private void animateDialog(View view) {
+        if (view == null) {
+            return;
+        }
+        view.setAlpha(0f);
+        view.setTranslationY(dp(10));
+        view.setScaleX(0.97f);
+        view.setScaleY(0.97f);
+        view.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(170)
+            .setInterpolator(new AccelerateDecelerateInterpolator())
+            .start();
+    }
+
+    private void animateTap(View view) {
+        if (view == null) {
+            return;
+        }
+        view.animate()
+            .scaleX(0.97f)
+            .scaleY(0.97f)
+            .setDuration(45)
+            .withEndAction(() -> view.animate().scaleX(1f).scaleY(1f).setDuration(95).start())
+            .start();
+    }
+
+    private void decorateButton(Button button) {
+        button.setOnTouchListener((view, event) -> {
+            if (!view.isEnabled()) {
+                return false;
+            }
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                view.animate().scaleX(0.985f).scaleY(0.985f).setDuration(70).start();
+            } else if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
+                view.animate().scaleX(1f).scaleY(1f).setDuration(110).start();
+            }
+            return false;
+        });
     }
 
     private LinearLayout bottomNavigation() {
         LinearLayout outer = new LinearLayout(this);
         outer.setOrientation(LinearLayout.VERTICAL);
-        outer.setPadding(dp(14), dp(6), dp(14), dp(10));
+        outer.setPadding(dp(12), dp(5), dp(12), dp(8));
         outer.setBackgroundColor(colorSurface());
 
         LinearLayout nav = new LinearLayout(this);
         nav.setOrientation(LinearLayout.HORIZONTAL);
         nav.setGravity(Gravity.CENTER);
-        nav.setPadding(dp(6), dp(6), dp(6), dp(6));
+        nav.setPadding(dp(5), dp(5), dp(5), dp(5));
         nav.setBackground(bottomNavBackground());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             nav.setElevation(dp(12));
@@ -4750,28 +4793,29 @@ public class MainActivity extends Activity {
         LinearLayout item = new LinearLayout(this);
         item.setOrientation(LinearLayout.VERTICAL);
         item.setGravity(Gravity.CENTER);
-        item.setMinimumHeight(dp(64));
-        item.setPadding(dp(4), dp(6), dp(4), dp(6));
+        item.setMinimumHeight(dp(56));
+        item.setPadding(dp(3), dp(5), dp(3), dp(5));
         boolean active = currentTab == tab;
         item.setBackground(active ? navActiveBackground() : transparentButtonBackground());
         item.setClickable(true);
         item.setFocusable(true);
         item.setOnClickListener(view -> {
             if (action != null) {
-                action.run();
+                animateTap(view);
+                view.postDelayed(action, 45);
             }
         });
 
         TextView iconView = new TextView(this);
         iconView.setText(icon);
-        iconView.setTextSize(active ? 26 : 24);
+        iconView.setTextSize(active ? 23 : 21);
         iconView.setGravity(Gravity.CENTER);
         iconView.setTypeface(Typeface.DEFAULT_BOLD);
         iconView.setTextColor(active ? Color.rgb(0, 218, 194) : colorMuted());
 
         TextView labelView = new TextView(this);
         labelView.setText(label);
-        labelView.setTextSize(12);
+        labelView.setTextSize(11);
         labelView.setGravity(Gravity.CENTER);
         labelView.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
         labelView.setTextColor(active ? Color.rgb(0, 218, 194) : colorMuted());
@@ -4861,6 +4905,7 @@ public class MainActivity extends Activity {
         if (shownWindow != null) {
             int width = Math.min(getResources().getDisplayMetrics().widthPixels - dp(44), dp(560));
             shownWindow.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+            animateDialog(shownWindow.getDecorView());
         }
     }
 
@@ -4891,7 +4936,7 @@ public class MainActivity extends Activity {
     private TextView sectionTitle(String text) {
         TextView view = new TextView(this);
         view.setText(text == null ? "" : text);
-        view.setTextSize(17);
+        view.setTextSize(16);
         view.setTypeface(Typeface.DEFAULT_BOLD);
         view.setTextColor(colorText());
         view.setPadding(0, dp(4), 0, 0);
@@ -4906,7 +4951,7 @@ public class MainActivity extends Activity {
     private TextView body(String text) {
         TextView view = new TextView(this);
         view.setText(text == null ? "" : text);
-        view.setTextSize(15);
+        view.setTextSize(14);
         view.setLineSpacing(0, 1.15f);
         view.setTextColor(colorMuted());
         return view;
@@ -4915,7 +4960,7 @@ public class MainActivity extends Activity {
     private TextView infoPanel(String text, boolean dynamic) {
         TextView view = body(text);
         view.setTextColor(colorText());
-        view.setPadding(dp(14), dp(12), dp(14), dp(12));
+        view.setPadding(dp(12), dp(10), dp(12), dp(10));
         view.setBackground(panelBackground());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             view.setElevation(dp(1));
@@ -4930,7 +4975,7 @@ public class MainActivity extends Activity {
         EditText view = new EditText(this);
         view.setHint(hint);
         view.setSingleLine(true);
-        view.setTextSize(16);
+        view.setTextSize(15);
         view.setTextColor(colorText());
         view.setHintTextColor(colorMuted());
         return view;
@@ -4947,8 +4992,8 @@ public class MainActivity extends Activity {
 
     private TextView compactInfoPanel(String text, boolean dynamic) {
         TextView view = infoPanel(text, dynamic);
-        view.setTextSize(14);
-        view.setPadding(dp(12), dp(10), dp(12), dp(10));
+        view.setTextSize(13);
+        view.setPadding(dp(11), dp(9), dp(11), dp(9));
         return view;
     }
 
@@ -4973,9 +5018,11 @@ public class MainActivity extends Activity {
         button.setText(text);
         button.setTextColor(Color.WHITE);
         button.setAllCaps(false);
-        button.setMinHeight(dp(42));
-        button.setPadding(dp(12), 0, dp(12), 0);
+        button.setTextSize(14);
+        button.setMinHeight(dp(38));
+        button.setPadding(dp(10), 0, dp(10), 0);
         button.setBackground(buttonBackground(Color.rgb(13, 95, 84)));
+        decorateButton(button);
         return button;
     }
 
@@ -4984,9 +5031,11 @@ public class MainActivity extends Activity {
         button.setText(text);
         button.setTextColor(colorText());
         button.setAllCaps(false);
-        button.setMinHeight(dp(42));
-        button.setPadding(dp(12), 0, dp(12), 0);
+        button.setTextSize(14);
+        button.setMinHeight(dp(38));
+        button.setPadding(dp(10), 0, dp(10), 0);
         button.setBackground(buttonBackground(isDarkMode() ? Color.rgb(37, 50, 48) : Color.rgb(228, 237, 234)));
+        decorateButton(button);
         return button;
     }
 

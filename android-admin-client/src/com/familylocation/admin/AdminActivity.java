@@ -26,15 +26,13 @@ import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.DisplayCutout;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.animation.AccelerateDecelerateInterpolator;
-import android.view.animation.AlphaAnimation;
-import android.view.animation.AnimationSet;
-import android.view.animation.TranslateAnimation;
 import android.webkit.CookieManager;
 import android.webkit.WebResourceError;
 import android.webkit.RenderProcessGoneDetail;
@@ -1670,13 +1668,13 @@ public class AdminActivity extends Activity {
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(18), dp(18), dp(18), dp(14));
+        card.setPadding(dp(15), dp(15), dp(15), dp(12));
         card.setBackground(cardBackground());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             card.setElevation(dp(8));
         }
         TextView title = sectionTitle(titleText);
-        title.setTextSize(22);
+        title.setTextSize(19);
         card.addView(title, blockParams(12));
         dialog.setContentView(card);
         return card;
@@ -1713,6 +1711,7 @@ public class AdminActivity extends Activity {
         int screenWidth = getResources().getDisplayMetrics().widthPixels;
         int dialogWidth = Math.min(screenWidth - dp(32), dp(520));
         window.setLayout(dialogWidth > 0 ? dialogWidth : ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        animateDialog(window.getDecorView());
     }
 
     private void appendIfPresent(StringBuilder builder, String label, String value) {
@@ -2006,14 +2005,14 @@ public class AdminActivity extends Activity {
     private LinearLayout screen(String titleText) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(22), dp(22), dp(22), dp(22));
+        card.setPadding(dp(15), dp(15), dp(15), dp(15));
         card.setBackground(cardBackground());
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
             card.setElevation(dp(4));
         }
         TextView title = new TextView(this);
         title.setText(titleText);
-        title.setTextSize(26);
+        title.setTextSize(20);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextColor(colorText());
         card.addView(title, blockParams(8));
@@ -2096,24 +2095,27 @@ public class AdminActivity extends Activity {
         LinearLayout item = new LinearLayout(this);
         item.setOrientation(LinearLayout.VERTICAL);
         item.setGravity(Gravity.CENTER);
-        item.setMinimumHeight(dp(58));
+        item.setMinimumHeight(dp(54));
         item.setPadding(dp(3), dp(5), dp(3), dp(5));
         boolean active = currentAdminTab == tab;
         item.setBackground(active ? navActiveBackground() : transparentButtonBackground());
         item.setClickable(true);
         item.setFocusable(true);
-        item.setOnClickListener(view -> switchAdminTab(tab));
+        item.setOnClickListener(view -> {
+            animateTap(view);
+            view.postDelayed(() -> switchAdminTab(tab), 45);
+        });
 
         TextView iconView = new TextView(this);
         iconView.setText(icon);
-        iconView.setTextSize(active ? 22 : 20);
+        iconView.setTextSize(active ? 21 : 19);
         iconView.setGravity(Gravity.CENTER);
         iconView.setTypeface(Typeface.DEFAULT_BOLD);
         iconView.setTextColor(active ? Color.rgb(230, 76, 76) : colorMuted());
 
         TextView labelView = new TextView(this);
         labelView.setText(label);
-        labelView.setTextSize(11);
+        labelView.setTextSize(10);
         labelView.setGravity(Gravity.CENTER);
         labelView.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
         labelView.setTextColor(active ? Color.rgb(230, 76, 76) : colorMuted());
@@ -2149,12 +2151,62 @@ public class AdminActivity extends Activity {
         if (view == null) {
             return;
         }
-        AnimationSet animationSet = new AnimationSet(true);
-        animationSet.setInterpolator(new AccelerateDecelerateInterpolator());
-        animationSet.setDuration(180);
-        animationSet.addAnimation(new AlphaAnimation(0.88f, 1f));
-        animationSet.addAnimation(new TranslateAnimation(0f, 0f, center ? dp(10) : dp(14), 0f));
-        view.startAnimation(animationSet);
+        view.setAlpha(0.9f);
+        view.setTranslationY(center ? dp(8) : dp(12));
+        view.setScaleX(center ? 0.985f : 1f);
+        view.setScaleY(center ? 0.985f : 1f);
+        view.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(190)
+            .setInterpolator(new AccelerateDecelerateInterpolator())
+            .start();
+    }
+
+    private void animateDialog(View view) {
+        if (view == null) {
+            return;
+        }
+        view.setAlpha(0f);
+        view.setTranslationY(dp(10));
+        view.setScaleX(0.97f);
+        view.setScaleY(0.97f);
+        view.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(170)
+            .setInterpolator(new AccelerateDecelerateInterpolator())
+            .start();
+    }
+
+    private void animateTap(View view) {
+        if (view == null) {
+            return;
+        }
+        view.animate()
+            .scaleX(0.97f)
+            .scaleY(0.97f)
+            .setDuration(45)
+            .withEndAction(() -> view.animate().scaleX(1f).scaleY(1f).setDuration(95).start())
+            .start();
+    }
+
+    private void decorateButton(Button button) {
+        button.setOnTouchListener((view, event) -> {
+            if (!view.isEnabled()) {
+                return false;
+            }
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                view.animate().scaleX(0.985f).scaleY(0.985f).setDuration(70).start();
+            } else if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
+                view.animate().scaleX(1f).scaleY(1f).setDuration(110).start();
+            }
+            return false;
+        });
     }
 
     private LinearLayout buttonRow(Button left, Button right) {
@@ -2174,7 +2226,7 @@ public class AdminActivity extends Activity {
     private TextView body(String text) {
         TextView view = new TextView(this);
         view.setText(text == null ? "" : text);
-        view.setTextSize(15);
+        view.setTextSize(14);
         view.setLineSpacing(0, 1.15f);
         view.setTextColor(colorMuted());
         return view;
@@ -2183,7 +2235,7 @@ public class AdminActivity extends Activity {
     private TextView sectionTitle(String text) {
         TextView view = new TextView(this);
         view.setText(text == null ? "" : text);
-        view.setTextSize(17);
+        view.setTextSize(16);
         view.setTypeface(Typeface.DEFAULT_BOLD);
         view.setTextColor(colorText());
         view.setPadding(0, dp(4), 0, 0);
@@ -2193,7 +2245,7 @@ public class AdminActivity extends Activity {
     private TextView infoPanel(String text) {
         TextView view = body(text);
         view.setTextColor(colorText());
-        view.setPadding(dp(14), dp(12), dp(14), dp(12));
+        view.setPadding(dp(12), dp(10), dp(12), dp(10));
         view.setBackground(panelBackground());
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
             view.setElevation(dp(1));
@@ -2205,7 +2257,7 @@ public class AdminActivity extends Activity {
         EditText view = new EditText(this);
         view.setHint(hint);
         view.setSingleLine(true);
-        view.setTextSize(16);
+        view.setTextSize(15);
         view.setTextColor(colorText());
         view.setHintTextColor(colorMuted());
         return view;
@@ -2216,9 +2268,11 @@ public class AdminActivity extends Activity {
         button.setText(text);
         button.setTextColor(Color.WHITE);
         button.setAllCaps(false);
-        button.setMinHeight(dp(46));
-        button.setPadding(dp(12), 0, dp(12), 0);
+        button.setTextSize(14);
+        button.setMinHeight(dp(38));
+        button.setPadding(dp(10), 0, dp(10), 0);
         button.setBackground(buttonBackground(Color.rgb(110, 45, 45)));
+        decorateButton(button);
         return button;
     }
 
@@ -2227,9 +2281,11 @@ public class AdminActivity extends Activity {
         button.setText(text);
         button.setTextColor(colorText());
         button.setAllCaps(false);
-        button.setMinHeight(dp(46));
-        button.setPadding(dp(12), 0, dp(12), 0);
+        button.setTextSize(14);
+        button.setMinHeight(dp(38));
+        button.setPadding(dp(10), 0, dp(10), 0);
         button.setBackground(buttonBackground(isDarkMode() ? Color.rgb(50, 37, 37) : Color.rgb(237, 228, 228)));
+        decorateButton(button);
         return button;
     }
 

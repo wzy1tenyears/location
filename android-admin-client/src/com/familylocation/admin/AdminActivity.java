@@ -166,7 +166,11 @@ public class AdminActivity extends Activity {
 
     private void showStartupLoading() {
         LinearLayout card = screen("后台");
-        card.addView(infoPanel("正在检查登录状态和后台更新。"), blockParams(12));
+        TextView indicator = body("● ━━  正在检查登录状态和后台更新");
+        indicator.setGravity(Gravity.CENTER_HORIZONTAL);
+        indicator.setTextColor(colorText());
+        indicator.setPadding(0, dp(4), 0, dp(4));
+        card.addView(indicator, blockParams(0));
         setScreen(card, true);
         setStatus("");
     }

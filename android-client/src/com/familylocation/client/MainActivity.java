@@ -4944,9 +4944,11 @@ public class MainActivity extends Activity {
 
     private void showLoading(String text) {
         LinearLayout card = screen("位置");
-        TextView message = body(text);
-        message.setGravity(Gravity.CENTER_HORIZONTAL);
-        card.addView(message, blockParams(0));
+        TextView indicator = body("● ━━  " + text);
+        indicator.setGravity(Gravity.CENTER_HORIZONTAL);
+        indicator.setTextColor(colorText());
+        indicator.setPadding(0, dp(4), 0, dp(4));
+        card.addView(indicator, blockParams(0));
         setScreen(card, true);
     }
 

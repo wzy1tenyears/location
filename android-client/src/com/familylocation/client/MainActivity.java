@@ -93,7 +93,7 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 82;
+    private static final int APP_VERSION_CODE = 83;
     private static final String APP_VERSION_NAME = "2.1.0";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";

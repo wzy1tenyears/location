@@ -74,7 +74,7 @@ public class AdminActivity extends Activity {
     private static final String KEY_ACTIVE_UPDATE_DOWNLOAD_ID = "active_update_download_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "";
-    private static final int APP_VERSION_CODE = 56;
+    private static final int APP_VERSION_CODE = 58;
     private static final String APP_VERSION_NAME = "2.1.0";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
@@ -722,13 +722,23 @@ public class AdminActivity extends Activity {
     private LinearLayout challengeCard() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(10), dp(10), dp(10), dp(10));
+        card.setPadding(dp(12), dp(12), dp(12), dp(12));
         card.setBackground(cardBackground());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             card.setElevation(dp(4));
         }
         statusView = null;
         return card;
+    }
+
+    private TextView challengePrompt(String text) {
+        TextView prompt = new TextView(this);
+        prompt.setText(text);
+        prompt.setTextColor(colorText());
+        prompt.setTextSize(14);
+        prompt.setGravity(Gravity.CENTER);
+        prompt.setLineSpacing(dp(2), 1.0f);
+        return prompt;
     }
 
     private void showAppChallengeWebView(String challengeUrl, Runnable onBack) {
@@ -744,6 +754,8 @@ public class AdminActivity extends Activity {
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setUserAgentString(settings.getUserAgentString() + " " + USER_AGENT);
+        challengeView.setBackgroundColor(Color.TRANSPARENT);
+        challengeView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         syncCookiesToWebView(challengeUrl);
         challengeView.setWebViewClient(new WebViewClient() {
             @Override
@@ -761,9 +773,10 @@ public class AdminActivity extends Activity {
                 return handleWebViewRendererGone(view, "");
             }
         });
+        card.addView(challengePrompt("请完成 Cloudflare 验证，完成后会自动继续后台登录。"), blockParams(8));
         challengeView.loadUrl(challengeUrl);
-        LinearLayout.LayoutParams params = blockParams(10);
-        params.height = dp(220);
+        LinearLayout.LayoutParams params = blockParams(8);
+        params.height = dp(96);
         card.addView(challengeView, params);
         Button back = secondaryButton("返回后台登录 / 修改密码");
         back.setOnClickListener(view -> {
@@ -851,42 +864,8 @@ public class AdminActivity extends Activity {
             ), blockParams(16));
         }
 
-        JSONArray locations = response.optJSONArray("locations");
-        card.addView(sectionTitle("最新定位"), blockParams(8));
-        if (locations == null || locations.length() == 0) {
-            card.addView(infoPanel("暂无最新定位。"), blockParams(16));
-        } else {
-            int count = Math.min(locations.length(), 8);
-            for (int index = 0; index < count; index += 1) {
-                JSONObject location = locations.optJSONObject(index);
-                if (location == null) {
-                    continue;
-                }
-                String name = displayName(location);
-                String address = locationAddress(location);
-                String line = name +
-                    "\n组：" + location.optString("group_name", "") +
-                    " / " + location.optString("role_label", "") +
-                    "\n坐标：" + formatCoordinate(location.optDouble("latitude")) + ", " + formatCoordinate(location.optDouble("longitude")) +
-                    "\n地址：" + (address.isEmpty() ? "未解析" : address) +
-                    "\n时间：" + location.optString("updated_at", "");
-                card.addView(infoPanel(line), blockParams(8));
-                Button detailLocation = secondaryButton("查看定位详情");
-                detailLocation.setOnClickListener(view -> showLocationDetail(location));
-                int locationId = location.optInt("id", 0);
-                if (locationId > 0) {
-                    Button deleteLocation = secondaryButton("删除这条定位");
-                    deleteLocation.setOnClickListener(view -> confirmDanger("确定删除这条定位记录？", () -> {
-                        JSONObject payload = adminPayload("delete_location");
-                        putJson(payload, "location_id", locationId);
-                        postAdminAction(payload, redirectPath);
-                    }));
-                    card.addView(buttonRow(detailLocation, deleteLocation), blockParams(12));
-                } else {
-                    card.addView(detailLocation, blockParams(12));
-                }
-            }
-        }
+        card.addView(sectionTitle("在线用户"), blockParams(8));
+        card.addView(compactInfoPanel(onlineUserSummary(response.optJSONArray("users"))), blockParams(16));
 
         card.addView(sectionTitle("系统工具"), blockParams(8));
         Button securityManage = secondaryButton("安全策略");
@@ -935,8 +914,6 @@ public class AdminActivity extends Activity {
             putJson(payload, "ban_suspicious_packages_users", banSuspiciousPackages.isChecked());
             postAdminAction(payload, redirectPath);
         });
-        Button back = secondaryButton("返回概览");
-        back.setOnClickListener(view -> showAdminDashboard(response, redirectPath));
         card.addView(infoPanel("安全策略开启后，命中风险的用户会按服务端规则限制登录或上报。调试模式账号不受拦截影响。\n\nRoot/ADB/模拟定位/无障碍/抓包按对应检测项拦截；可疑包名会拦截安装列表中命中的 Magisk、Xposed、Reqable、HttpCanary、Charles 等风险包名。"), blockParams(12));
         card.addView(banRoot, blockParams(6));
         card.addView(banAdb, blockParams(6));
@@ -945,7 +922,6 @@ public class AdminActivity extends Activity {
         card.addView(banCapture, blockParams(6));
         card.addView(banSuspiciousPackages, blockParams(12));
         card.addView(save, blockParams(10));
-        card.addView(back, blockParams(0));
         setScreen(card, false);
         setStatus("");
     }
@@ -985,18 +961,16 @@ public class AdminActivity extends Activity {
                 }
                 int groupId = group.optInt("id", 0);
                 String groupName = group.optString("group_name", "");
+                int ownerUserIdValue = Math.max(0, group.optInt("owner_user_id", 0));
                 EditText displayName = input("显示名称");
                 displayName.setText(group.optString("display_name", groupName));
-                EditText ownerUserId = input("管理员用户 ID，0 为不指定");
-                ownerUserId.setInputType(InputType.TYPE_CLASS_NUMBER);
-                ownerUserId.setText(String.valueOf(Math.max(0, group.optInt("owner_user_id", 0))));
                 card.addView(sectionTitle(group.optString("display_name", groupName)), blockParams(8));
                 card.addView(infoPanel("标识：" + groupName
                     + "\n成员：" + group.optInt("member_count")
                     + " / 邀请码：" + (group.optString("group_code", "").isEmpty() ? "未生成" : group.optString("group_code", ""))
+                    + "\n当前管理员：" + groupOwnerName(memberships, groupName, ownerUserIdValue)
                     + "\n可选管理员：" + groupMemberSummary(memberships, groupName)), blockParams(8));
                 card.addView(displayName, blockParams(6));
-                card.addView(ownerUserId, blockParams(6));
                 Button save = secondaryButton("保存家庭组");
                 save.setOnClickListener(view -> {
                     JSONObject payload = adminPayload("update_family_group");
@@ -1004,13 +978,8 @@ public class AdminActivity extends Activity {
                     putJson(payload, "group_name", displayName.getText().toString());
                     postAdminAction(payload, redirectPath);
                 });
-                Button owner = secondaryButton("保存管理员");
-                owner.setOnClickListener(view -> {
-                    JSONObject payload = adminPayload("update_group_owner");
-                    putJson(payload, "group_id", groupId);
-                    putJson(payload, "owner_user_id", parseInt(ownerUserId.getText().toString(), 0));
-                    postAdminAction(payload, redirectPath);
-                });
+                Button owner = secondaryButton("选择管理员：" + groupOwnerName(memberships, groupName, ownerUserIdValue));
+                owner.setOnClickListener(view -> showGroupOwnerPicker(memberships, groupName, ownerUserIdValue, groupId, redirectPath));
                 Button delete = secondaryButton("删除家庭组");
                 delete.setOnClickListener(view -> confirmDanger("确定删除这个家庭组？组内定位记录会一并清除。", () -> {
                     JSONObject payload = adminPayload("delete_family_group");
@@ -1021,9 +990,6 @@ public class AdminActivity extends Activity {
                 card.addView(delete, blockParams(12));
             }
         }
-        Button back = secondaryButton("返回概览");
-        back.setOnClickListener(view -> showAdminDashboard(response, redirectPath));
-        card.addView(back, blockParams(0));
         setScreen(card, false);
         setStatus("");
     }
@@ -1054,6 +1020,78 @@ public class AdminActivity extends Activity {
         return builder.length() == 0 ? "无" : builder.toString();
     }
 
+    private String groupOwnerName(JSONArray memberships, String groupName, int ownerUserId) {
+        if (ownerUserId <= 0) {
+            return "无";
+        }
+        if (memberships != null) {
+            for (int index = 0; index < memberships.length(); index += 1) {
+                JSONObject membership = memberships.optJSONObject(index);
+                if (membership == null || !groupName.equals(membership.optString("group_name", ""))) {
+                    continue;
+                }
+                if (membership.optInt("user_id", 0) == ownerUserId) {
+                    return displayName(membership);
+                }
+            }
+        }
+        return "用户 ID " + ownerUserId;
+    }
+
+    private void showGroupOwnerPicker(JSONArray memberships, String groupName, int currentOwnerUserId, int groupId, String redirectPath) {
+        Dialog dialog = new Dialog(this);
+        LinearLayout card = dialogCard(dialog, "选择家庭组管理员");
+        card.addView(compactInfoPanel("家庭组：" + groupName + "\n只能选择当前家庭组内成员；选择“无”表示不指定管理员。"), blockParams(10));
+
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        addGroupOwnerOption(list, dialog, "无，不指定管理员", 0, currentOwnerUserId, groupId, redirectPath);
+
+        int count = 0;
+        if (memberships != null) {
+            for (int index = 0; index < memberships.length(); index += 1) {
+                JSONObject membership = memberships.optJSONObject(index);
+                if (membership == null || !groupName.equals(membership.optString("group_name", ""))) {
+                    continue;
+                }
+                int userId = membership.optInt("user_id", 0);
+                String label = displayName(membership)
+                    + "\nID：" + userId
+                    + " / 身份：" + firstText(membership.optString("role_label", ""), membership.optString("role", ""), "未设置");
+                addGroupOwnerOption(list, dialog, label, userId, currentOwnerUserId, groupId, redirectPath);
+                count += 1;
+            }
+        }
+        if (count == 0) {
+            list.addView(infoPanel("当前家庭组暂无成员。"), blockParams(8));
+        }
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(list, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams scrollParams = blockParams(12);
+        scrollParams.height = Math.max(dp(160), Math.min(dp(360), getResources().getDisplayMetrics().heightPixels - topSafePadding() - dp(220)));
+        card.addView(scroll, scrollParams);
+
+        Button close = secondaryButton("关闭");
+        close.setOnClickListener(view -> dialog.dismiss());
+        card.addView(close, blockParams(0));
+        showCardDialog(dialog);
+    }
+
+    private void addGroupOwnerOption(LinearLayout list, Dialog dialog, String label, int ownerUserId, int currentOwnerUserId, int groupId, String redirectPath) {
+        Button option = secondaryButton((ownerUserId == currentOwnerUserId ? "✓ " : "") + label);
+        option.setGravity(Gravity.CENTER_VERTICAL);
+        option.setMinHeight(dp(48));
+        option.setOnClickListener(view -> {
+            dialog.dismiss();
+            JSONObject payload = adminPayload("update_group_owner");
+            putJson(payload, "group_id", groupId);
+            putJson(payload, "owner_user_id", ownerUserId);
+            postAdminAction(payload, redirectPath);
+        });
+        list.addView(option, blockParams(8));
+    }
+
     private void showAnnouncementManager(JSONObject response, String redirectPath) {
         LinearLayout card = screen("公告管理");
         JSONObject announcement = response.optJSONObject("announcement");
@@ -1078,13 +1116,10 @@ public class AdminActivity extends Activity {
             putJson(payload, "is_active", active.isChecked());
             postAdminAction(payload, redirectPath);
         });
-        Button back = secondaryButton("返回概览");
-        back.setOnClickListener(view -> showAdminDashboard(response, redirectPath));
         card.addView(title, blockParams(10));
         card.addView(body, blockParams(10));
         card.addView(active, blockParams(12));
         card.addView(save, blockParams(10));
-        card.addView(back, blockParams(0));
         setScreen(card, false);
         setStatus("");
     }
@@ -1112,8 +1147,6 @@ public class AdminActivity extends Activity {
             putJson(payload, "max_uses", parseInt(maxUses.getText().toString(), 1));
             postAdminAction(payload, redirectPath);
         });
-        Button back = secondaryButton("返回概览");
-        back.setOnClickListener(view -> showAdminDashboard(response, redirectPath));
         card.addView(code, blockParams(8));
         card.addView(note, blockParams(8));
         card.addView(maxUses, blockParams(8));
@@ -1167,7 +1200,6 @@ public class AdminActivity extends Activity {
                 card.addView(delete, blockParams(10));
             }
         }
-        card.addView(back, blockParams(0));
         setScreen(card, false);
         setStatus("");
     }
@@ -1222,85 +1254,174 @@ public class AdminActivity extends Activity {
                 }
                 int userId = user.optInt("id", 0);
                 boolean active = user.optBoolean("is_active", false);
-                EditText username = input("账号");
-                username.setText(user.optString("username", ""));
-                EditText displayNameInput = input("显示名");
-                displayNameInput.setText(user.optString("display_name", ""));
-                EditText interval = input("上报间隔秒");
-                interval.setInputType(InputType.TYPE_CLASS_NUMBER);
-                interval.setText(String.valueOf(Math.max(30, user.optInt("report_interval_seconds", 300))));
-                CheckBox debug = new CheckBox(this);
-                debug.setText("调试模式");
-                debug.setTextColor(colorText());
-                debug.setChecked(user.optBoolean("debug_mode", false));
-                EditText newPassword = input("新密码：留空不重置");
-                newPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-                card.addView(sectionTitle(displayName(user)), blockParams(6));
-                card.addView(infoPanel("状态：" + (active ? "启用" : "停用") + " / " + (user.optBoolean("online", false) ? "在线" : "离线")
-                    + "\n家庭组：" + user.optString("group_name", "") + " / " + user.optString("role_label", "")
-                    + "\n最后在线：" + user.optString("last_seen_at", "无")
-                    + "\n成员关系：" + userMembershipSummary(memberships, userId)
-                    + "\n设备：" + userDeviceSummary(devices, userId)), blockParams(8));
-                card.addView(username, blockParams(6));
-                card.addView(displayNameInput, blockParams(6));
-                card.addView(interval, blockParams(6));
-                card.addView(debug, blockParams(6));
-                Button save = secondaryButton("保存账号信息");
-                save.setOnClickListener(view -> {
-                    JSONObject payload = adminPayload("update_user");
-                    putJson(payload, "user_id", userId);
-                    putJson(payload, "username", username.getText().toString());
-                    putJson(payload, "display_name", displayNameInput.getText().toString());
-                    putJson(payload, "report_interval_seconds", parseInt(interval.getText().toString(), 300));
-                    putJson(payload, "debug_mode", debug.isChecked());
-                    postAdminAction(payload, redirectPath);
-                });
-                Button toggle = secondaryButton(active ? "停用账号" : "启用账号");
-                toggle.setOnClickListener(view -> {
-                    JSONObject payload = adminPayload("toggle_user");
-                    putJson(payload, "user_id", userId);
-                    putJson(payload, "next", !active);
-                    postAdminAction(payload, redirectPath);
-                });
-                Button reset = secondaryButton("重置密码");
-                reset.setOnClickListener(view -> {
-                    JSONObject payload = adminPayload("reset_password");
-                    putJson(payload, "user_id", userId);
-                    putJson(payload, "new_password", newPassword.getText().toString());
-                    postAdminAction(payload, redirectPath);
-                });
-                Button deleteUser = secondaryButton("删除账号");
-                deleteUser.setOnClickListener(view -> confirmDanger("确定删除这个账号？相关设备、定位和工单会随账号清理。", () -> {
-                    JSONObject payload = adminPayload("delete_user");
-                    putJson(payload, "user_id", userId);
-                    postAdminAction(payload, redirectPath);
-                }));
-                card.addView(buttonRow(save, toggle), blockParams(8));
-                card.addView(newPassword, blockParams(6));
-                card.addView(buttonRow(reset, deleteUser), blockParams(10));
-
-                EditText newGroup = input("添加家庭组名称");
-                CheckBox newGroupMonitor = policyCheckBox("身份为监护端", true);
-                Button addMembership = secondaryButton("添加家庭组身份");
-                addMembership.setOnClickListener(view -> {
-                    JSONObject payload = adminPayload("add_membership");
-                    putJson(payload, "user_id", userId);
-                    putJson(payload, "group_name", newGroup.getText().toString());
-                    putJson(payload, "role", newGroupMonitor.isChecked() ? "monitor" : "guardian");
-                    postAdminAction(payload, redirectPath);
-                });
-                card.addView(newGroup, blockParams(6));
-                card.addView(newGroupMonitor, blockParams(6));
-                card.addView(addMembership, blockParams(8));
-                addMembershipEditors(card, memberships, userId, redirectPath);
-                addDeviceEditors(card, devices, userId, redirectPath);
+                String summary = displayName(user)
+                    + "\n状态：" + (active ? "启用" : "停用") + " / " + (user.optBoolean("online", false) ? "在线" : "离线")
+                    + "\n家庭组：" + firstText(user.optString("group_name", ""), "无") + " / " + firstText(user.optString("role_label", ""), "未设置")
+                    + "\n最后在线：" + firstText(user.optString("last_seen_at", ""), "无")
+                    + "\n设备：" + userDeviceSummary(devices, userId);
+                card.addView(compactInfoPanel(summary), blockParams(6));
+                Button editUser = secondaryButton("编辑账号");
+                editUser.setOnClickListener(view -> showUserEditDialog(user, memberships, redirectPath));
+                Button deviceInfo = secondaryButton("设备信息");
+                deviceInfo.setOnClickListener(view -> showUserDevicesDialog(user, devices, redirectPath));
+                card.addView(buttonRow(editUser, deviceInfo), blockParams(10));
             }
         }
-        Button back = secondaryButton("返回概览");
-        back.setOnClickListener(view -> showAdminDashboard(response, redirectPath));
-        card.addView(back, blockParams(0));
         setScreen(card, false);
         setStatus("");
+    }
+
+    private void showUserEditDialog(JSONObject user, JSONArray memberships, String redirectPath) {
+        if (user == null) {
+            return;
+        }
+        Dialog dialog = new Dialog(this);
+        LinearLayout card = dialogCard(dialog, "编辑账号");
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+
+        int userId = user.optInt("id", 0);
+        boolean active = user.optBoolean("is_active", false);
+        EditText username = input("账号");
+        username.setText(user.optString("username", ""));
+        EditText displayNameInput = input("显示名");
+        displayNameInput.setText(user.optString("display_name", ""));
+        EditText interval = input("上报间隔秒");
+        interval.setInputType(InputType.TYPE_CLASS_NUMBER);
+        interval.setText(String.valueOf(Math.max(30, user.optInt("report_interval_seconds", 300))));
+        CheckBox debug = policyCheckBox("调试模式", user.optBoolean("debug_mode", false));
+        EditText newPassword = input("新密码：留空不重置");
+        newPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+
+        form.addView(compactInfoPanel("用户 ID：" + userId + "\n成员关系：" + userMembershipSummary(memberships, userId)), blockParams(8));
+        form.addView(username, blockParams(6));
+        form.addView(displayNameInput, blockParams(6));
+        form.addView(interval, blockParams(6));
+        form.addView(debug, blockParams(8));
+
+        Button save = secondaryButton("保存账号");
+        save.setOnClickListener(view -> {
+            dialog.dismiss();
+            JSONObject payload = adminPayload("update_user");
+            putJson(payload, "user_id", userId);
+            putJson(payload, "username", username.getText().toString());
+            putJson(payload, "display_name", displayNameInput.getText().toString());
+            putJson(payload, "report_interval_seconds", parseInt(interval.getText().toString(), 300));
+            putJson(payload, "debug_mode", debug.isChecked());
+            postAdminAction(payload, redirectPath);
+        });
+        Button toggle = secondaryButton(active ? "停用账号" : "启用账号");
+        toggle.setOnClickListener(view -> {
+            dialog.dismiss();
+            JSONObject payload = adminPayload("toggle_user");
+            putJson(payload, "user_id", userId);
+            putJson(payload, "next", !active);
+            postAdminAction(payload, redirectPath);
+        });
+        form.addView(buttonRow(save, toggle), blockParams(8));
+
+        Button reset = secondaryButton("重置密码");
+        reset.setOnClickListener(view -> {
+            dialog.dismiss();
+            JSONObject payload = adminPayload("reset_password");
+            putJson(payload, "user_id", userId);
+            putJson(payload, "new_password", newPassword.getText().toString());
+            postAdminAction(payload, redirectPath);
+        });
+        Button deleteUser = secondaryButton("删除账号");
+        deleteUser.setOnClickListener(view -> {
+            dialog.dismiss();
+            confirmDanger("确定删除这个账号？相关设备、定位和工单会随账号清理。", () -> {
+                JSONObject payload = adminPayload("delete_user");
+                putJson(payload, "user_id", userId);
+                postAdminAction(payload, redirectPath);
+            });
+        });
+        form.addView(newPassword, blockParams(6));
+        form.addView(buttonRow(reset, deleteUser), blockParams(12));
+
+        form.addView(sectionTitle("家庭组身份"), blockParams(6));
+        EditText newGroup = input("添加家庭组名称");
+        CheckBox newGroupMonitor = policyCheckBox("身份为监护端", true);
+        Button addMembership = secondaryButton("添加家庭组身份");
+        addMembership.setOnClickListener(view -> {
+            dialog.dismiss();
+            JSONObject payload = adminPayload("add_membership");
+            putJson(payload, "user_id", userId);
+            putJson(payload, "group_name", newGroup.getText().toString());
+            putJson(payload, "role", newGroupMonitor.isChecked() ? "monitor" : "guardian");
+            postAdminAction(payload, redirectPath);
+        });
+        form.addView(newGroup, blockParams(6));
+        form.addView(newGroupMonitor, blockParams(6));
+        form.addView(addMembership, blockParams(8));
+        addMembershipEditors(form, memberships, userId, redirectPath);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(form, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams scrollParams = blockParams(10);
+        int availableHeight = getResources().getDisplayMetrics().heightPixels - topSafePadding() - dp(170);
+        scrollParams.height = Math.max(dp(220), Math.min(dp(520), availableHeight));
+        card.addView(scroll, scrollParams);
+
+        Button close = secondaryButton("关闭");
+        close.setOnClickListener(view -> dialog.dismiss());
+        card.addView(close, blockParams(0));
+        showCardDialog(dialog);
+    }
+
+    private void showUserDevicesDialog(JSONObject user, JSONArray devices, String redirectPath) {
+        if (user == null) {
+            return;
+        }
+        Dialog dialog = new Dialog(this);
+        LinearLayout card = dialogCard(dialog, "设备信息");
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        int userId = user.optInt("id", 0);
+        list.addView(compactInfoPanel(displayName(user) + "\n" + userDeviceSummary(devices, userId)), blockParams(8));
+        int shown = 0;
+        if (devices != null) {
+            for (int index = 0; index < devices.length(); index += 1) {
+                JSONObject device = devices.optJSONObject(index);
+                if (device == null || device.optInt("user_id", 0) != userId) {
+                    continue;
+                }
+                shown += 1;
+                int deviceId = device.optInt("id", 0);
+                String line = "设备 #" + deviceId
+                    + "\n设备指纹：" + firstText(device.optString("device_fingerprint", ""), "无")
+                    + "\n浏览器指纹：" + firstText(device.optString("browser_fingerprint", ""), "无")
+                    + "\n首次：" + firstText(device.optString("first_seen_at", ""), "无")
+                    + "\n最近：" + firstText(device.optString("last_seen_at", ""), "无")
+                    + "\nUA：" + firstText(device.optString("user_agent", ""), "无");
+                list.addView(infoPanel(line), blockParams(6));
+                Button delete = secondaryButton("解绑这台设备");
+                delete.setOnClickListener(view -> {
+                    dialog.dismiss();
+                    confirmDanger("确定解绑这台设备？", () -> {
+                        JSONObject payload = adminPayload("delete_user_device");
+                        putJson(payload, "device_id", deviceId);
+                        postAdminAction(payload, redirectPath);
+                    });
+                });
+                list.addView(delete, blockParams(10));
+            }
+        }
+        if (shown == 0) {
+            list.addView(infoPanel("暂无绑定设备。"), blockParams(8));
+        }
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(list, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams scrollParams = blockParams(10);
+        int availableHeight = getResources().getDisplayMetrics().heightPixels - topSafePadding() - dp(170);
+        scrollParams.height = Math.max(dp(180), Math.min(dp(500), availableHeight));
+        card.addView(scroll, scrollParams);
+        Button close = secondaryButton("关闭");
+        close.setOnClickListener(view -> dialog.dismiss());
+        card.addView(close, blockParams(0));
+        showCardDialog(dialog);
     }
 
     private void addMembershipEditors(LinearLayout card, JSONArray memberships, int userId, String redirectPath) {
@@ -1389,6 +1510,32 @@ public class AdminActivity extends Activity {
         return builder.length() == 0 ? "无" : builder.toString();
     }
 
+    private String onlineUserSummary(JSONArray users) {
+        if (users == null || users.length() == 0) {
+            return "暂无在线用户。";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (int index = 0; index < users.length(); index += 1) {
+            JSONObject user = users.optJSONObject(index);
+            if (user == null || !user.optBoolean("online", false)) {
+                continue;
+            }
+            if (builder.length() > 0) {
+                builder.append("\n");
+            }
+            builder.append("• ").append(displayName(user));
+            String groupName = user.optString("group_name", "");
+            if (!groupName.isEmpty()) {
+                builder.append(" / ").append(groupName);
+            }
+            String lastSeen = user.optString("last_seen_at", "");
+            if (!lastSeen.isEmpty()) {
+                builder.append(" / ").append(lastSeen);
+            }
+        }
+        return builder.length() == 0 ? "暂无在线用户。" : builder.toString();
+    }
+
     private String userDeviceSummary(JSONArray devices, int userId) {
         if (devices == null) {
             return "无";
@@ -1451,9 +1598,6 @@ public class AdminActivity extends Activity {
                 card.addView(buttonRow(send, status), blockParams(16));
             }
         }
-        Button back = secondaryButton("返回概览");
-        back.setOnClickListener(view -> showAdminDashboard(response, redirectPath));
-        card.addView(back, blockParams(0));
         setScreen(card, false);
         setStatus("");
     }
@@ -1530,10 +1674,7 @@ public class AdminActivity extends Activity {
             builder.append("首选地址：").append(firstText(diagnostics.optString("preferred_address", ""), locationAddress(location), "未解析")).append('\n');
             builder.append("首选城市：").append(diagnostics.optString("preferred_city", "")).append('\n');
             builder.append("检查时间：").append(diagnostics.optString("checked_at", "")).append('\n');
-            builder.append("状态：")
-                .append(diagnostics.optBoolean("mismatch", false) ? "存在位置差异" : "未发现明显差异")
-                .append(diagnostics.optBoolean("mobile_ip_uncertain", false) ? " / 移动网络 IP 仅供参考" : "")
-                .append("\n\n");
+            builder.append("状态：").append(addressDiagnosticStatus(location, diagnostics)).append("\n\n");
 
             JSONArray sources = diagnostics.optJSONArray("sources");
             if (sources == null || sources.length() == 0) {
@@ -1795,6 +1936,93 @@ public class AdminActivity extends Activity {
         return username.isEmpty() ? "未命名" : username;
     }
 
+    private String addressDiagnosticStatus(JSONObject location, JSONObject diagnostics) {
+        if (diagnostics == null || diagnostics.optJSONArray("sources") == null) {
+            return location != null && location.optBoolean("address_mismatch", false)
+                ? "位置信息不一致"
+                : "位置信息一致或无法完整判断";
+        }
+        if (diagnosticsGpsMismatch(diagnostics)) {
+            return "位置信息不一致";
+        }
+        if (diagnosticsNetworkDiffersFromGps(diagnostics)) {
+            return "网络出口与定位不同，仅作 VPN/代理提示";
+        }
+        return "位置信息一致或无法完整判断";
+    }
+
+    private boolean diagnosticsGpsMismatch(JSONObject diagnostics) {
+        JSONArray sources = diagnostics == null ? null : diagnostics.optJSONArray("sources");
+        if (sources == null) {
+            return false;
+        }
+        for (String field : new String[] {"country", "region", "city"}) {
+            List<String> values = new ArrayList<>();
+            for (int index = 0; index < sources.length(); index += 1) {
+                JSONObject source = sources.optJSONObject(index);
+                if (source == null || !"gps".equals(source.optString("type", ""))) {
+                    continue;
+                }
+                addCompareValue(values, source.optString(field, ""));
+            }
+            if (values.size() > 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean diagnosticsNetworkDiffersFromGps(JSONObject diagnostics) {
+        JSONArray sources = diagnostics == null ? null : diagnostics.optJSONArray("sources");
+        if (sources == null) {
+            return diagnostics != null && diagnostics.optBoolean("mobile_ip_uncertain", false);
+        }
+        JSONObject gps = null;
+        for (int index = 0; index < sources.length(); index += 1) {
+            JSONObject source = sources.optJSONObject(index);
+            if (source != null && "gps".equals(source.optString("type", ""))) {
+                gps = source;
+                break;
+            }
+        }
+        if (gps == null) {
+            return diagnostics.optBoolean("mobile_ip_uncertain", false);
+        }
+        for (int index = 0; index < sources.length(); index += 1) {
+            JSONObject source = sources.optJSONObject(index);
+            if (source == null || "gps".equals(source.optString("type", ""))) {
+                continue;
+            }
+            if (!"ip".equals(source.optString("type", "")) && !"webrtc".equals(source.optString("type", ""))) {
+                continue;
+            }
+            for (String field : new String[] {"country", "region", "city"}) {
+                String gpsValue = diagnosticsCompareValue(gps.optString(field, ""));
+                String sourceValue = diagnosticsCompareValue(source.optString(field, ""));
+                if (!gpsValue.isEmpty() && !sourceValue.isEmpty() && !gpsValue.equals(sourceValue)) {
+                    return true;
+                }
+            }
+        }
+        return diagnostics.optBoolean("mobile_ip_uncertain", false);
+    }
+
+    private void addCompareValue(List<String> values, String value) {
+        String normalized = diagnosticsCompareValue(value);
+        if (!normalized.isEmpty() && !values.contains(normalized)) {
+            values.add(normalized);
+        }
+    }
+
+    private String diagnosticsCompareValue(String value) {
+        String normalized = value == null ? "" : value.trim().toLowerCase(java.util.Locale.US).replaceAll("\\s+", "");
+        if (normalized.isEmpty()) {
+            return "";
+        }
+        normalized = normalized.replace("中华人民共和国", "中国");
+        return normalized.replaceAll("(壮族自治区|回族自治区|维吾尔自治区|特别行政区|自治区|自治州|地区|省|市|盟|州)$", "");
+    }
+
     private String locationAddress(JSONObject location) {
         JSONObject diagnostics = location.optJSONObject("address_diagnostics");
         if (diagnostics == null) {
@@ -2005,20 +2233,20 @@ public class AdminActivity extends Activity {
     private LinearLayout screen(String titleText) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(15), dp(15), dp(15), dp(15));
+        card.setPadding(dp(12), dp(12), dp(12), dp(12));
         card.setBackground(cardBackground());
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
             card.setElevation(dp(4));
         }
         TextView title = new TextView(this);
         title.setText(titleText);
-        title.setTextSize(18);
+        title.setTextSize(17);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setIncludeFontPadding(false);
         title.setTextColor(colorText());
         card.addView(title, blockParams(8));
         statusView = body("");
-        statusView.setPadding(dp(12), dp(8), dp(12), dp(8));
+        statusView.setPadding(dp(10), dp(7), dp(10), dp(7));
         statusView.setBackground(pillBackground());
         statusView.setVisibility(View.GONE);
         card.addView(statusView, blockParams(16));
@@ -2035,7 +2263,7 @@ public class AdminActivity extends Activity {
             LinearLayout root = new LinearLayout(this);
             root.setOrientation(LinearLayout.VERTICAL);
             root.setGravity(Gravity.CENTER);
-            root.setPadding(dp(16), topSafePadding(), dp(16), dp(16));
+            root.setPadding(dp(12), topSafePadding(), dp(12), dp(12));
             root.setBackgroundColor(colorSurface());
             root.addView(card, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             setContentView(root, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -2048,7 +2276,7 @@ public class AdminActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        root.setPadding(dp(16), topSafePadding(), dp(16), dp(16));
+        root.setPadding(dp(12), topSafePadding(), dp(12), dp(12));
         root.setBackgroundColor(colorSurface());
         root.addView(card, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         scroll.addView(root, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -2070,7 +2298,7 @@ public class AdminActivity extends Activity {
     private LinearLayout adminBottomNavigation() {
         LinearLayout outer = new LinearLayout(this);
         outer.setOrientation(LinearLayout.VERTICAL);
-        outer.setPadding(dp(12), dp(6), dp(12), dp(10));
+        outer.setPadding(dp(10), dp(4), dp(10), dp(7));
         outer.setBackgroundColor(colorSurface());
 
         LinearLayout nav = new LinearLayout(this);
@@ -2096,7 +2324,7 @@ public class AdminActivity extends Activity {
         LinearLayout item = new LinearLayout(this);
         item.setOrientation(LinearLayout.VERTICAL);
         item.setGravity(Gravity.CENTER);
-        item.setMinimumHeight(dp(54));
+        item.setMinimumHeight(dp(48));
         item.setPadding(dp(3), dp(5), dp(3), dp(5));
         boolean active = currentAdminTab == tab;
         item.setBackground(active ? navActiveBackground() : transparentButtonBackground());
@@ -2109,14 +2337,14 @@ public class AdminActivity extends Activity {
 
         TextView iconView = new TextView(this);
         iconView.setText(icon);
-        iconView.setTextSize(active ? 21 : 19);
+        iconView.setTextSize(active ? 19 : 17);
         iconView.setGravity(Gravity.CENTER);
         iconView.setTypeface(Typeface.DEFAULT_BOLD);
         iconView.setTextColor(active ? Color.rgb(230, 76, 76) : colorMuted());
 
         TextView labelView = new TextView(this);
         labelView.setText(label);
-        labelView.setTextSize(10);
+        labelView.setTextSize(9);
         labelView.setGravity(Gravity.CENTER);
         labelView.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
         labelView.setTextColor(active ? Color.rgb(230, 76, 76) : colorMuted());
@@ -2227,7 +2455,7 @@ public class AdminActivity extends Activity {
     private TextView body(String text) {
         TextView view = new TextView(this);
         view.setText(text == null ? "" : text);
-        view.setTextSize(13);
+        view.setTextSize(12);
         view.setIncludeFontPadding(false);
         view.setLineSpacing(0, 1.15f);
         view.setTextColor(colorMuted());
@@ -2237,7 +2465,7 @@ public class AdminActivity extends Activity {
     private TextView sectionTitle(String text) {
         TextView view = new TextView(this);
         view.setText(text == null ? "" : text);
-        view.setTextSize(15);
+        view.setTextSize(13);
         view.setTypeface(Typeface.DEFAULT_BOLD);
         view.setIncludeFontPadding(false);
         view.setTextColor(colorText());
@@ -2248,7 +2476,7 @@ public class AdminActivity extends Activity {
     private TextView infoPanel(String text) {
         TextView view = body(text);
         view.setTextColor(colorText());
-        view.setPadding(dp(12), dp(10), dp(12), dp(10));
+        view.setPadding(dp(10), dp(8), dp(10), dp(8));
         view.setBackground(panelBackground());
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
             view.setElevation(dp(1));
@@ -2256,11 +2484,18 @@ public class AdminActivity extends Activity {
         return view;
     }
 
+    private TextView compactInfoPanel(String text) {
+        TextView view = infoPanel(text);
+        view.setTextSize(12);
+        view.setPadding(dp(9), dp(7), dp(9), dp(7));
+        return view;
+    }
+
     private EditText input(String hint) {
         EditText view = new EditText(this);
         view.setHint(hint);
         view.setSingleLine(true);
-        view.setTextSize(14);
+        view.setTextSize(13);
         view.setTextColor(colorText());
         view.setHintTextColor(colorMuted());
         return view;
@@ -2271,13 +2506,13 @@ public class AdminActivity extends Activity {
         button.setText(text);
         button.setTextColor(Color.WHITE);
         button.setAllCaps(false);
-        button.setTextSize(13);
+        button.setTextSize(12);
         button.setMinWidth(0);
         button.setMinimumWidth(0);
         button.setMinHeight(0);
-        button.setMinimumHeight(dp(34));
+        button.setMinimumHeight(dp(31));
         button.setIncludeFontPadding(false);
-        button.setPadding(dp(9), 0, dp(9), 0);
+        button.setPadding(dp(8), 0, dp(8), 0);
         button.setBackground(buttonBackground(Color.rgb(110, 45, 45)));
         decorateButton(button);
         return button;
@@ -2288,13 +2523,13 @@ public class AdminActivity extends Activity {
         button.setText(text);
         button.setTextColor(colorText());
         button.setAllCaps(false);
-        button.setTextSize(13);
+        button.setTextSize(12);
         button.setMinWidth(0);
         button.setMinimumWidth(0);
         button.setMinHeight(0);
-        button.setMinimumHeight(dp(34));
+        button.setMinimumHeight(dp(31));
         button.setIncludeFontPadding(false);
-        button.setPadding(dp(9), 0, dp(9), 0);
+        button.setPadding(dp(8), 0, dp(8), 0);
         button.setBackground(buttonBackground(isDarkMode() ? Color.rgb(50, 37, 37) : Color.rgb(237, 228, 228)));
         decorateButton(button);
         return button;

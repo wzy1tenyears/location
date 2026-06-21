@@ -34,6 +34,7 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.animation.AccelerateDecelerateInterpolator;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceError;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebResourceRequest;
@@ -61,6 +62,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 public class AdminActivity extends Activity {
     private static final class ChallengeCancelledException extends Exception {
@@ -253,11 +256,12 @@ public class AdminActivity extends Activity {
         int generation = challengeGeneration + 1;
         challengeGeneration = generation;
         challengeCancelled = false;
-        runUi(() -> showAppChallengeWebView(challengeUrl, () -> cancelAppChallenge(generation)));
+        CountDownLatch challengeCompleted = new CountDownLatch(1);
+        runUi(() -> showAppChallengeWebView(challengeUrl, challengeCompleted, () -> cancelAppChallenge(generation)));
 
         long deadline = System.currentTimeMillis() + 300000L;
         while (System.currentTimeMillis() < deadline) {
-            Thread.sleep(2500L);
+            challengeCompleted.await(2500L, TimeUnit.MILLISECONDS);
             if (isChallengeCancelled(generation)) {
                 throw new ChallengeCancelledException();
             }
@@ -745,7 +749,7 @@ public class AdminActivity extends Activity {
         return prompt;
     }
 
-    private void showAppChallengeWebView(String challengeUrl, Runnable onBack) {
+    private void showAppChallengeWebView(String challengeUrl, CountDownLatch challengeCompleted, Runnable onBack) {
         LinearLayout card = challengeCard();
         if (!canLoadForegroundWebView()) {
             if (onBack != null) {
@@ -763,6 +767,12 @@ public class AdminActivity extends Activity {
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setUserAgentString(settings.getUserAgentString() + " " + USER_AGENT);
+        challengeView.addJavascriptInterface(new Object() {
+            @JavascriptInterface
+            public void complete() {
+                challengeCompleted.countDown();
+            }
+        }, "LocChallenge");
         challengeView.setBackgroundColor(Color.TRANSPARENT);
         challengeView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         syncCookiesToWebView(challengeUrl);

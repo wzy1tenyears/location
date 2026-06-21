@@ -202,7 +202,7 @@ function render_challenge_page(string $challengeId, string $message): never
 <body data-message="{$safeMessage}">
 HTML;
     if ($verified) {
-        echo '</body></html>';
+        echo '<script>if(window.LocChallenge&&window.LocChallenge.complete){window.LocChallenge.complete();}</script></body></html>';
         exit;
     }
     if ($safeSiteKey === '') {

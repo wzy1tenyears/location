@@ -198,11 +198,18 @@ function render_challenge_page(string $challengeId, string $message): never
     form { margin: 0; padding: 0; display: grid; place-items: center; }
     .message { display: none; }
   </style>
+  <script>
+    function notifyNativeChallengeComplete() {
+      if (window.LocChallenge && window.LocChallenge.complete) {
+        window.LocChallenge.complete();
+      }
+    }
+  </script>
 </head>
 <body data-message="{$safeMessage}">
 HTML;
     if ($verified) {
-        echo '<script>if(window.LocChallenge&&window.LocChallenge.complete){window.LocChallenge.complete();}</script></body></html>';
+        echo '<script>notifyNativeChallengeComplete();</script></body></html>';
         exit;
     }
     if ($safeSiteKey === '') {

@@ -77,7 +77,7 @@ public class AdminActivity extends Activity {
     private static final String KEY_ACTIVE_UPDATE_DOWNLOAD_ID = "active_update_download_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "";
-    private static final int APP_VERSION_CODE = 58;
+    private static final int APP_VERSION_CODE = 59;
     private static final String APP_VERSION_NAME = "2.1.0";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";

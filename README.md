@@ -66,6 +66,7 @@ https://example.com/
 - 未同意用户协议、隐私条约和跨境加密传输协议的账号请求会被拒绝。
 - 位置上报会做基础字段校验、地址一致性记录和异常日志。
 - 原生 App 登录/注册可通过 `api/app_challenge.php` 桥接 Cloudflare Turnstile；App API 请求只处理 JSON，地图/逆地理和 Turnstile 质询才在前台按需加载 WebView。
+- 公开版用户端可在本地做环境风险检测，但默认不上传已安装应用包名列表；发布前可运行 `.\verify-public.ps1` 检查公开版边界。
 
 ## 免责声明
 

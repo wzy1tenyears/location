@@ -754,6 +754,11 @@ public class AdminActivity extends Activity {
             return;
         }
         WebView challengeView = managedWebView();
+        CookieManager cookieManager = CookieManager.getInstance();
+        cookieManager.setAcceptCookie(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            cookieManager.setAcceptThirdPartyCookies(challengeView, true);
+        }
         WebSettings settings = challengeView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);

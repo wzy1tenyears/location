@@ -1,0 +1,22 @@
+[Unit]
+Description=Family Location v3 Go Backend
+After=network.target mysql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/loc-v3
+ExecStart=/var/www/loc-v3/family-location-go
+Restart=always
+RestartSec=3
+Environment=LOC_GO_ADDR=127.0.0.1:8088
+Environment=LOC_PUBLIC_BASE_DIR=/var/www/loc
+Environment=LOC_PHP_SESSION_DIR=/var/lib/php/sessions
+Environment=LOC_LEGACY_BASE_URL=http://127.0.0.1:8081
+Environment=LOC_DB_HOST=127.0.0.1
+Environment=LOC_DB_PORT=3306
+Environment=LOC_DB_NAME=family_loc
+Environment=LOC_DB_USER=family_loc
+EnvironmentFile=-/etc/family-location-v3.env
+
+[Install]
+WantedBy=multi-user.target

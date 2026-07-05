@@ -1,73 +1,77 @@
-# 位置
+# location v3
 
-一个基于 PHP + MySQL + 原生 Android 客户端的家庭定位共享项目。v2 公开版只保留原生 App、`api/` 和 Web 后台目录；根目录不再提供用户端 Web/PWA 页面。
+v3 是独立的 Go 后端目录，用来承接从 `v2` PHP 后端逐步迁出的接口。`v2` 继续保留现有 PHP 后端；`v3` 只负责 Go 服务本身，不反向污染 `v2/`。
 
-## 授权说明
+## 当前迁移范围
 
-本项目采用双授权策略：
+- `GET /api/app_update.php`
+- `GET /api/admin_app_update.php`
+- `GET /api/announcement.php`
+- `GET|POST /api/invite_check.php`
+- `GET /api/me.php`
+- `GET|POST /api/settings.php`
+- `GET /api/locations.php`
+- `POST /api/history.php`
 
-- 非商业用途：可按 GPL-3.0 使用、学习、修改和分发。
-- 商业用途：必须先联系作者并取得单独书面授权。
+这些接口保持原有 JSON 形状，便于在 Nginx 上按路径灰度转发。
 
-注意：这不是无条件商业可用的 GPL-3.0-only 授权。任何商业产品、商业服务、公司内部业务、收费部署、代部署、SaaS 服务、软硬件打包销售或其他商业场景，都不在本仓库公开授权范围内。
+## 目录定位
 
-## APK Release
+- `v2/`：现有线上 App + PHP 后端
+- `v3/`：独立 Go 后端
+- 当前默认状态仍应是 PHP 在线上接流；`v3` 只在灰度时按路径接管
 
-因防止误用，本项目不提供可直接安装的 APK release。需要客户端时，请自行审查源码、配置服务器地址、导入图标后本地打包。
+## 配置
 
-## 使用前必须修改
+敏感配置全部从环境变量读取，不写入源码：
 
-部署前先编辑：
+- `LOC_DB_HOST`
+- `LOC_DB_PORT`
+- `LOC_DB_NAME`
+- `LOC_DB_USER`
+- `LOC_DB_PASS`
+- `LOC_PUBLIC_BASE_DIR`
+- `LOC_PHP_SESSION_DIR`
+- `LOC_LEGACY_BASE_URL`
+- `LOC_ANDROID_VERSION_CODE`
+- `LOC_ANDROID_ADMIN_VERSION_CODE`
+- `LOC_ADMIN_PASSWORD` / `LOC_ADMIN_PASSWORD_HASH`
 
-```text
-private/config.php
-```
+非敏感默认值只用于本地开发。线上部署时应由 systemd 环境文件或进程管理器注入。
 
-至少需要确认数据库、Redis、后台账号、后台路径、地图 Key、IP 探测 Token 和 Cloudflare Turnstile 配置。`private/config.php` 含敏感信息，线上 Nginx 必须禁止外部访问 `/private/`。
-
-## Android 客户端
-
-公开版保留用户端和后台端 Android 源码，不提供 APK、签名文件或私有服务器地址。打包前可写入服务端 URL，也可以保持为空并在 App 首次启动时手动填写：
-
-```text
-android-client/assets/server-url.txt
-android-admin-client/assets/server-url.txt
-```
-
-示例：
-
-```text
-https://example.com/
-```
-
-## 构建说明
-
-本项目可使用 Android SDK 命令行构建，不需要 Android Studio。公开仓库不附带私有签名文件，请自行配置签名和发布流程。
+## 本地运行
 
 ```powershell
-.\android-client\build.ps1
-.\android-admin-client\build.ps1
+cd F:\program\location\v3
+$env:LOC_DB_PASS = '<database password>'
+$env:LOC_PUBLIC_BASE_DIR = 'F:\program\location\v2'
+$env:LOC_LEGACY_BASE_URL = 'http://127.0.0.1:8081'
+go run .\cmd\server
 ```
 
-## 目录结构
+`LOC_PUBLIC_BASE_DIR` 指向实际托管 APK 和公开资源的目录；当前如果仍复用 `v2` 的 APK/资源，就应指向 `F:\program\location\v2`，而不是机械地写成 `v3`。
 
-- `api/`：用户登录、注册、定位、历史、工单、App 质询与版本检查接口。
-- `admin/`：Web 后台源码目录，访问路径由 `private/config.php` 的 `ADMIN_PATH` 控制，默认 `/admin`。
-- `private/`：配置、公共库和安装 SQL，必须禁止公网直接访问。
-- `android-client/`：原生 Android 用户端源码。
-- `android-admin-client/`：原生 Android 后台端源码。
-- `nginx-location.conf`：Nginx 站点规则片段，根路径返回 404，后台走 `/admin`。
+`LOC_LEGACY_BASE_URL` 用于未迁接口回退到旧 PHP 后端。切主流量到 `v3` 时，这个变量应指向仅本机可访问的旧后端入口，例如 `http://127.0.0.1:8081`。
 
-## 安全说明
+本机当前未检测到 Go 工具链；安装 Go 后可直接运行上面的命令。
 
-- 根路径不提供用户网页，用户端通过原生 App 使用。
-- API 默认限制 `loc-app` User-Agent，`api/app_challenge.php` 作为 App 前台 WebView Turnstile 质询页例外开放。
-- 登录失败多次会临时锁定账号。
-- 未同意用户协议、隐私条约和跨境加密传输协议的账号请求会被拒绝。
-- 位置上报会做基础字段校验、地址一致性记录和异常日志。
-- 原生 App 登录/注册可通过 `api/app_challenge.php` 桥接 Cloudflare Turnstile；App API 请求只处理 JSON，地图/逆地理和 Turnstile 质询才在前台按需加载 WebView。
-- 公开版用户端可在本地做环境风险检测，但默认不上传已安装应用包名列表；发布前可运行 `.\verify-public.ps1` 检查公开版边界。
+## 验证
 
-## 免责声明
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\verify-v3.ps1
+```
 
-本项目用于合法、知情、必要的家庭成员位置共享场景。不得用于跟踪、骚扰、侵犯隐私、冒用身份、上传虚假定位或其他违法违规用途。
+有 Go 工具链时脚本会执行 `go test ./...`；没有 Go 工具链时仍会检查目录结构、路由覆盖、后台更新接口权限保护和敏感字面量。
+
+## 构建
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\build-v3.ps1
+```
+
+默认会输出 Linux `amd64` 二进制到 `bin/family-location-go-linux-amd64`，用于后续服务器灰度部署。
+
+## 灰度部署
+
+- `deploy/family-location-go.service.sample`：systemd 示例，敏感环境变量放到 `/etc/family-location-v3.env`。
+- `deploy/nginx-go-backend.sample.conf`：Nginx 主入口切到 `v3`、同时保留旧 PHP 回退入口的样例。

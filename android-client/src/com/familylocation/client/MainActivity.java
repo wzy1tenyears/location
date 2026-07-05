@@ -19,7 +19,10 @@ import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.database.Cursor;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -93,7 +96,7 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 84;
+    private static final int APP_VERSION_CODE = 85;
     private static final String APP_VERSION_NAME = "2.1.0";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
@@ -2346,7 +2349,6 @@ public class MainActivity extends Activity {
         appendLocationSection("我的云端位置", response.optJSONObject("mine"));
         appendLocationArray("监测端云端位置", response.optJSONArray("monitors"));
         appendLocationArray("监护端云端位置", response.optJSONArray("guardians"));
-        appendAddressDiagnostics(response.optJSONObject("mine"));
         setStatus("已刷新：" + response.optString("server_time", ""));
         loadHomeHistorySummary();
     }
@@ -2595,41 +2597,6 @@ public class MainActivity extends Activity {
     private void appendLatestMapLocation(JSONArray target, JSONObject location) {
         if (hasUsableCoordinates(location)) {
             target.put(location);
-        }
-    }
-
-    private void appendAddressDiagnostics(JSONObject location) {
-        if (location == null) {
-            return;
-        }
-        JSONObject diagnostics = location.optJSONObject("address_diagnostics");
-        if (diagnostics == null) {
-            return;
-        }
-        StringBuilder builder = new StringBuilder("定位自查");
-        String preferred = diagnostics.optString("preferred_address", "");
-        if (!preferred.isEmpty()) {
-            builder.append("\n首选地址：").append(preferred);
-        }
-        JSONArray sources = diagnostics.optJSONArray("sources");
-        if (sources != null) {
-            for (int index = 0; index < sources.length(); index += 1) {
-                JSONObject source = sources.optJSONObject(index);
-                if (source == null) {
-                    continue;
-                }
-                String sourceName = source.optString("name", source.optString("type", "地址"));
-                String address = source.optString("address", source.optString("ip", ""));
-                if (!address.isEmpty()) {
-                    builder.append("\n").append(sourceName).append("：").append(address);
-                }
-            }
-        }
-        if (builder.length() > "定位自查".length()) {
-            TextView panel = compactInfoPanel(builder.toString(), true);
-            panel.setTag("dynamic");
-            content.addView(dynamicSectionTitle("定位自查"), blockParams(6));
-            content.addView(panel, blockParams(12));
         }
     }
 
@@ -4954,13 +4921,76 @@ public class MainActivity extends Activity {
         return view;
     }
 
+    private final class LoadingOrbitView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF arc = new RectF();
+        private float angle;
+        private final Runnable tick = new Runnable() {
+            @Override
+            public void run() {
+                angle = (angle + 12f) % 360f;
+                invalidate();
+                postDelayed(this, 16L);
+            }
+        };
+
+        LoadingOrbitView(Context context) {
+            super(context);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setTypeface(Typeface.DEFAULT_BOLD);
+        }
+
+        @Override
+        protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            post(tick);
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            removeCallbacks(tick);
+            super.onDetachedFromWindow();
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            setMeasuredDimension(resolveSize(dp(88), widthMeasureSpec), dp(34));
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float centerY = getHeight() / 2f;
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(2));
+            paint.setColor(colorAccentMuted());
+            canvas.drawLine(dp(38), centerY, getWidth() - dp(12), centerY, paint);
+
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(colorAccent());
+            float dotX = dp(18) + (float) Math.cos(Math.toRadians(angle)) * dp(8);
+            float dotY = centerY + (float) Math.sin(Math.toRadians(angle)) * dp(8);
+            canvas.drawCircle(dotX, dotY, dp(4), paint);
+
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(3));
+            paint.setColor(colorAccent());
+            arc.set(dp(8), centerY - dp(10), dp(28), centerY + dp(10));
+            canvas.drawArc(arc, angle, 82f, false, paint);
+        }
+    }
+
     private void showLoading(String text) {
         LinearLayout card = screen("位置");
-        TextView indicator = body("● ━━  " + text);
-        indicator.setGravity(Gravity.CENTER_HORIZONTAL);
-        indicator.setTextColor(colorText());
-        indicator.setPadding(0, dp(4), 0, dp(4));
-        card.addView(indicator, blockParams(0));
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.addView(new LoadingOrbitView(this), new LinearLayout.LayoutParams(dp(96), dp(34)));
+        TextView label = body(text);
+        label.setGravity(Gravity.CENTER_HORIZONTAL);
+        label.setTextColor(colorMuted());
+        row.addView(label, blockParams(8));
+        card.addView(row, blockParams(0));
         setScreen(card, true);
     }
 
@@ -5153,6 +5183,14 @@ public class MainActivity extends Activity {
 
     private int colorMuted() {
         return isDarkMode() ? Color.rgb(152, 174, 168) : Color.rgb(92, 111, 106);
+    }
+
+    private int colorAccent() {
+        return isDarkMode() ? Color.rgb(0, 218, 194) : Color.rgb(13, 95, 84);
+    }
+
+    private int colorAccentMuted() {
+        return isDarkMode() ? Color.rgb(28, 88, 80) : Color.rgb(196, 226, 218);
     }
 
     private boolean isDarkMode() {

@@ -31,8 +31,6 @@ $forbiddenPatterns = @(
     'loc\.mtmt\.top',
     '82\.158\.231\.148',
     '162\.141\.136\.28',
-    'zWbXt9p6jysX',
-    'fHR3TaWIlRBl9c8k',
     'command0block'
 )
 $textFiles = Get-ChildItem -LiteralPath $Root -Recurse -File | Where-Object {

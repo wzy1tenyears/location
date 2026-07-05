@@ -6,261 +6,290 @@ require_once __DIR__ . '/../private/lib/bootstrap.php';
 
 require_app_user_agent();
 
+$key = defined('AMAP_JS_API_KEY') ? trim((string) AMAP_JS_API_KEY) : '';
 $servicePath = defined('AMAP_SERVICE_PROXY_PATH') ? trim((string) AMAP_SERVICE_PROXY_PATH) : '/_AMapService';
+$safeKey = json_encode($key, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 $safeServicePath = json_encode($servicePath, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 
 header('Content-Type: text/html; charset=utf-8');
 header('Cache-Control: no-store, no-transform');
 
-echo str_replace('__AMAP_SERVICE_PATH__', $safeServicePath, <<<'HTML'
+echo <<<HTML
 <!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <title>历史轨迹</title>
+  <title>位置地图</title>
   <style>
-    html, body, #map { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #eef3f1; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #19342f; }
+    html, body, #map { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #eef3f1; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #173b35; }
     #map { position: relative; touch-action: none; }
-    .tile, .path, .marker, .empty, .controls, .info { position: absolute; }
-    .tile { width: 256px; height: 256px; user-select: none; -webkit-user-drag: none; opacity: 0; transition: opacity .18s ease; }
-    .tile.loaded { opacity: 1; }
-    .path { inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
-    .marker { min-width: 24px; height: 24px; padding: 0 6px; border-radius: 999px; background: var(--color, #0d5f54); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; box-shadow: 0 4px 12px rgba(0,0,0,.24); border: 2px solid #fff; transform: translate(-50%, -50%); z-index: 20; }
-    .marker.latest { width: 30px; height: 30px; box-shadow: 0 0 0 6px rgba(13,95,84,.16), 0 5px 16px rgba(0,0,0,.28); }
-    .empty { inset: 0; display: grid; place-items: center; color: #5c6f6a; font-size: 14px; text-align: center; padding: 18px; box-sizing: border-box; z-index: 30; }
-    .controls { left: 10px; top: 10px; display: grid; gap: 6px; z-index: 40; }
-    .controls button { width: 32px; height: 32px; border: 0; border-radius: 8px; background: rgba(255,255,255,.96); color: #173b35; font-size: 20px; font-weight: 800; box-shadow: 0 2px 8px rgba(0,0,0,.16); }
-    .info { left: 12px; right: 12px; bottom: 12px; padding: 10px 12px; border-radius: 12px; background: rgba(255,255,255,.96); color: #19342f; font-size: 13px; line-height: 1.45; box-shadow: 0 6px 18px rgba(0,0,0,.18); z-index: 45; white-space: pre-wrap; display: none; }
-    .copyright { position: absolute; right: 8px; bottom: 4px; z-index: 35; color: rgba(25,52,47,.72); background: rgba(255,255,255,.72); border-radius: 6px; padding: 2px 5px; font-size: 10px; }
+    .map-state { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; padding: 18px; box-sizing: border-box; text-align: center; color: #5b6f69; font-size: 13px; background: linear-gradient(180deg, rgba(244,249,247,.92), rgba(238,243,241,.76)); }
+    .marker { display: inline-flex; align-items: center; justify-content: center; height: 24px; min-width: 24px; padding: 0 7px; border-radius: 999px; border: 2px solid #fff; background: var(--marker-color, #0d5f54); color: #fff; font-size: 12px; font-weight: 800; box-shadow: 0 5px 15px rgba(0,0,0,.26); white-space: nowrap; transform: translate(-50%, -50%); }
+    .marker.gps.latest { height: 30px; min-width: 30px; box-shadow: 0 0 0 7px rgba(13,95,84,.16), 0 6px 18px rgba(0,0,0,.3); }
+    .marker.ip { --marker-color: #d97706; }
+    .marker.webrtc { --marker-color: #7c3aed; }
+    .marker-label { padding: 4px 7px; border-radius: 8px; background: rgba(255,255,255,.94); color: #173b35; border: 1px solid rgba(13,95,84,.16); box-shadow: 0 4px 12px rgba(0,0,0,.16); font-size: 11px; line-height: 1.35; max-width: 210px; white-space: normal; }
+    .amap-info-content { color: #173b35; font-size: 13px; line-height: 1.5; }
   </style>
   <script data-cfasync="false">
-    const AMAP_SERVICE_PATH = __AMAP_SERVICE_PATH__;
+    const AMAP_KEY = {$safeKey};
+    const AMAP_SERVICE_PATH = {$safeServicePath};
     const serviceHost = new URL(AMAP_SERVICE_PATH || '/_AMapService', window.location.origin).toString().replace(/\/$/, '');
-    const tileSize = 256;
-    const minZoom = 3;
-    const maxZoom = 18;
-    const colors = ['#0d5f54', '#1677ff', '#d97706', '#7c3aed', '#dc2626', '#0891b2', '#65a30d', '#be185d'];
-    let currentRecords = [];
-    let zoom = 15;
-    let center = { lat: 39.904989, lng: 116.405285 };
-    let dragging = null;
-
-    function valid(record) {
-      const lat = Number(record && record.latitude);
-      const lng = Number(record && record.longitude);
-      return Number.isFinite(lat) && Number.isFinite(lng) && lat >= -85 && lat <= 85 && lng >= -180 && lng <= 180 && !(lat === 0 && lng === 0);
+    if (serviceHost) {
+      window._AMapSecurityConfig = { serviceHost };
     }
-    function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
-    function project(lat, lng, z) {
-      const sinLat = Math.sin(clamp(lat, -85.05112878, 85.05112878) * Math.PI / 180);
-      const scale = tileSize * Math.pow(2, z);
+
+    let map = null;
+    let pendingRecords = null;
+    let currentMarkers = [];
+    let currentPolylines = [];
+    let infoWindow = null;
+    const colors = ['#0d5f54', '#1677ff', '#059669', '#dc2626', '#0891b2', '#be185d'];
+
+    function state(message) {
+      let node = document.querySelector('.map-state');
+      if (!message) {
+        if (node) node.remove();
+        return;
+      }
+      if (!node) {
+        node = document.createElement('div');
+        node.className = 'map-state';
+        document.body.appendChild(node);
+      }
+      node.textContent = message;
+    }
+
+    function validCoordinate(lat, lng) {
+      return Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 && !(Math.abs(lat) < 0.000001 && Math.abs(lng) < 0.000001);
+    }
+
+    function firstText() {
+      for (const value of arguments) {
+        if (value === null || value === undefined) continue;
+        const text = String(value).trim();
+        if (text) return text;
+      }
+      return '';
+    }
+
+    function nameOf(record) {
+      return firstText(record && record.display_name, record && record.username, '成员');
+    }
+
+    function compactName(record) {
+      const text = nameOf(record);
+      return text.length > 2 ? text.slice(0, 2) : text;
+    }
+
+    function sourceLabel(type) {
+      if (type === 'ip') return 'IP';
+      if (type === 'webrtc') return 'WebRTC';
+      return '定位';
+    }
+
+    function sourceClass(type) {
+      return type === 'ip' || type === 'webrtc' ? type : 'gps';
+    }
+
+    function makeMarkerContent(type, latest, text) {
+      const node = document.createElement('div');
+      node.className = `marker \${sourceClass(type)}\${latest ? ' latest' : ''}`;
+      node.textContent = text;
+      return node;
+    }
+
+    function markerInfo(item) {
+      const lines = [];
+      lines.push(`\${item.name} · \${sourceLabel(item.type)}`);
+      if (item.address) lines.push(item.address);
+      if (item.city || item.region || item.country) lines.push([item.country, item.region, item.city].filter(Boolean).join(' '));
+      if (item.provider) lines.push(`来源：\${item.provider}`);
+      if (item.ip) lines.push(`IP：\${item.ip}`);
+      if (item.time) lines.push(`时间：\${item.time}`);
+      if (Number.isFinite(item.accuracy)) lines.push(`精度：\${Math.round(item.accuracy)}m`);
+      return lines.join('<br>');
+    }
+
+    function normalizeRecord(record, index) {
+      if (!record || typeof record !== 'object') return null;
+      const lat = Number(record.latitude);
+      const lng = Number(record.longitude);
+      if (!validCoordinate(lat, lng)) return null;
+      const diagnostics = record.address_diagnostics || {};
       return {
-        x: (lng + 180) / 360 * scale,
-        y: (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale,
+        type: 'gps',
+        name: nameOf(record),
+        label: compactName(record),
+        lat,
+        lng,
+        address: firstText(diagnostics.preferred_address, record.address, record.location_address),
+        city: firstText(record.city),
+        region: firstText(record.region),
+        country: firstText(record.country),
+        provider: 'GPS',
+        time: firstText(record.created_at, record.updated_at),
+        accuracy: Number(record.accuracy),
+        userKey: firstText(record.user_id, record.username, String(index)),
+        sourceIndex: 0,
       };
     }
-    function unproject(x, y, z) {
-      const scale = tileSize * Math.pow(2, z);
-      const lng = x / scale * 360 - 180;
-      const n = Math.PI - 2 * Math.PI * y / scale;
-      const lat = 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
-      return { lat, lng };
+
+    function normalizeSource(record, source, sourceIndex) {
+      if (!source || typeof source !== 'object') return null;
+      const type = String(source.type || '').toLowerCase();
+      if (type !== 'ip' && type !== 'webrtc') return null;
+      const lat = Number(source.latitude);
+      const lng = Number(source.longitude);
+      if (!validCoordinate(lat, lng)) return null;
+      return {
+        type,
+        name: nameOf(record),
+        label: sourceLabel(type),
+        lat,
+        lng,
+        address: firstText(source.address, source.detail, source.ip),
+        city: firstText(source.city),
+        region: firstText(source.region),
+        country: firstText(source.country),
+        provider: firstText(source.provider, source.name, source.source),
+        ip: firstText(source.ip),
+        time: firstText(record && record.created_at, record && record.updated_at),
+        accuracy: Number.NaN,
+        userKey: firstText(record && record.user_id, record && record.username, source.ip, type),
+        sourceIndex,
+      };
     }
-    function tileUrl(x, y, z) {
-      const max = Math.pow(2, z);
-      const wrappedX = ((x % max) + max) % max;
-      return `${serviceHost}/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x=${wrappedX}&y=${y}&z=${z}`;
-    }
-    function initial(record) {
-      const name = String((record && (record.display_name || record.username)) || '用户').trim();
-      return name.slice(0, 2) || '用户';
-    }
-    function userKey(record) {
-      return String((record && record.user_id) || (record && record.username) || '0');
-    }
-    function title(record) {
-      const name = String((record && (record.display_name || record.username)) || '成员');
-      const time = String((record && (record.created_at || record.updated_at)) || '');
-      const diag = record && record.address_diagnostics;
-      const address = diag && diag.preferred_address ? `\n${diag.preferred_address}` : '';
-      return `${name}\n${time}${address}`;
-    }
-    function grouped(records) {
-      const groups = new Map();
-      records.forEach((record) => {
-        const key = userKey(record);
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(record);
-      });
-      groups.forEach((items) => items.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || ''))));
-      return Array.from(groups.values());
-    }
-    function fitView(records) {
-      const width = Math.max(1, window.innerWidth || 320);
-      const height = Math.max(1, window.innerHeight || 260);
-      const lats = records.map((record) => Number(record.latitude));
-      const lngs = records.map((record) => Number(record.longitude));
-      const minLat = Math.min(...lats);
-      const maxLat = Math.max(...lats);
-      const minLng = Math.min(...lngs);
-      const maxLng = Math.max(...lngs);
-      center = { lat: (minLat + maxLat) / 2, lng: (minLng + maxLng) / 2 };
-      if (records.length <= 1 || (Math.abs(maxLat - minLat) < 0.00001 && Math.abs(maxLng - minLng) < 0.00001)) {
-        zoom = 16;
-        return;
-      }
-      for (let z = maxZoom; z >= minZoom; z -= 1) {
-        const a = project(minLat, minLng, z);
-        const b = project(maxLat, maxLng, z);
-        if (Math.abs(a.x - b.x) <= width - 54 && Math.abs(a.y - b.y) <= height - 54) {
-          zoom = clamp(z, minZoom, maxZoom);
-          return;
-        }
-      }
-      zoom = minZoom;
-    }
-    function clearMap(map) {
-      map.querySelectorAll('.tile,.path,.marker,.empty,.info,.controls,.copyright').forEach((node) => node.remove());
-    }
-    function showEmpty(message) {
-      const map = document.getElementById('map');
-      clearMap(map);
-      const empty = document.createElement('div');
-      empty.className = 'empty';
-      empty.textContent = message || '暂无可显示轨迹';
-      map.appendChild(empty);
-    }
-    function render() {
-      const records = currentRecords.filter(valid);
-      if (!records.length) {
-        showEmpty('暂无可显示轨迹');
-        return;
-      }
-      const map = document.getElementById('map');
-      clearMap(map);
-      const width = Math.max(1, map.clientWidth || window.innerWidth || 320);
-      const height = Math.max(1, map.clientHeight || window.innerHeight || 260);
-      const centerPx = project(center.lat, center.lng, zoom);
-      const topLeft = { x: centerPx.x - width / 2, y: centerPx.y - height / 2 };
-      const tileMinX = Math.floor(topLeft.x / tileSize) - 1;
-      const tileMaxX = Math.floor((topLeft.x + width) / tileSize) + 1;
-      const tileMinY = Math.max(0, Math.floor(topLeft.y / tileSize) - 1);
-      const tileMaxY = Math.min(Math.pow(2, zoom) - 1, Math.floor((topLeft.y + height) / tileSize) + 1);
-      for (let x = tileMinX; x <= tileMaxX; x += 1) {
-        for (let y = tileMinY; y <= tileMaxY; y += 1) {
-          const img = document.createElement('img');
-          img.className = 'tile';
-          img.alt = '';
-          img.decoding = 'async';
-          img.loading = 'eager';
-          img.style.left = `${Math.round(x * tileSize - topLeft.x)}px`;
-          img.style.top = `${Math.round(y * tileSize - topLeft.y)}px`;
-          img.onload = () => img.classList.add('loaded');
-          img.src = tileUrl(x, y, zoom);
-          map.appendChild(img);
-        }
-      }
-      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      svg.setAttribute('class', 'path');
-      map.appendChild(svg);
-      grouped(records).forEach((group, groupIndex) => {
-        const color = colors[groupIndex % colors.length];
-        const points = group.map((record) => {
-          const px = project(Number(record.latitude), Number(record.longitude), zoom);
-          return { x: px.x - topLeft.x, y: px.y - topLeft.y, record };
-        });
-        if (points.length > 1) {
-          const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
-          line.setAttribute('points', points.map((point) => `${point.x},${point.y}`).join(' '));
-          line.setAttribute('fill', 'none');
-          line.setAttribute('stroke', color);
-          line.setAttribute('stroke-width', '5');
-          line.setAttribute('stroke-linecap', 'round');
-          line.setAttribute('stroke-linejoin', 'round');
-          line.setAttribute('opacity', '0.82');
-          svg.appendChild(line);
-        }
-        points.forEach((point, index) => {
-          const marker = document.createElement('button');
-          marker.type = 'button';
-          marker.className = `marker${index === points.length - 1 ? ' latest' : ''}`;
-          marker.style.setProperty('--color', color);
-          marker.style.left = `${point.x}px`;
-          marker.style.top = `${point.y}px`;
-          marker.textContent = initial(point.record);
-          marker.title = title(point.record);
-          marker.addEventListener('click', () => showInfo(title(point.record)));
-          map.appendChild(marker);
+
+    function expandRecords(records) {
+      const items = [];
+      const seen = new Set();
+      (Array.isArray(records) ? records : []).forEach((record, index) => {
+        const gps = normalizeRecord(record, index);
+        if (gps) items.push(gps);
+        const sources = record && record.address_diagnostics && Array.isArray(record.address_diagnostics.sources)
+          ? record.address_diagnostics.sources
+          : [];
+        sources.forEach((source, sourceIndex) => {
+          const item = normalizeSource(record, source, sourceIndex + 1);
+          if (item) items.push(item);
         });
       });
-      const controls = document.createElement('div');
-      controls.className = 'controls';
-      const zoomIn = document.createElement('button');
-      zoomIn.type = 'button';
-      zoomIn.textContent = '+';
-      zoomIn.addEventListener('click', () => { zoom = clamp(zoom + 1, minZoom, maxZoom); render(); });
-      const zoomOut = document.createElement('button');
-      zoomOut.type = 'button';
-      zoomOut.textContent = '−';
-      zoomOut.addEventListener('click', () => { zoom = clamp(zoom - 1, minZoom, maxZoom); render(); });
-      controls.append(zoomIn, zoomOut);
-      map.appendChild(controls);
-      const info = document.createElement('div');
-      info.className = 'info';
-      map.appendChild(info);
-      const copyright = document.createElement('div');
-      copyright.className = 'copyright';
-      copyright.textContent = '© 高德地图';
-      map.appendChild(copyright);
-    }
-    function showInfo(text) {
-      const info = document.querySelector('.info');
-      if (!info) return;
-      info.textContent = text || '';
-      info.style.display = text ? 'block' : 'none';
-    }
-    function moveBy(dx, dy) {
-      const centerPx = project(center.lat, center.lng, zoom);
-      center = unproject(centerPx.x - dx, centerPx.y - dy, zoom);
-      render();
-    }
-    function installDrag() {
-      const map = document.getElementById('map');
-      map.addEventListener('pointerdown', (event) => {
-        if (event.target && event.target.closest && event.target.closest('button')) return;
-        dragging = { id: event.pointerId, x: event.clientX, y: event.clientY };
-        map.setPointerCapture(event.pointerId);
-        showInfo('');
+      return items.filter((item) => {
+        const key = [item.type, item.userKey, item.time, item.lat.toFixed(6), item.lng.toFixed(6), item.sourceIndex].join('|');
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
       });
-      map.addEventListener('pointermove', (event) => {
-        if (!dragging || dragging.id !== event.pointerId) return;
-        const dx = event.clientX - dragging.x;
-        const dy = event.clientY - dragging.y;
-        if (Math.abs(dx) + Math.abs(dy) < 4) return;
-        dragging.x = event.clientX;
-        dragging.y = event.clientY;
-        moveBy(dx, dy);
-      });
-      map.addEventListener('pointerup', () => { dragging = null; });
-      map.addEventListener('pointercancel', () => { dragging = null; });
     }
+
+    function clearMap() {
+      currentMarkers.forEach((marker) => marker.setMap(null));
+      currentPolylines.forEach((line) => line.setMap(null));
+      currentMarkers = [];
+      currentPolylines = [];
+      if (infoWindow) {
+        infoWindow.close();
+      }
+    }
+
+    function renderRecords(records) {
+      pendingRecords = records;
+      if (!map || !window.AMap) return;
+      clearMap();
+      const items = expandRecords(records);
+      if (!items.length) {
+        state('暂无可显示的位置');
+        return;
+      }
+      state('');
+      infoWindow = infoWindow || new AMap.InfoWindow({ offset: new AMap.Pixel(0, -18), isCustom: false });
+      const gpsByUser = new Map();
+      items.forEach((item) => {
+        if (item.type !== 'gps') return;
+        if (!gpsByUser.has(item.userKey)) gpsByUser.set(item.userKey, []);
+        gpsByUser.get(item.userKey).push(item);
+      });
+      Array.from(gpsByUser.values()).forEach((group, groupIndex) => {
+        group.sort((left, right) => String(left.time).localeCompare(String(right.time)));
+        const path = group.map((item) => [item.lng, item.lat]);
+        if (path.length > 1) {
+          const line = new AMap.Polyline({
+            path,
+            strokeColor: colors[groupIndex % colors.length],
+            strokeOpacity: 0.82,
+            strokeWeight: 5,
+            strokeStyle: 'solid',
+            lineJoin: 'round',
+            lineCap: 'round',
+          });
+          line.setMap(map);
+          currentPolylines.push(line);
+        }
+      });
+      items.forEach((item) => {
+        const group = gpsByUser.get(item.userKey) || [];
+        const latest = item.type === 'gps' && group[group.length - 1] === item;
+        const marker = new AMap.Marker({
+          position: [item.lng, item.lat],
+          content: makeMarkerContent(item.type, latest, item.label),
+          offset: new AMap.Pixel(0, 0),
+          zIndex: item.type === 'gps' ? (latest ? 120 : 100) : 150,
+        });
+        marker.on('click', () => {
+          infoWindow.setContent(markerInfo(item));
+          infoWindow.open(map, marker.getPosition());
+        });
+        marker.setMap(map);
+        currentMarkers.push(marker);
+      });
+      if (currentMarkers.length === 1) {
+        map.setZoomAndCenter(16, currentMarkers[0].getPosition());
+      } else {
+        map.setFitView(currentMarkers, false, [34, 28, 34, 28], 17);
+      }
+    }
+
+    function initMap() {
+      if (!window.AMap) {
+        state('高德地图脚本加载失败');
+        return;
+      }
+      map = new AMap.Map('map', {
+        zoom: 15,
+        resizeEnable: true,
+        viewMode: '2D',
+        jogEnable: true,
+        dragEnable: true,
+        zoomEnable: true,
+        doubleClickZoom: true,
+      });
+      map.on('complete', () => renderRecords(pendingRecords || []));
+      if (pendingRecords) {
+        renderRecords(pendingRecords);
+      }
+    }
+
     window.renderLocHistoryMap = function(records) {
-      currentRecords = Array.isArray(records) ? records.filter(valid) : [];
-      if (!currentRecords.length) {
-        showEmpty('暂无可显示轨迹');
+      renderRecords(Array.isArray(records) ? records : []);
+    };
+
+    window.addEventListener('DOMContentLoaded', () => {
+      state('正在加载高德地图…');
+      if (!AMAP_KEY) {
+        state('地图密钥未配置');
         return;
       }
-      fitView(currentRecords);
-      render();
-    };
-    window.addEventListener('resize', () => render());
-    window.addEventListener('DOMContentLoaded', () => {
-      installDrag();
-      showEmpty('正在等待轨迹数据');
+      const script = document.createElement('script');
+      script.src = `\${serviceHost}/maps?v=2.0&key=\${encodeURIComponent(AMAP_KEY)}`;
+      script.async = true;
+      script.onerror = () => state('高德地图脚本加载失败，请检查服务器反代规则');
+      script.onload = initMap;
+      document.head.appendChild(script);
     });
   </script>
 </head>
 <body><div id="map"></div></body>
 </html>
-HTML);
+HTML;

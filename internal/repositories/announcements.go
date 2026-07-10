@@ -39,4 +39,3 @@ LIMIT 1`
 	}
 	return &announcement, nil
 }
-

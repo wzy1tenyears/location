@@ -155,4 +155,3 @@ func (repo LocationRepository) queryLocations(ctx context.Context, query string,
 	}
 	return locations, rows.Err()
 }
-

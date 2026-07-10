@@ -54,4 +54,3 @@ func (handler InviteHandler) Check(w http.ResponseWriter, r *http.Request) {
 		"message":             "邀请码可用。",
 	})
 }
-

@@ -13,7 +13,8 @@ type Config struct {
 	Admin    AdminConfig
 	Auth     AuthConfig
 	Files    FileConfig
-	Legacy   LegacyConfig
+	External ExternalConfig
+	Location LocationConfig
 	Database DatabaseConfig
 }
 
@@ -43,6 +44,7 @@ type AuthConfig struct {
 	AdminUsername     string
 	AdminPassword     string
 	AdminPasswordHash string
+	AdminPath         string
 }
 
 type FileConfig struct {
@@ -51,8 +53,25 @@ type FileConfig struct {
 	AdminAPKFilename string
 }
 
-type LegacyConfig struct {
-	BaseURL string
+type ExternalConfig struct {
+	IPInfoLiteToken    string
+	IP2LocationKey     string
+	IPDataKey          string
+	IPRegistryKey      string
+	TurnstileSiteKey   string
+	TurnstileSecretKey string
+	AMapJSAPIKey       string
+	AMapServicePath    string
+}
+
+type LocationConfig struct {
+	HistoryLimit             int
+	MinReportSeconds         int
+	MaxAccuracyMeters        float64
+	MaxSpeedMPS              float64
+	MaxReasonableTravelMPS   float64
+	DiagnosticsUpdateSeconds int
+	MaxDiagnosticsBytes      int
 }
 
 type DatabaseConfig struct {
@@ -89,14 +108,31 @@ func Load() Config {
 			AdminUsername:     env("LOC_ADMIN_USERNAME", "admin114514"),
 			AdminPassword:     env("LOC_ADMIN_PASSWORD", ""),
 			AdminPasswordHash: env("LOC_ADMIN_PASSWORD_HASH", ""),
+			AdminPath:         env("LOC_ADMIN_PATH", "admin114514"),
 		},
 		Files: FileConfig{
 			PublicBaseDir:    env("LOC_PUBLIC_BASE_DIR", "."),
 			UserAPKFilename:  env("LOC_ANDROID_APK_FILENAME", "location-release.apk"),
 			AdminAPKFilename: env("LOC_ANDROID_ADMIN_APK_FILENAME", "private/location-admin-release.apk"),
 		},
-		Legacy: LegacyConfig{
-			BaseURL: env("LOC_LEGACY_BASE_URL", ""),
+		External: ExternalConfig{
+			IPInfoLiteToken:    env("LOC_IPINFO_LITE_TOKEN", ""),
+			IP2LocationKey:     env("LOC_IP2LOCATION_IO_KEY", ""),
+			IPDataKey:          env("LOC_IPDATA_API_KEY", ""),
+			IPRegistryKey:      env("LOC_IPREGISTRY_API_KEY", ""),
+			TurnstileSiteKey:   env("LOC_CF_TURNSTILE_SITE_KEY", ""),
+			TurnstileSecretKey: env("LOC_CF_TURNSTILE_SECRET_KEY", ""),
+			AMapJSAPIKey:       env("LOC_AMAP_JS_API_KEY", ""),
+			AMapServicePath:    env("LOC_AMAP_SERVICE_PROXY_PATH", "/_AMapService"),
+		},
+		Location: LocationConfig{
+			HistoryLimit:             envInt("LOC_LOCATION_HISTORY_LIMIT", 5000),
+			MinReportSeconds:         envInt("LOC_MIN_LOCATION_REPORT_SECONDS", 10),
+			MaxAccuracyMeters:        envFloat("LOC_MAX_LOCATION_ACCURACY_METERS", 5000),
+			MaxSpeedMPS:              envFloat("LOC_MAX_LOCATION_SPEED_MPS", 120),
+			MaxReasonableTravelMPS:   envFloat("LOC_MAX_REASONABLE_TRAVEL_MPS", 120),
+			DiagnosticsUpdateSeconds: envInt("LOC_LOCATION_DIAGNOSTICS_UPDATE_SECONDS", 600),
+			MaxDiagnosticsBytes:      envInt("LOC_MAX_ADDRESS_DIAGNOSTICS_BYTES", 12000),
 		},
 		Database: DatabaseConfig{
 			Host:    env("LOC_DB_HOST", "127.0.0.1"),
@@ -142,4 +178,16 @@ func envBool(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+func envFloat(key string, fallback float64) float64 {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return fallback
+	}
+	return value
 }

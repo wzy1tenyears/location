@@ -13,6 +13,10 @@ type User struct {
 	GroupName                     string
 	Role                          string
 	IsActive                      bool
+	DisabledReason                string
+	FailedLoginCount              int
+	LoginLockedAt                 sql.NullTime
+	DebugMode                     bool
 	ReportIntervalSeconds         int
 	TermsAcceptedAt               sql.NullTime
 	UserAgreementAcceptedAt       sql.NullTime
@@ -39,6 +43,16 @@ type InviteCode struct {
 	UsedCount         int
 	MaxUses           int
 	IsActive          bool
+}
+
+type AppChallenge struct {
+	ID                string
+	SecretHash        string
+	DeviceFingerprint string
+	Purpose           string
+	VerifiedAt        sql.NullTime
+	ConsumedAt        sql.NullTime
+	ExpiresAt         time.Time
 }
 
 type Membership struct {

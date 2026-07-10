@@ -78,4 +78,3 @@ func adminAPKToken(version string, expires string, secret string) string {
 	mac.Write([]byte("admin-apk|" + version + "|" + expires))
 	return hex.EncodeToString(mac.Sum(nil))
 }
-

@@ -55,4 +55,3 @@ func (handler MeHandler) Show(w http.ResponseWriter, r *http.Request) {
 		"report_interval_seconds": services.NormalizeReportIntervalSeconds(user.ReportIntervalSeconds),
 	})
 }
-

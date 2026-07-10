@@ -174,4 +174,3 @@ func jsonObject(raw string, valid bool) any {
 	}
 	return decoded
 }
-

@@ -14,6 +14,34 @@ type Reader struct {
 	SavePath   string
 }
 
+func (reader Reader) SessionID(r *http.Request) (string, bool) {
+	return reader.cookieValue(r)
+}
+
+func (reader Reader) Clear(w http.ResponseWriter) {
+	reader.deleteCurrentSessionFile()
+	http.SetCookie(w, &http.Cookie{
+		Name:     reader.CookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (reader Reader) DeleteByID(sessionID string) {
+	if strings.TrimSpace(reader.SavePath) == "" || !safeSessionID(sessionID) {
+		return
+	}
+	_ = os.Remove(filepath.Join(reader.SavePath, "sess_"+sessionID))
+}
+
+func (reader Reader) deleteCurrentSessionFile() {
+	// no-op placeholder for cookie-only clears; handlers that know the request
+	// can call DeleteByID with the current cookie value before clearing it.
+}
+
 func (reader Reader) UserID(r *http.Request) (int64, bool) {
 	value, ok := reader.cookieValue(r)
 	if !ok {

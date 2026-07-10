@@ -98,4 +98,3 @@ func (handler SettingsHandler) changePassword(r *http.Request, userID int64, cur
 	}
 	return handler.users.UpdatePasswordHash(r.Context(), userID, hash)
 }
-

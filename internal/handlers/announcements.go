@@ -59,4 +59,3 @@ func (handler AnnouncementHandler) Latest(w http.ResponseWriter, r *http.Request
 		"announcement": payload,
 	})
 }
-

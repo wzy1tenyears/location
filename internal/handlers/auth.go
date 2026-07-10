@@ -33,6 +33,25 @@ func newScopedHandler(db *sql.DB, sessions session.Reader) scopedHandler {
 }
 
 func (handler scopedHandler) requireScope(r *http.Request, groupName string) (*userScope, bool, error) {
+	scope, ok, err := handler.requireUser(r)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	membership, err := handler.groups.MembershipForUser(r.Context(), scope.User.ID, truncateGroupName(groupName))
+	if err != nil {
+		return nil, false, err
+	}
+	if membership == nil && groupName == "" {
+		return nil, false, httpx.APIError{Status: http.StatusConflict, Message: "账号还没有家庭组。"}
+	}
+	if membership == nil {
+		return nil, false, httpx.Forbidden("无权访问该家庭组。")
+	}
+	scope.Membership = membership
+	return scope, true, nil
+}
+
+func (handler scopedHandler) requireUser(r *http.Request) (*userScope, bool, error) {
 	userID, ok := handler.sessions.UserID(r)
 	if !ok {
 		return nil, false, httpx.Unauthorized("请先登录。")
@@ -52,18 +71,7 @@ func (handler scopedHandler) requireScope(r *http.Request, groupName string) (*u
 	if err != nil {
 		return nil, false, err
 	}
-	membership, err := handler.groups.MembershipForUser(r.Context(), user.ID, truncateGroupName(groupName))
-	if err != nil {
-		return nil, false, err
-	}
-	if membership == nil && groupName == "" {
-		return nil, false, httpx.APIError{Status: http.StatusConflict, Message: "账号还没有家庭组。"}
-	}
-	if membership == nil {
-		return nil, false, httpx.Forbidden("无权访问该家庭组。")
-	}
-
-	return &userScope{User: user, Groups: groups, Membership: membership}, true, nil
+	return &userScope{User: user, Groups: groups}, true, nil
 }
 
 func selectedGroupName(r *http.Request, bodyGroupName string) string {
@@ -81,4 +89,3 @@ func truncateGroupName(groupName string) string {
 	}
 	return groupName
 }
-

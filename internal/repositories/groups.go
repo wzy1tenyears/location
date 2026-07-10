@@ -103,4 +103,3 @@ ORDER BY ug.role ASC, u.username ASC`
 	}
 	return members, rows.Err()
 }
-

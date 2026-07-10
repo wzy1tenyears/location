@@ -32,7 +32,6 @@ v3 是独立的 Go 后端目录，用来承接从 `v2` PHP 后端逐步迁出的
 - `LOC_DB_PASS`
 - `LOC_PUBLIC_BASE_DIR`
 - `LOC_PHP_SESSION_DIR`
-- `LOC_LEGACY_BASE_URL`
 - `LOC_ANDROID_VERSION_CODE`
 - `LOC_ANDROID_ADMIN_VERSION_CODE`
 - `LOC_ADMIN_PASSWORD` / `LOC_ADMIN_PASSWORD_HASH`
@@ -45,13 +44,12 @@ v3 是独立的 Go 后端目录，用来承接从 `v2` PHP 后端逐步迁出的
 cd F:\program\location\v3
 $env:LOC_DB_PASS = '<database password>'
 $env:LOC_PUBLIC_BASE_DIR = 'F:\program\location\v2'
-$env:LOC_LEGACY_BASE_URL = 'http://127.0.0.1:8081'
 go run .\cmd\server
 ```
 
 `LOC_PUBLIC_BASE_DIR` 指向实际托管 APK 和公开资源的目录；当前如果仍复用 `v2` 的 APK/资源，就应指向 `F:\program\location\v2`，而不是机械地写成 `v3`。
 
-`LOC_LEGACY_BASE_URL` 用于未迁接口回退到旧 PHP 后端。切主流量到 `v3` 时，这个变量应指向仅本机可访问的旧后端入口，例如 `http://127.0.0.1:8081`。
+当前 v3 已覆盖全部 `/api/*.php` 兼容路径，不再需要旧 PHP API 回退入口。
 
 本机当前未检测到 Go 工具链；安装 Go 后可直接运行上面的命令。
 
@@ -74,4 +72,4 @@ powershell.exe -ExecutionPolicy Bypass -File .\build-v3.ps1
 ## 灰度部署
 
 - `deploy/family-location-go.service.sample`：systemd 示例，敏感环境变量放到 `/etc/family-location-v3.env`。
-- `deploy/nginx-go-backend.sample.conf`：Nginx 主入口切到 `v3`、同时保留旧 PHP 回退入口的样例。
+- `deploy/nginx-go-backend.sample.conf`：Nginx `/api/` 直接切到纯 Go v3 的样例。

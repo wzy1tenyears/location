@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>位置地图</title>
+  <style>
+    html, body, #map { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #eef3f1; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #173b35; }
+    #map { position: relative; touch-action: none; }
+    .map-state { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; padding: 18px; box-sizing: border-box; text-align: center; color: #5b6f69; font-size: 13px; background: linear-gradient(180deg, rgba(244,249,247,.92), rgba(238,243,241,.76)); }
+    .marker { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; border-radius: 50%; border: 2px solid #fff; background: var(--marker-color, #0d5f54); color: #fff; font-size: 14px; font-weight: 900; box-shadow: 0 5px 15px rgba(0,0,0,.26); white-space: nowrap; overflow: hidden; text-align: center; box-sizing: border-box; }
+    .marker.gps.latest { box-shadow: 0 0 0 7px rgba(13,95,84,.16), 0 6px 18px rgba(0,0,0,.3); }
+    .marker.ip { --marker-color: #d97706; }
+    .marker.webrtc { --marker-color: #7c3aed; }
+    .marker-label { padding: 4px 7px; border-radius: 8px; background: rgba(255,255,255,.94); color: #173b35; border: 1px solid rgba(13,95,84,.16); box-shadow: 0 4px 12px rgba(0,0,0,.16); font-size: 11px; line-height: 1.35; max-width: 210px; white-space: normal; }
+    .amap-info-content { color: #173b35; font-size: 13px; line-height: 1.5; }
+  </style>
+  <script data-cfasync="false">
+    const AMAP_KEY = __AMAP_KEY__;
+    const AMAP_SERVICE_PATH = __AMAP_SERVICE_PATH__;
+    const serviceHost = new URL(AMAP_SERVICE_PATH || '/_AMapService', window.location.origin).toString().replace(/\/$/, '');
+    if (serviceHost) {
+      window._AMapSecurityConfig = { serviceHost };
+    }
+
+    let map = null;
+    let pendingRecords = null;
+    let currentMarkers = [];
+    let currentPolylines = [];
+    let infoWindow = null;
+    const colors = ['#0d5f54', '#1677ff', '#059669', '#dc2626', '#0891b2', '#be185d'];
+
+    function state(message) {
+      let node = document.querySelector('.map-state');
+      if (!message) {
+        if (node) node.remove();
+        return;
+      }
+      if (!node) {
+        node = document.createElement('div');
+        node.className = 'map-state';
+        document.body.appendChild(node);
+      }
+      node.textContent = message;
+    }
+
+    function validCoordinate(lat, lng) {
+      return Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 && !(Math.abs(lat) < 0.000001 && Math.abs(lng) < 0.000001);
+    }
+
+    function firstText() {
+      for (const value of arguments) {
+        if (value === null || value === undefined) continue;
+        const text = String(value).trim();
+        if (text) return text;
+      }
+      return '';
+    }
+
+    function nameOf(record) {
+      const displayName = firstText(record && record.display_name);
+      const username = firstText(record && record.username);
+      return firstText(displayName, username, '成员');
+    }
+
+    function initialOf(text) {
+      const name = firstText(text, '成');
+      return Array.from(name)[0] || '成';
+    }
+
+    function outOfChina(lng, lat) {
+      return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271;
+    }
+
+    function transformLat(x, y) {
+      let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+      ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+      ret += (20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin(y / 3.0 * Math.PI)) * 2.0 / 3.0;
+      ret += (160.0 * Math.sin(y / 12.0 * Math.PI) + 320 * Math.sin(y * Math.PI / 30.0)) * 2.0 / 3.0;
+      return ret;
+    }
+
+    function transformLng(x, y) {
+      let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+      ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+      ret += (20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin(x / 3.0 * Math.PI)) * 2.0 / 3.0;
+      ret += (150.0 * Math.sin(x / 12.0 * Math.PI) + 300.0 * Math.sin(x / 30.0 * Math.PI)) * 2.0 / 3.0;
+      return ret;
+    }
+
+    function wgs84ToGcj02(lng, lat) {
+      if (outOfChina(lng, lat)) return { lng, lat };
+      const a = 6378245.0;
+      const ee = 0.00669342162296594323;
+      let dLat = transformLat(lng - 105.0, lat - 35.0);
+      let dLng = transformLng(lng - 105.0, lat - 35.0);
+      const radLat = lat / 180.0 * Math.PI;
+      let magic = Math.sin(radLat);
+      magic = 1 - ee * magic * magic;
+      const sqrtMagic = Math.sqrt(magic);
+      dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
+      dLng = (dLng * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
+      return { lat: lat + dLat, lng: lng + dLng };
+    }
+
+    function bd09ToGcj02(lng, lat) {
+      const x = lng - 0.0065;
+      const y = lat - 0.006;
+      const z = Math.sqrt(x * x + y * y) - 0.00002 * Math.sin(y * Math.PI * 3000.0 / 180.0);
+      const theta = Math.atan2(y, x) - 0.000003 * Math.cos(x * Math.PI * 3000.0 / 180.0);
+      return {
+        lng: z * Math.cos(theta),
+        lat: z * Math.sin(theta),
+      };
+    }
+
+    function normalizedCoordinateSystem(value) {
+      const text = firstText(value).toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (text === 'bd09' || text === 'baidu') return 'bd09';
+      if (text === 'gcj02' || text === 'gcj' || text === 'amap' || text === 'gaode') return 'gcj02';
+      if (text === 'wgs84' || text === 'gps') return 'wgs84';
+      return '';
+    }
+
+    function coordinateSystemFor(record, diagnostics) {
+      const meta = record && record.location_meta && typeof record.location_meta === 'object' ? record.location_meta : {};
+      const source = firstGpsSource(diagnostics);
+      const system = normalizedCoordinateSystem(
+        firstText(
+          diagnostics && diagnostics.preferred_coordinate_system,
+          source && source.coordinate_system,
+          meta.coordinate_system
+        )
+      );
+      if (system) return system;
+      if (meta.mock_provider === true || meta.mock_provider === 'true' || meta.mock_provider === 1 || meta.mock_provider === '1') {
+        return 'bd09';
+      }
+      return 'wgs84';
+    }
+
+    function firstGpsSource(diagnostics) {
+      const sources = diagnostics && Array.isArray(diagnostics.sources) ? diagnostics.sources : [];
+      for (const source of sources) {
+        if (source && source.type === 'gps') return source;
+      }
+      return null;
+    }
+
+    function mapCoordinateFor(record, lng, lat, diagnostics) {
+      const system = coordinateSystemFor(record, diagnostics);
+      if (system === 'bd09') return bd09ToGcj02(lng, lat);
+      if (system === 'gcj02') return { lng, lat };
+      return wgs84ToGcj02(lng, lat);
+    }
+
+    function sourceLabel(type) {
+      if (type === 'ip') return 'IP';
+      if (type === 'webrtc') return 'WebRTC';
+      return '定位';
+    }
+
+    function sourceClass(type) {
+      return type === 'ip' || type === 'webrtc' ? type : 'gps';
+    }
+
+    function makeMarkerContent(type, latest, text, title) {
+      const node = document.createElement('div');
+      node.className = `marker \${sourceClass(type)}\${latest ? ' latest' : ''}`;
+      node.textContent = text;
+      node.title = firstText(title, text);
+      node.setAttribute('aria-label', firstText(title, text));
+      return node;
+    }
+
+    function markerInfo(item) {
+      const lines = [];
+      lines.push(`\${item.name} · \${sourceLabel(item.type)}`);
+      if (item.address) lines.push(item.address);
+      if (item.city || item.region || item.country) lines.push([item.country, item.region, item.city].filter(Boolean).join(' '));
+      if (item.provider) lines.push(`来源：\${item.provider}`);
+      if (item.ip) lines.push(`IP：\${item.ip}`);
+      if (item.time) lines.push(`时间：\${item.time}`);
+      return lines.join('<br>');
+    }
+
+    function normalizeRecord(record, index) {
+      if (!record || typeof record !== 'object') return null;
+      const lat = Number(record.latitude);
+      const lng = Number(record.longitude);
+      if (!validCoordinate(lat, lng)) return null;
+      const diagnostics = record.address_diagnostics || {};
+      const mapCoordinate = mapCoordinateFor(record, lng, lat, diagnostics);
+      const name = nameOf(record);
+      return {
+        type: 'gps',
+        name,
+        label: initialOf(name),
+        lat: mapCoordinate.lat,
+        lng: mapCoordinate.lng,
+        rawLat: lat,
+        rawLng: lng,
+        address: firstText(diagnostics.preferred_address, record.address, record.location_address),
+        city: firstText(record.city),
+        region: firstText(record.region),
+        country: firstText(record.country),
+        provider: 'GPS',
+        time: firstText(record.created_at, record.updated_at),
+        accuracy: Number(record.accuracy),
+        userKey: firstText(record.user_id, record.username, String(index)),
+        sourceIndex: 0,
+      };
+    }
+
+    function expandRecords(records) {
+      const items = [];
+      const seen = new Set();
+      (Array.isArray(records) ? records : []).forEach((record, index) => {
+        const gps = normalizeRecord(record, index);
+        if (gps) items.push(gps);
+      });
+      return items.filter((item) => {
+        const key = [item.type, item.userKey, item.time, item.lat.toFixed(6), item.lng.toFixed(6), item.sourceIndex].join('|');
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
+    function clearMap() {
+      currentMarkers.forEach((marker) => marker.setMap(null));
+      currentPolylines.forEach((line) => line.setMap(null));
+      currentMarkers = [];
+      currentPolylines = [];
+      if (infoWindow) {
+        infoWindow.close();
+      }
+    }
+
+    function renderRecords(records) {
+      pendingRecords = records;
+      if (!map || !window.AMap) return;
+      clearMap();
+      const items = expandRecords(records);
+      if (!items.length) {
+        state('暂无可显示的位置');
+        return;
+      }
+      state('');
+      infoWindow = infoWindow || new AMap.InfoWindow({ offset: new AMap.Pixel(0, -18), isCustom: false });
+      const gpsByUser = new Map();
+      items.forEach((item) => {
+        if (item.type !== 'gps') return;
+        if (!gpsByUser.has(item.userKey)) gpsByUser.set(item.userKey, []);
+        gpsByUser.get(item.userKey).push(item);
+      });
+      Array.from(gpsByUser.values()).forEach((group, groupIndex) => {
+        group.sort((left, right) => String(left.time).localeCompare(String(right.time)));
+        const path = group.map((item) => [item.lng, item.lat]);
+        if (path.length > 1) {
+          const line = new AMap.Polyline({
+            path,
+            strokeColor: colors[groupIndex % colors.length],
+            strokeOpacity: 0.82,
+            strokeWeight: 5,
+            strokeStyle: 'solid',
+            lineJoin: 'round',
+            lineCap: 'round',
+          });
+          line.setMap(map);
+          currentPolylines.push(line);
+        }
+      });
+      items.forEach((item) => {
+        const group = gpsByUser.get(item.userKey) || [];
+        const latest = item.type === 'gps' && group[group.length - 1] === item;
+        const marker = new AMap.Marker({
+          position: [item.lng, item.lat],
+          content: makeMarkerContent(item.type, latest, item.label, item.name),
+          offset: new AMap.Pixel(-18, -18),
+          zIndex: item.type === 'gps' ? (latest ? 120 : 100) : 150,
+        });
+        marker.on('click', () => {
+          infoWindow.setContent(markerInfo(item));
+          infoWindow.open(map, marker.getPosition());
+        });
+        marker.setMap(map);
+        currentMarkers.push(marker);
+      });
+      if (currentMarkers.length === 1) {
+        map.setZoomAndCenter(16, currentMarkers[0].getPosition());
+      } else {
+        map.setFitView(currentMarkers, false, [34, 28, 34, 28], 17);
+      }
+    }
+
+    function initMap() {
+      if (!window.AMap) {
+        state('高德地图脚本加载失败');
+        return;
+      }
+      map = new AMap.Map('map', {
+        zoom: 15,
+        resizeEnable: true,
+        viewMode: '2D',
+        jogEnable: true,
+        dragEnable: true,
+        zoomEnable: true,
+        doubleClickZoom: true,
+      });
+      map.on('complete', () => renderRecords(pendingRecords || []));
+      if (pendingRecords) {
+        renderRecords(pendingRecords);
+      }
+    }
+
+    window.renderLocHistoryMap = function(records) {
+      renderRecords(Array.isArray(records) ? records : []);
+    };
+
+    window.addEventListener('DOMContentLoaded', () => {
+      state('正在加载高德地图…');
+      if (!AMAP_KEY) {
+        state('地图密钥未配置');
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = `\${serviceHost}/maps?v=2.0&key=\${encodeURIComponent(AMAP_KEY)}`;
+      script.async = true;
+      script.onerror = () => state('高德地图脚本加载失败，请检查服务器反代规则');
+      script.onload = initMap;
+      document.head.appendChild(script);
+    });
+  </script>
+</head>
+<body><div id="map"></div></body>
+</html>

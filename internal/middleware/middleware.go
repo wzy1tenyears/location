@@ -50,4 +50,3 @@ func RequireAppUserAgent(cfg config.AppConfig) Middleware {
 		})
 	}
 }
-

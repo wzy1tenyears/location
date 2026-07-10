@@ -167,4 +167,3 @@ func locationPayloads(locations []models.Location, includeStale bool) []map[stri
 	}
 	return payloads
 }
-

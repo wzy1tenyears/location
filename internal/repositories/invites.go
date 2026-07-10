@@ -43,4 +43,3 @@ LIMIT 1`
 	}
 	return &invite, nil
 }
-

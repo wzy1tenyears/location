@@ -71,6 +71,7 @@ $RequiredFiles = @(
 	'internal/database/schema_test.go'
 	'internal/httpx/request_test.go'
 	'internal/session/session_test.go'
+	'internal/handlers/webviews_test.go'
 )
 
 foreach ($File in $RequiredFiles) {

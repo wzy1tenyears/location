@@ -166,7 +166,7 @@
 
     function makeMarkerContent(type, latest, text, title) {
       const node = document.createElement('div');
-      node.className = `marker \${sourceClass(type)}\${latest ? ' latest' : ''}`;
+      node.className = `marker ${sourceClass(type)}${latest ? ' latest' : ''}`;
       node.textContent = text;
       node.title = firstText(title, text);
       node.setAttribute('aria-label', firstText(title, text));
@@ -175,12 +175,12 @@
 
     function markerInfo(item) {
       const lines = [];
-      lines.push(`\${item.name} · \${sourceLabel(item.type)}`);
+      lines.push(`${item.name} · ${sourceLabel(item.type)}`);
       if (item.address) lines.push(item.address);
       if (item.city || item.region || item.country) lines.push([item.country, item.region, item.city].filter(Boolean).join(' '));
-      if (item.provider) lines.push(`来源：\${item.provider}`);
-      if (item.ip) lines.push(`IP：\${item.ip}`);
-      if (item.time) lines.push(`时间：\${item.time}`);
+      if (item.provider) lines.push(`来源：${item.provider}`);
+      if (item.ip) lines.push(`IP：${item.ip}`);
+      if (item.time) lines.push(`时间：${item.time}`);
       return lines.join('<br>');
     }
 
@@ -325,7 +325,7 @@
         return;
       }
       const script = document.createElement('script');
-      script.src = `\${serviceHost}/maps?v=2.0&key=\${encodeURIComponent(AMAP_KEY)}`;
+      script.src = `${serviceHost}/maps?v=2.0&key=${encodeURIComponent(AMAP_KEY)}`;
       script.async = true;
       script.onerror = () => state('高德地图脚本加载失败，请检查服务器反代规则');
       script.onload = initMap;

@@ -8,7 +8,13 @@ v3 是独立的 Go 后端目录，当前目标是承接线上全部 API，并让
 - `/api/` 应直接反向代理到 Go 服务。
 - 后台管理走 `android-admin-client` 原生界面；遗留网页后台路径应在 Nginx 上显式返回 `410 Gone`。
 
+## 目录定位
+
 本仓库仅包含可公开的 Go 后端源码、测试与通用部署样例，不包含 Android 私有源码、APK 或线上基础设施配置。
+
+- `cmd/server/`：Go 服务入口。
+- `internal/`：业务、数据访问、会话、HTTP 与数据库迁移。
+- `deploy/`：不包含私有服务器信息的 systemd 与 Nginx 样例。
 
 ## 配置
 
@@ -30,15 +36,15 @@ v3 是独立的 Go 后端目录，当前目标是承接线上全部 API，并让
 ## 本地运行
 
 ```powershell
-cd location
+cd C:\path\to\location-v3
 $env:LOC_DB_PASS = '<database password>'
 $env:LOC_APP_SIGNING_SECRET = '<token signing secret>'
 $env:LOC_ADMIN_PASSWORD = '<admin password>'
-$env:LOC_PUBLIC_BASE_DIR = '.\public'
+$env:LOC_PUBLIC_BASE_DIR = 'C:\path\to\public-assets'
 go run .\cmd\server
 ```
 
-`LOC_PUBLIC_BASE_DIR` 指向实际托管 APK 的目录。
+`LOC_PUBLIC_BASE_DIR` 指向实际托管 APK 和公开资源的目录，不要求放在源码目录内。
 
 当前 v3 已覆盖当前线上所需 API。
 当前会话也已由 Go 自己管理，不再依赖旧文件式 session 目录。

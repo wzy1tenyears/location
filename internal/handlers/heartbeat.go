@@ -28,7 +28,10 @@ type heartbeatRequest struct {
 
 func (handler HeartbeatHandler) Touch(w http.ResponseWriter, r *http.Request) {
 	var req heartbeatRequest
-	_ = httpx.DecodeJSON(r, &req)
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 	scope, _, err := handler.scope.requireScope(r, selectedGroupName(r, req.GroupName))
 	if err != nil {
 		httpx.Error(w, err)

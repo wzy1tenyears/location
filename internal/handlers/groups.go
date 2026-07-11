@@ -45,7 +45,10 @@ type groupsRequest struct {
 
 func (handler GroupsHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	var req groupsRequest
-	_ = httpx.DecodeJSON(r, &req)
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 	scope, _, err := handler.scope.requireScope(r, selectedGroupName(r, req.GroupName))
 	if err != nil && req.Action != "join_by_code" {
 		httpx.Error(w, err)

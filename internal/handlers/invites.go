@@ -26,7 +26,10 @@ func (handler InviteHandler) Check(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Code string `json:"code"`
 		}
-		_ = httpx.DecodeJSON(r, &body)
+		if err := httpx.DecodeJSON(r, &body); err != nil {
+			httpx.Error(w, err)
+			return
+		}
 		code = strings.TrimSpace(body.Code)
 	}
 

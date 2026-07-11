@@ -35,5 +35,10 @@ func Open(cfg config.DatabaseConfig) (*sql.DB, error) {
 		return nil, err
 	}
 
+	if err := EnsureSchemaWithTimeout(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	return db, nil
 }

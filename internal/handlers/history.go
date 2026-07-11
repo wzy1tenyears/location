@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"familylocation/location-v3/internal/config"
@@ -40,7 +41,18 @@ type historyRequest struct {
 
 func (handler HistoryHandler) List(w http.ResponseWriter, r *http.Request) {
 	req := historyRequest{Page: 1, PerPage: 20, MapPerUser: 20}
-	_ = httpx.DecodeJSON(r, &req)
+	if r.Method == http.MethodPost {
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Error(w, err)
+			return
+		}
+	} else {
+		req.GroupName = strings.TrimSpace(r.URL.Query().Get("group_name"))
+		req.Page = maxInt(1, httpx.IntQuery(r, "page", 1))
+		req.PerPage = httpx.IntQuery(r, "per_page", 20)
+		req.MapPerUser = httpx.IntQuery(r, "map_per_user", 20)
+		req.UserID = int64(httpx.IntQuery(r, "user_id", 0))
+	}
 	if req.Page < 1 {
 		req.Page = 1
 	}

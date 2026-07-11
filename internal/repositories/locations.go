@@ -21,7 +21,7 @@ SELECT
 	0 AS id,
 	ll.user_id,
 	u.username,
-	u.display_name,
+	COALESCE(u.display_name, ''),
 	ll.group_name,
 	ug.role,
 	ll.latitude,
@@ -33,9 +33,9 @@ SELECT
 	ll.location_meta,
 	ll.address_diagnostics,
 	ll.address_mismatch,
-	ll.encryption_mode,
-	ll.encrypted_payload,
-	ll.p2p_key_version,
+	COALESCE(ll.encryption_mode, '') AS encryption_mode,
+	COALESCE(ll.encrypted_payload, '') AS encrypted_payload,
+	COALESCE(ll.p2p_key_version, 0) AS p2p_key_version,
 	ll.updated_at AS created_at,
 	ll.updated_at
 FROM latest_group_locations ll
@@ -94,7 +94,7 @@ SELECT
 	l.id,
 	l.user_id,
 	u.username,
-	u.display_name,
+	COALESCE(u.display_name, ''),
 	l.group_name,
 	l.role,
 	l.latitude,
@@ -106,9 +106,9 @@ SELECT
 	l.location_meta,
 	l.address_diagnostics,
 	l.address_mismatch,
-	l.encryption_mode,
-	l.encrypted_payload,
-	l.p2p_key_version,
+	COALESCE(l.encryption_mode, '') AS encryption_mode,
+	COALESCE(l.encrypted_payload, '') AS encrypted_payload,
+	COALESCE(l.p2p_key_version, 0) AS p2p_key_version,
 	l.created_at,
 	l.created_at AS updated_at
 FROM locations l

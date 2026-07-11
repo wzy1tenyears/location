@@ -35,7 +35,10 @@ type settingsRequest struct {
 func (handler SettingsHandler) ShowOrUpdate(w http.ResponseWriter, r *http.Request) {
 	var req settingsRequest
 	if r.Method == http.MethodPost {
-		_ = httpx.DecodeJSON(r, &req)
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Error(w, err)
+			return
+		}
 	}
 
 	scope, _, err := handler.scope.requireScope(r, selectedGroupName(r, req.GroupName))

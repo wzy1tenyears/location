@@ -74,7 +74,10 @@ func (handler ChallengeHandler) start(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Purpose string `json:"purpose"`
 	}
-	_ = httpx.DecodeJSON(r, &req)
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 	purpose := strings.TrimSpace(req.Purpose)
 	if purpose != "login" && purpose != "register" {
 		httpx.Error(w, httpx.Unprocessable("Invalid challenge purpose."))
@@ -94,8 +97,16 @@ func (handler ChallengeHandler) start(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, httpx.Forbidden("请使用新版 App 登录。"))
 		return
 	}
-	challengeID, _ := randomHex(16)
-	secret, _ := randomHex(32)
+	challengeID, err := randomHex(16)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	secret, err := randomHex(32)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
 	challenge := models.AppChallenge{
 		ID:                challengeID,
 		SecretHash:        sha256Hex(secret),
@@ -210,7 +221,9 @@ func (handler ChallengeHandler) verifyBrowserChallenge(r *http.Request, challeng
 	if err != nil || !ok {
 		return "Cloudflare 验证失败，请重试。"
 	}
-	_ = handler.store.MarkVerified(r.Context(), challenge.ID, deviceFingerprint)
+	if err := handler.store.MarkVerified(r.Context(), challenge.ID, deviceFingerprint); err != nil {
+		return "验证状态保存失败，请重试。"
+	}
 	return "验证已完成，请回到 App 继续登录。"
 }
 
@@ -243,11 +256,11 @@ func (handler ChallengeHandler) render(w http.ResponseWriter, r *http.Request, m
 		_, _ = w.Write([]byte("<div class=\"message\">Turnstile Site Key is not configured.</div></body></html>"))
 		return
 	}
-	_, _ = fmt.Fprintf(w, "<form method=\"post\" action=\"app_challenge.php\"><input type=\"hidden\" name=\"challenge_id\" value=\"%s\"><input type=\"hidden\" name=\"device_token\" value=\"%s\"><div class=\"cf-turnstile\" data-sitekey=\"%s\" data-callback=\"onTurnstileSuccess\"></div></form><script>function onTurnstileSuccess(token){notifyNativeChallengeToken(token);notifyNativeChallengeComplete();if(!(window.LocChallenge&&window.LocChallenge.completeToken)){document.forms[0].submit();}}</script></body></html>", html.EscapeString(strings.ToLower(challengeID)), html.EscapeString(deviceToken), html.EscapeString(siteKey))
+	_, _ = fmt.Fprintf(w, "<form method=\"post\"><input type=\"hidden\" name=\"challenge_id\" value=\"%s\"><input type=\"hidden\" name=\"device_token\" value=\"%s\"><div class=\"cf-turnstile\" data-sitekey=\"%s\" data-callback=\"onTurnstileSuccess\"></div></form><script>function onTurnstileSuccess(token){notifyNativeChallengeToken(token);notifyNativeChallengeComplete();if(!(window.LocChallenge&&window.LocChallenge.completeToken)){document.forms[0].submit();}}</script></body></html>", html.EscapeString(strings.ToLower(challengeID)), html.EscapeString(deviceToken), html.EscapeString(siteKey))
 }
 
 func (handler ChallengeHandler) browserChallengeDeviceFingerprint(r *http.Request) string {
-	if fingerprint := appChallengeDeviceFingerprintFromToken(strings.TrimSpace(firstString(r.FormValue("device_token"), r.URL.Query().Get("device_token"))), handler.cfg.Database.Pass); fingerprint != "" {
+	if fingerprint := appChallengeDeviceFingerprintFromToken(strings.TrimSpace(firstString(r.FormValue("device_token"), r.URL.Query().Get("device_token"))), tokenSigningSecret(handler.cfg)); fingerprint != "" {
 		return fingerprint
 	}
 	deviceCookie := strings.ToLower(strings.TrimSpace(cookieValue(r, handler.cfg.App.DeviceCookieName)))
@@ -258,8 +271,8 @@ func (handler ChallengeHandler) browserChallengeDeviceFingerprint(r *http.Reques
 }
 
 func (handler ChallengeHandler) publicURL(r *http.Request, challengeID string, deviceFingerprint string) string {
-	path := "/api/app_challenge.php?id=" + url.QueryEscape(challengeID)
-	if token := appChallengeDeviceToken(deviceFingerprint, handler.cfg.Database.Pass); token != "" {
+	path := "/api/app-challenge?id=" + url.QueryEscape(challengeID)
+	if token := appChallengeDeviceToken(deviceFingerprint, tokenSigningSecret(handler.cfg)); token != "" {
 		path += "&device_token=" + url.QueryEscape(token)
 	}
 	return httpx.PublicURL(r, path)
@@ -327,12 +340,6 @@ func appChallengeDeviceFingerprintFromToken(token string, secret string) string 
 		return matches[1]
 	}
 	return ""
-}
-
-func hmacHex(value string, secret string) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(value))
-	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func sha256Hex(value string) string {

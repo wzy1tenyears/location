@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS app_sessions (
+    session_id VARCHAR(64) NOT NULL PRIMARY KEY,
+    user_id BIGINT NULL,
+    admin_logged_in TINYINT(1) NOT NULL DEFAULT 0,
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_app_sessions_expires_at (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

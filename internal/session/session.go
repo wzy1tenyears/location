@@ -1,25 +1,25 @@
 package session
 
 import (
+	"context"
 	"net/http"
-	"os"
-	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
+	"time"
+
+	"familylocation/location-v3/internal/httpx"
+	"familylocation/location-v3/internal/repositories"
 )
 
 type Reader struct {
 	CookieName string
-	SavePath   string
+	Repo       *repositories.SessionRepository
 }
 
 func (reader Reader) SessionID(r *http.Request) (string, bool) {
 	return reader.cookieValue(r)
 }
 
-func (reader Reader) Clear(w http.ResponseWriter) {
-	reader.deleteCurrentSessionFile()
+func (reader Reader) Clear(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     reader.CookieName,
 		Value:    "",
@@ -27,46 +27,44 @@ func (reader Reader) Clear(w http.ResponseWriter) {
 		MaxAge:   -1,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   httpx.RequestIsHTTPS(r),
 	})
 }
 
-func (reader Reader) DeleteByID(sessionID string) {
-	if strings.TrimSpace(reader.SavePath) == "" || !safeSessionID(sessionID) {
-		return
+func (reader Reader) DeleteByID(ctx context.Context, sessionID string) error {
+	if !safeSessionID(sessionID) {
+		return nil
 	}
-	_ = os.Remove(filepath.Join(reader.SavePath, "sess_"+sessionID))
-}
-
-func (reader Reader) deleteCurrentSessionFile() {
-	// no-op placeholder for cookie-only clears; handlers that know the request
-	// can call DeleteByID with the current cookie value before clearing it.
+	return reader.Repo.Delete(ctx, sessionID)
 }
 
 func (reader Reader) UserID(r *http.Request) (int64, bool) {
-	value, ok := reader.cookieValue(r)
-	if !ok {
+	record, ok := reader.Record(r)
+	if !ok || !record.UserID.Valid || record.UserID.Int64 <= 0 {
 		return 0, false
 	}
-
-	session, ok := reader.phpSession(value)
-	if !ok {
-		return 0, false
-	}
-	id, ok := sessionInt(session, "user_id")
-	return id, ok && id > 0
+	return record.UserID.Int64, true
 }
 
 func (reader Reader) IsAdmin(r *http.Request) bool {
-	value, ok := reader.cookieValue(r)
+	record, ok := reader.Record(r)
 	if !ok {
 		return false
 	}
+	return record.AdminLoggedIn
+}
 
-	session, ok := reader.phpSession(value)
-	if !ok {
-		return false
+func (reader Reader) Record(r *http.Request) (*repositories.SessionRecord, bool) {
+	sessionID, ok := reader.cookieValue(r)
+	if !ok || !safeSessionID(sessionID) {
+		return nil, false
 	}
-	return sessionBool(session, "admin_logged_in")
+	record, err := reader.Repo.FindActive(r.Context(), sessionID, time.Now())
+	if err != nil || record == nil {
+		return nil, false
+	}
+	reader.Repo.DeleteExpiredIfDue(r.Context(), time.Now(), time.Hour)
+	return record, true
 }
 
 func (reader Reader) cookieValue(r *http.Request) (string, bool) {
@@ -76,20 +74,6 @@ func (reader Reader) cookieValue(r *http.Request) (string, bool) {
 	}
 	value := strings.TrimSpace(cookie.Value)
 	return value, value != ""
-}
-
-func (reader Reader) phpSession(sessionID string) (map[string]string, bool) {
-	if strings.TrimSpace(reader.SavePath) == "" || !safeSessionID(sessionID) {
-		return nil, false
-	}
-
-	path := filepath.Join(reader.SavePath, "sess_"+sessionID)
-	data, err := os.ReadFile(path)
-	if err != nil || len(data) == 0 {
-		return nil, false
-	}
-
-	return parsePHPSession(string(data)), true
 }
 
 func safeSessionID(sessionID string) bool {
@@ -103,33 +87,4 @@ func safeSessionID(sessionID string) bool {
 		return false
 	}
 	return true
-}
-
-var phpSessionEntryPattern = regexp.MustCompile(`([A-Za-z0-9_]+)\|([bis]):([^;]+);`)
-
-func parsePHPSession(raw string) map[string]string {
-	values := make(map[string]string)
-	for _, match := range phpSessionEntryPattern.FindAllStringSubmatch(raw, -1) {
-		if len(match) == 4 {
-			values[match[1]] = match[2] + ":" + match[3]
-		}
-	}
-	return values
-}
-
-func sessionInt(values map[string]string, key string) (int64, bool) {
-	raw, ok := values[key]
-	if !ok || !strings.HasPrefix(raw, "i:") {
-		return 0, false
-	}
-	value, err := strconv.ParseInt(strings.TrimPrefix(raw, "i:"), 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	return value, true
-}
-
-func sessionBool(values map[string]string, key string) bool {
-	raw, ok := values[key]
-	return ok && raw == "b:1"
 }

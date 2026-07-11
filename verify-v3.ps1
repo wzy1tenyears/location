@@ -1,3 +1,7 @@
+param(
+    [switch]$StaticOnly
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -8,6 +12,10 @@ $RequiredFiles = @(
     'internal/app/router.go',
     'internal/config/config.go',
     'internal/database/database.go',
+    'internal/database/schema.go',
+    'internal/database/schema_core.sql',
+    'internal/database/china_regions_seed.sql',
+    'internal/database/migrations/001_app_sessions.sql',
     'internal/httpx/json.go',
     'internal/httpx/request.go',
     'internal/middleware/middleware.go',
@@ -58,6 +66,11 @@ $RequiredFiles = @(
     'internal/services/ipgeo.go',
     'internal/models/models.go'
     'internal/session/store.go'
+	'internal/repositories/sessions.go'
+	'internal/config/config_test.go'
+	'internal/database/schema_test.go'
+	'internal/httpx/request_test.go'
+	'internal/session/session_test.go'
 )
 
 foreach ($File in $RequiredFiles) {
@@ -86,37 +99,37 @@ foreach ($Pattern in $ForbiddenSecretPatterns) {
 
 $RouterText = Get-Content -LiteralPath (Join-Path $Root 'internal/app/router.go') -Raw -Encoding UTF8
 $ExpectedRoutes = @(
-    '/api/app_update.php',
-    '/api/app_challenge.php',
-    '/api/login.php',
-    '/api/register.php',
-    '/api/admin_app_update.php',
-    '/api/announcement.php',
-    '/api/invite_check.php',
-    '/api/me.php',
-    '/api/settings.php',
-    '/api/locations.php',
-    '/api/history.php',
-    '/api/legal_documents.php',
-    '/api/groups.php',
-    '/api/report_location.php',
-    '/api/tickets.php',
-    '/api/p2p_crypto.php',
-    '/api/history_map_webview.php',
-    '/api/amap_reverse_webview.php',
-    '/api/webrtc_probe_webview.php',
-    '/api/admin_manage.php',
-    '/api/admin_summary.php',
-    '/api/logout.php',
-    '/api/heartbeat.php',
-    '/api/environment_report.php',
-    '/api/device_report.php',
-    '/api/admin_apk.php',
-    '/api/geo_aliases.php',
-    '/api/ip_probe.php',
-    '/api/ip_geo.php',
-    '/api/ipinfo_lite.php',
-    '/api/cloudflare_location.php',
+    '/api/app-update',
+    '/api/app-challenge',
+    '/api/login',
+    '/api/register',
+    '/api/admin-app-update',
+    '/api/announcement',
+    '/api/invite-check',
+    '/api/me',
+    '/api/settings',
+    '/api/locations',
+    '/api/history',
+    '/api/legal-documents',
+    '/api/groups',
+    '/api/report-location',
+    '/api/tickets',
+    '/api/p2p-crypto',
+    '/api/history-map',
+    '/api/amap-reverse',
+    '/api/webrtc-probe',
+    '/api/admin/manage',
+    '/api/admin/summary',
+    '/api/logout',
+    '/api/heartbeat',
+    '/api/environment-report',
+    '/api/device-report',
+    '/api/admin/apk',
+    '/api/geo-aliases',
+    '/api/ip-probe',
+    '/api/ip-geo',
+    '/api/ipinfo-lite',
+    '/api/cloudflare-location',
     '/api/'
 )
 
@@ -131,13 +144,35 @@ if ($UpdateText -notmatch 'sessions\.IsAdmin') {
     throw 'admin_app_update handler must keep admin session protection'
 }
 
+$ConfigText = Get-Content -LiteralPath (Join-Path $Root 'internal/config/config.go') -Raw -Encoding UTF8
+if ($ConfigText -notmatch 'LOC_APP_SIGNING_SECRET') {
+    throw 'v3 config must expose a dedicated app signing secret'
+}
+
+foreach ($Path in @(
+    'internal/handlers/updates.go',
+    'internal/handlers/downloads.go',
+    'internal/handlers/challenge.go'
+)) {
+    $Text = Get-Content -LiteralPath (Join-Path $Root $Path) -Raw -Encoding UTF8
+    if ($Text -match 'cfg\.Database\.Pass') {
+        throw "$Path must not sign tokens with cfg.Database.Pass"
+    }
+}
+
 $SessionText = Get-Content -LiteralPath (Join-Path $Root 'internal/session/session.go') -Raw -Encoding UTF8
-if ($SessionText -notmatch 'sess_' -or $SessionText -notmatch 'admin_logged_in' -or $SessionText -notmatch 'user_id') {
-    throw 'session reader must retain PHP session compatibility hooks'
+if ($SessionText -match 'sess_' -or $SessionText -match 'parsePHPSession' -or $SessionText -match 'SESSION_DIR') {
+    throw 'session reader must not retain legacy file-session compatibility hooks'
+}
+
+$SessionRepoText = Get-Content -LiteralPath (Join-Path $Root 'internal/repositories/sessions.go') -Raw -Encoding UTF8
+$MigrationText = Get-Content -LiteralPath (Join-Path $Root 'internal/database/migrations/001_app_sessions.sql') -Raw -Encoding UTF8
+if ($MigrationText -notmatch 'CREATE TABLE IF NOT EXISTS app_sessions') {
+    throw 'app_sessions must be provisioned by a versioned migration'
 }
 
 if ($RouterText -match 'legacy\.Proxy' -or $RouterText -match 'LOC_LEGACY_BASE_URL') {
-    throw 'v3 router must not retain legacy PHP fallback'
+    throw 'v3 router must not retain legacy backend fallback'
 }
 
 if ($AllText -match '\(\?=') {
@@ -149,6 +184,12 @@ if ([string]::IsNullOrWhiteSpace($GoExe)) {
     $GoCommand = Get-Command go -ErrorAction SilentlyContinue
     if ($GoCommand) {
         $GoExe = $GoCommand.Source
+    }
+}
+if ([string]::IsNullOrWhiteSpace($GoExe)) {
+    $StandardGo = Join-Path $env:ProgramFiles 'Go\bin\go.exe'
+    if (Test-Path -LiteralPath $StandardGo -PathType Leaf) {
+        $GoExe = $StandardGo
     }
 }
 
@@ -166,4 +207,8 @@ if ($GoExe -and (Test-Path -LiteralPath $GoExe -PathType Leaf)) {
     exit 0
 }
 
-Write-Output 'verify-v3 OK (Go toolchain not found; static checks only)'
+if (-not $StaticOnly) {
+    throw 'Go toolchain not found. Install Go, set LOC_GO_EXE, or explicitly pass -StaticOnly for non-release checks.'
+}
+
+Write-Output 'verify-v3 static checks OK (Go compile and tests were explicitly skipped)'

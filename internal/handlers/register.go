@@ -41,7 +41,7 @@ func NewRegisterHandler(cfg config.Config, db *sql.DB, sessions session.Reader) 
 		devices:    repositories.NewDeviceRepository(db),
 		rates:      repositories.NewRateLimitRepository(db),
 		challenges: repositories.NewAppChallengeRepository(db),
-		sessions:   session.Store{CookieName: sessions.CookieName, SavePath: sessions.SavePath, Lifetime: cfg.App.SessionLifetime},
+		sessions:   session.Store{CookieName: sessions.CookieName, Repo: sessions.Repo, Lifetime: cfg.App.SessionLifetime},
 	}
 }
 
@@ -71,7 +71,10 @@ func (handler RegisterHandler) Register(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req registerRequest
-	_ = httpx.DecodeJSON(r, &req)
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 	req.Username = strings.TrimSpace(req.Username)
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
 	req.InviteCode = strings.TrimSpace(req.InviteCode)
@@ -301,7 +304,7 @@ func (handler RegisterHandler) verifyTurnstile(r *http.Request, token string) er
 }
 
 func (handler RegisterHandler) bindDeviceAfterRegister(r *http.Request, user models.User, deviceFingerprint string, browserFingerprint string) error {
-	return NewLoginHandler(handler.cfg, handler.db, session.Reader{CookieName: handler.sessions.CookieName, SavePath: handler.sessions.SavePath}).bindUserDevice(r, user, deviceFingerprint, browserFingerprint)
+	return NewLoginHandler(handler.cfg, handler.db, session.Reader{CookieName: handler.sessions.CookieName, Repo: handler.sessions.Repo}).bindUserDevice(r, user, deviceFingerprint, browserFingerprint)
 }
 
 type inviteRow struct {

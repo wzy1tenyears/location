@@ -114,7 +114,10 @@ func (handler DiagnosticHandler) IPGeo(w http.ResponseWriter, r *http.Request) {
 		IP       string `json:"ip"`
 		Provider string `json:"provider"`
 	}
-	_ = httpx.DecodeJSON(r, &req)
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 	if net.ParseIP(strings.TrimSpace(req.IP)) == nil {
 		httpx.Error(w, httpx.Unprocessable("IP 地址不正确。"))
 		return
@@ -142,7 +145,10 @@ func (handler DiagnosticHandler) IPInfoLite(w http.ResponseWriter, r *http.Reque
 	var req struct {
 		IP string `json:"ip"`
 	}
-	_ = httpx.DecodeJSON(r, &req)
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 	if net.ParseIP(strings.TrimSpace(req.IP)) == nil {
 		httpx.Error(w, httpx.Unprocessable("IP 地址不正确。"))
 		return

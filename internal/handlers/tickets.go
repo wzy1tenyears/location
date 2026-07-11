@@ -43,7 +43,10 @@ func (handler TicketsHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		Message   string `json:"message"`
 		TicketID  int64  `json:"ticket_id"`
 	}
-	_ = httpx.DecodeJSON(r, &req)
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 	switch strings.TrimSpace(req.Action) {
 	case "create":
 		handler.create(w, r, scope, req.GroupName, req.Subject, req.Message)

@@ -36,7 +36,7 @@ func NewLoginHandler(cfg config.Config, db *sql.DB, sessions session.Reader) Log
 		limits:     repositories.NewAuthLimitRepository(db),
 		rates:      repositories.NewRateLimitRepository(db),
 		challenges: repositories.NewAppChallengeRepository(db),
-		sessions:   session.Store{CookieName: sessions.CookieName, SavePath: sessions.SavePath, Lifetime: cfg.App.SessionLifetime},
+		sessions:   session.Store{CookieName: sessions.CookieName, Repo: sessions.Repo, Lifetime: cfg.App.SessionLifetime},
 	}
 }
 
@@ -61,7 +61,10 @@ func (handler LoginHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req loginRequest
-	_ = httpx.DecodeJSON(r, &req)
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 	req.Username = strings.TrimSpace(req.Username)
 	req.TurnstileToken = strings.TrimSpace(req.TurnstileToken)
 	req.BrowserFingerprint = sanitizeBrowserFingerprint(req.BrowserFingerprint)
@@ -116,7 +119,7 @@ func (handler LoginHandler) loginAdmin(w http.ResponseWriter, r *http.Request, r
 	_ = handler.users.RecordLog(r.Context(), nil, "", "admin_login", "管理员登录", nil, httpx.ClientIP(r), r.UserAgent())
 	httpx.OK(w, map[string]any{
 		"ok":             true,
-		"redirect":       "/" + strings.Trim(handler.cfg.Auth.AdminPath, "/") + "/",
+		"redirect":       "/api/admin/summary",
 		"admin_username": handler.cfg.Auth.AdminUsername,
 	})
 }

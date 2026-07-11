@@ -2,6 +2,8 @@ package httpx
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -31,16 +33,7 @@ func PublicURL(r *http.Request, path string) string {
 	}
 
 	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	if proto := firstHeaderPart(r.Header.Get("X-Forwarded-Proto")); strings.EqualFold(proto, "https") {
-		scheme = "https"
-	}
-	if strings.EqualFold(r.Header.Get("X-Forwarded-Ssl"), "on") {
-		scheme = "https"
-	}
-	if strings.Contains(strings.ToLower(r.Header.Get("Cf-Visitor")), `"scheme":"https"`) {
+	if RequestIsHTTPS(r) {
 		scheme = "https"
 	}
 
@@ -48,21 +41,38 @@ func PublicURL(r *http.Request, path string) string {
 }
 
 func ClientIP(r *http.Request) string {
-	for _, key := range []string{"CF-Connecting-IP", "X-Real-IP", "X-Forwarded-For"} {
-		if value := firstHeaderPart(r.Header.Get(key)); value != "" {
+	for _, key := range []string{"X-Real-IP", "X-Forwarded-For", "CF-Connecting-IP"} {
+		if value := validHeaderIP(r.Header.Get(key)); value != "" {
 			return value
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil && host != "" {
-		return host
+	if err == nil {
+		if ip := net.ParseIP(strings.TrimSpace(host)); ip != nil {
+			return ip.String()
+		}
+	}
+	if ip := net.ParseIP(strings.TrimSpace(r.RemoteAddr)); ip != nil {
+		return ip.String()
 	}
 	return r.RemoteAddr
 }
 
 func DecodeJSON(r *http.Request, target any) error {
 	defer r.Body.Close()
-	return json.NewDecoder(r.Body).Decode(target)
+	limited := &io.LimitedReader{R: r.Body, N: (1 << 20) + 1}
+	decoder := json.NewDecoder(limited)
+	if err := decoder.Decode(target); err != nil {
+		return BadRequest("请求 JSON 格式不正确。")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return BadRequest("请求只能包含一个 JSON 对象。")
+	}
+	if limited.N <= 0 {
+		return BadRequest("请求内容过大。")
+	}
+	return nil
 }
 
 func firstHeaderPart(value string) string {
@@ -71,4 +81,32 @@ func firstHeaderPart(value string) string {
 		return ""
 	}
 	return strings.TrimSpace(parts[0])
+}
+
+func RequestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if proto := firstHeaderPart(r.Header.Get("X-Forwarded-Proto")); strings.EqualFold(proto, "https") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Ssl")), "on") {
+		return true
+	}
+	if strings.Contains(strings.ToLower(r.Header.Get("Cf-Visitor")), `"scheme":"https"`) {
+		return true
+	}
+	return false
+}
+
+func validHeaderIP(value string) string {
+	value = firstHeaderPart(value)
+	if value == "" {
+		return ""
+	}
+	ip := net.ParseIP(strings.TrimSpace(value))
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
 }

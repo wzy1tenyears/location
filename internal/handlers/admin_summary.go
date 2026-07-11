@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -40,61 +41,73 @@ func (handler AdminSummaryHandler) Summary(w http.ResponseWriter, r *http.Reques
 	}
 	stats, err := handler.stats(r)
 	if err != nil {
+		log.Printf("admin summary stats failed: %v", err)
 		httpx.Error(w, err)
 		return
 	}
 	groups, err := handler.groups(r)
 	if err != nil {
+		log.Printf("admin summary groups failed: %v", err)
 		httpx.Error(w, err)
 		return
 	}
 	users, err := handler.users(r)
 	if err != nil {
+		log.Printf("admin summary users failed: %v", err)
 		httpx.Error(w, err)
 		return
 	}
 	environmentReports, environmentByUser, err := handler.environmentReports(r)
 	if err != nil {
+		log.Printf("admin summary environment reports failed: %v", err)
 		httpx.Error(w, err)
 		return
 	}
 	locations, err := handler.locations(r, environmentByUser)
 	if err != nil {
+		log.Printf("admin summary locations failed: %v", err)
 		httpx.Error(w, err)
 		return
 	}
 	memberships, err := handler.memberships(r)
 	if err != nil {
+		log.Printf("admin summary memberships failed: %v", err)
 		httpx.Error(w, err)
 		return
 	}
 	announcement, err := handler.announcement(r)
 	if err != nil {
+		log.Printf("admin summary announcement failed: %v", err)
 		httpx.Error(w, err)
 		return
 	}
 	invites, err := handler.invites(r)
 	if err != nil {
+		log.Printf("admin summary invites failed: %v", err)
 		httpx.Error(w, err)
 		return
 	}
 	devices, err := handler.devices(r)
 	if err != nil {
+		log.Printf("admin summary devices failed: %v", err)
 		httpx.Error(w, err)
 		return
 	}
 	logs, logLocations, logFilters, logTypes, logTotal, err := handler.logs(r)
 	if err != nil {
+		log.Printf("admin summary logs failed: %v", err)
 		httpx.Error(w, err)
 		return
 	}
 	tickets, err := handler.tickets(r)
 	if err != nil {
+		log.Printf("admin summary tickets failed: %v", err)
 		httpx.Error(w, err)
 		return
 	}
 	securitySettings, err := handler.settings.SecurityPolicy(r.Context())
 	if err != nil {
+		log.Printf("admin summary security settings failed: %v", err)
 		httpx.Error(w, err)
 		return
 	}
@@ -379,7 +392,7 @@ func (handler AdminSummaryHandler) locations(r *http.Request, environment map[in
 	rows, err := handler.db.QueryContext(r.Context(), `
 SELECT ll.latest_location_id, ll.user_id, u.username, u.display_name, ll.group_name, ug.role,
 	ll.latitude, ll.longitude, ll.altitude, ll.accuracy, ll.heading, ll.speed, ll.location_meta,
-	ll.address_diagnostics, ll.address_mismatch, ll.encryption_mode, ll.encrypted_payload, ll.p2p_key_version,
+	ll.address_diagnostics, ll.address_mismatch, COALESCE(ll.encryption_mode, ''), COALESCE(ll.encrypted_payload, ''), COALESCE(ll.p2p_key_version, 0),
 	ll.updated_at, ll.updated_at
 FROM latest_group_locations ll
 INNER JOIN users u ON u.id = ll.user_id
@@ -607,7 +620,7 @@ func (handler AdminSummaryHandler) logLocations(r *http.Request, ids []int64) (m
 	}
 	rows, err := handler.db.QueryContext(r.Context(), `
 SELECT l.id, l.user_id, u.username, u.display_name, l.group_name, l.role, l.latitude, l.longitude, l.altitude, l.accuracy, l.heading, l.speed,
-	l.location_meta, l.address_diagnostics, l.address_mismatch, l.encryption_mode, l.encrypted_payload, l.p2p_key_version, l.created_at, l.created_at
+	l.location_meta, l.address_diagnostics, l.address_mismatch, COALESCE(l.encryption_mode, ''), COALESCE(l.encrypted_payload, ''), COALESCE(l.p2p_key_version, 0), l.created_at, l.created_at
 FROM locations l
 LEFT JOIN users u ON u.id = l.user_id
 WHERE l.id IN (`+strings.Join(placeholders, ",")+`)`, args...)

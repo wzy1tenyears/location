@@ -1,9 +1,6 @@
 package handlers
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -55,8 +52,8 @@ func (handler UpdateHandler) AdminAppUpdate(w http.ResponseWriter, r *http.Reque
 	apkExists := statErr == nil
 
 	expires := time.Now().Unix() + 600
-	token := adminAPKToken(strconv.Itoa(handler.cfg.Admin.VersionCode), strconv.FormatInt(expires, 10), handler.cfg.Database.Pass)
-	apkURL := httpx.PublicURL(r, "/api/admin_apk.php") +
+	token := adminAPKToken(strconv.Itoa(handler.cfg.Admin.VersionCode), strconv.FormatInt(expires, 10), tokenSigningSecret(handler.cfg))
+	apkURL := httpx.PublicURL(r, "/api/admin/apk") +
 		"?v=" + strconv.Itoa(handler.cfg.Admin.VersionCode) +
 		"&expires=" + strconv.FormatInt(expires, 10) +
 		"&token=" + token
@@ -71,10 +68,4 @@ func (handler UpdateHandler) AdminAppUpdate(w http.ResponseWriter, r *http.Reque
 		"apk_url":              apkURL,
 		"apk_exists":           apkExists,
 	})
-}
-
-func adminAPKToken(version string, expires string, secret string) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte("admin-apk|" + version + "|" + expires))
-	return hex.EncodeToString(mac.Sum(nil))
 }

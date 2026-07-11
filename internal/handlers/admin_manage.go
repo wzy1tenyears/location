@@ -153,12 +153,7 @@ func (handler AdminManageHandler) execute(r *http.Request, action string, data m
 	case "reset_password":
 		return handler.resetPassword(r, data)
 	case "delete_user":
-		id := int64FromMap(data, "user_id", 0)
-		if id <= 0 {
-			return "", httpx.Unprocessable("账号不存在。")
-		}
-		_, err := handler.db.ExecContext(r.Context(), "DELETE FROM users WHERE id = ?", id)
-		return "账号已删除。", err
+		return handler.deleteUser(r, int64FromMap(data, "user_id", 0))
 	case "delete_user_device":
 		id := int64FromMap(data, "device_id", 0)
 		if id <= 0 {
@@ -224,10 +219,19 @@ func (handler AdminManageHandler) deleteFamilyGroup(r *http.Request, groupID int
 	affected := make([]int64, 0)
 	for rows.Next() {
 		var id int64
-		_ = rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return "", err
+		}
 		affected = append(affected, id)
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", err
+	}
+	if err := rows.Close(); err != nil {
+		return "", err
+	}
 	tx, err := handler.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		return "", err
@@ -259,6 +263,57 @@ func (handler AdminManageHandler) deleteFamilyGroup(r *http.Request, groupID int
 		}
 	}
 	return "家庭组已删除，组内定位记录已清除。", tx.Commit()
+}
+
+func (handler AdminManageHandler) deleteUser(r *http.Request, userID int64) (string, error) {
+	if userID <= 0 {
+		return "", httpx.Unprocessable("账号不存在。")
+	}
+	var existing int64
+	if err := handler.db.QueryRowContext(r.Context(), "SELECT id FROM users WHERE id = ? LIMIT 1", userID).Scan(&existing); err != nil {
+		if err == sql.ErrNoRows {
+			return "", httpx.Unprocessable("账号不存在。")
+		}
+		return "", err
+	}
+
+	tx, err := handler.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	ticketIDs, err := ticketIDsForUserTx(r.Context(), tx, userID)
+	if err != nil {
+		return "", err
+	}
+	for _, ticketID := range ticketIDs {
+		if _, err := tx.ExecContext(r.Context(), "DELETE FROM support_ticket_messages WHERE ticket_id = ?", ticketID); err != nil {
+			return "", err
+		}
+	}
+
+	for _, query := range []string{
+		"UPDATE family_groups SET owner_user_id = NULL WHERE owner_user_id = ?",
+		"DELETE FROM latest_group_locations WHERE user_id = ?",
+		"DELETE FROM locations WHERE user_id = ?",
+		"DELETE FROM user_groups WHERE user_id = ?",
+		"DELETE FROM user_devices WHERE user_id = ?",
+		"DELETE FROM user_presence WHERE user_id = ?",
+		"DELETE FROM user_logs WHERE user_id = ?",
+		"DELETE FROM environment_reports WHERE user_id = ?",
+		"DELETE FROM group_join_failures WHERE user_id = ?",
+		"DELETE FROM p2p_group_members WHERE user_id = ?",
+		"DELETE FROM p2p_user_keys WHERE user_id = ?",
+		"DELETE FROM support_tickets WHERE user_id = ?",
+		"DELETE FROM users WHERE id = ?",
+	} {
+		if _, err := tx.ExecContext(r.Context(), query, userID); err != nil {
+			return "", err
+		}
+	}
+
+	return "账号及其关联数据已删除。", tx.Commit()
 }
 
 func (handler AdminManageHandler) addInvite(r *http.Request, data map[string]any) (string, error) {
@@ -606,6 +661,27 @@ REPLACE INTO latest_group_locations (
 		userID, groupName, services.NormalizeRole(role), latitude, longitude, nullFloat(altitude), nullFloat(accuracy), nullFloat(heading), nullFloat(speed),
 		nullText(locationMeta), id, nullText(diagnostics), mismatch, encryptionMode, nullText(encryptedPayload), keyVersion, createdAt)
 	return err
+}
+
+func ticketIDsForUserTx(ctx context.Context, tx *sql.Tx, userID int64) ([]int64, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT id FROM support_tickets WHERE user_id = ?", userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 func adminString(data map[string]any, key string, max int) string {

@@ -26,7 +26,7 @@ func (handler DownloadHandler) AdminAPK(w http.ResponseWriter, r *http.Request) 
 	requestedVersion := httpx.IntQuery(r, "v", 0)
 	expires := int64(httpx.IntQuery(r, "expires", 0))
 	token := r.URL.Query().Get("token")
-	expected := adminAPKToken(strconv.Itoa(requestedVersion), strconv.FormatInt(expires, 10), handler.cfg.Database.Pass)
+	expected := adminAPKToken(strconv.Itoa(requestedVersion), strconv.FormatInt(expires, 10), tokenSigningSecret(handler.cfg))
 	hasDownloadToken := requestedVersion == handler.cfg.Admin.VersionCode &&
 		expires >= time.Now().Unix() &&
 		token != "" &&

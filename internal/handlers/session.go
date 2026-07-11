@@ -22,16 +22,17 @@ func NewSessionHandler(db *sql.DB, sessions session.Reader) SessionHandler {
 }
 
 func (handler SessionHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	if sessionID, ok := handler.sessions.SessionID(r); ok {
-		handler.sessions.DeleteByID(sessionID)
-	}
-	if userID, ok := handler.sessions.UserID(r); ok {
-		id := userID
+	record, authenticated := handler.sessions.Record(r)
+	if authenticated && record.UserID.Valid && record.UserID.Int64 > 0 {
+		id := record.UserID.Int64
 		_ = handler.users.RecordLog(r.Context(), &id, "", "offline", "用户退出登录", nil, httpx.ClientIP(r), r.UserAgent())
 	}
-	if handler.sessions.IsAdmin(r) {
+	if authenticated && record.AdminLoggedIn {
 		_ = handler.users.RecordLog(r.Context(), nil, "", "admin_logout", "管理员退出登录", nil, httpx.ClientIP(r), r.UserAgent())
 	}
-	handler.sessions.Clear(w)
+	if sessionID, ok := handler.sessions.SessionID(r); ok {
+		_ = handler.sessions.DeleteByID(r.Context(), sessionID)
+	}
+	handler.sessions.Clear(w, r)
 	httpx.OK(w, map[string]any{"ok": true})
 }

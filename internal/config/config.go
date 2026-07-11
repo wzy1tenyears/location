@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -30,7 +32,7 @@ type AppConfig struct {
 	ForceUpdate       bool
 	DeviceCookieName  string
 	SessionCookieName string
-	PHPSessionDir     string
+	SigningSecret     string
 	SessionLifetime   time.Duration
 }
 
@@ -44,7 +46,6 @@ type AuthConfig struct {
 	AdminUsername     string
 	AdminPassword     string
 	AdminPasswordHash string
-	AdminPath         string
 }
 
 type FileConfig struct {
@@ -91,24 +92,23 @@ func Load() Config {
 		App: AppConfig{
 			Name:              env("LOC_APP_NAME", "位置"),
 			UserAgentToken:    env("LOC_APP_USER_AGENT_TOKEN", "loc-app"),
-			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 133),
+			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 134),
 			VersionName:       env("LOC_ANDROID_VERSION_NAME", "2.1.0"),
 			ForceUpdate:       envBool("LOC_ANDROID_FORCE_UPDATE", true),
 			DeviceCookieName:  env("LOC_DEVICE_COOKIE_NAME", "loc_device"),
 			SessionCookieName: env("LOC_SESSION_COOKIE_NAME", "family_location_session"),
-			PHPSessionDir:     env("LOC_PHP_SESSION_DIR", ""),
+			SigningSecret:     env("LOC_APP_SIGNING_SECRET", ""),
 			SessionLifetime:   time.Duration(envInt("LOC_SESSION_LIFETIME_SECONDS", 2592000)) * time.Second,
 		},
 		Admin: AdminConfig{
-			VersionCode: envInt("LOC_ANDROID_ADMIN_VERSION_CODE", 90),
+			VersionCode: envInt("LOC_ANDROID_ADMIN_VERSION_CODE", 91),
 			VersionName: env("LOC_ANDROID_ADMIN_VERSION_NAME", "2.1.0"),
 			ForceUpdate: envBool("LOC_ANDROID_ADMIN_FORCE_UPDATE", true),
 		},
 		Auth: AuthConfig{
-			AdminUsername:     env("LOC_ADMIN_USERNAME", "admin114514"),
+			AdminUsername:     env("LOC_ADMIN_USERNAME", "admin"),
 			AdminPassword:     env("LOC_ADMIN_PASSWORD", ""),
 			AdminPasswordHash: env("LOC_ADMIN_PASSWORD_HASH", ""),
-			AdminPath:         env("LOC_ADMIN_PATH", "admin114514"),
 		},
 		Files: FileConfig{
 			PublicBaseDir:    env("LOC_PUBLIC_BASE_DIR", "."),
@@ -143,6 +143,37 @@ func Load() Config {
 			Charset: env("LOC_DB_CHARSET", "utf8mb4"),
 		},
 	}
+}
+
+func Validate(cfg Config) error {
+	if strings.TrimSpace(cfg.App.UserAgentToken) == "" {
+		return fmt.Errorf("LOC_APP_USER_AGENT_TOKEN is required")
+	}
+	if len(cfg.App.SigningSecret) < 32 {
+		return fmt.Errorf("LOC_APP_SIGNING_SECRET must contain at least 32 characters")
+	}
+	if cfg.App.SessionLifetime <= 0 {
+		return fmt.Errorf("LOC_SESSION_LIFETIME_SECONDS must be positive")
+	}
+	if strings.TrimSpace(cfg.Auth.AdminUsername) == "" {
+		return fmt.Errorf("LOC_ADMIN_USERNAME is required")
+	}
+	if strings.TrimSpace(cfg.Auth.AdminPassword) == "" && strings.TrimSpace(cfg.Auth.AdminPasswordHash) == "" {
+		return fmt.Errorf("LOC_ADMIN_PASSWORD or LOC_ADMIN_PASSWORD_HASH is required")
+	}
+	if strings.TrimSpace(cfg.Database.Name) == "" || strings.TrimSpace(cfg.Database.User) == "" || strings.TrimSpace(cfg.Database.Pass) == "" {
+		return fmt.Errorf("LOC_DB_NAME, LOC_DB_USER and LOC_DB_PASS are required")
+	}
+	for name, value := range map[string]string{
+		"LOC_ANDROID_APK_FILENAME":       cfg.Files.UserAPKFilename,
+		"LOC_ANDROID_ADMIN_APK_FILENAME": cfg.Files.AdminAPKFilename,
+	} {
+		cleaned := filepath.Clean(value)
+		if filepath.IsAbs(cleaned) || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("%s must stay inside LOC_PUBLIC_BASE_DIR", name)
+		}
+	}
+	return nil
 }
 
 func env(key string, fallback string) string {

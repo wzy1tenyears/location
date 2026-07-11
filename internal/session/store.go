@@ -3,44 +3,34 @@ package session
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
+
+	"familylocation/location-v3/internal/httpx"
+	"familylocation/location-v3/internal/repositories"
 )
 
 type Store struct {
 	CookieName string
-	SavePath   string
+	Repo       *repositories.SessionRepository
 	Lifetime   time.Duration
 }
 
 func (store Store) StartUserSession(w http.ResponseWriter, r *http.Request, userID int64) (string, error) {
-	return store.writeSession(w, r, map[string]string{
-		"user_id": fmt.Sprintf("i:%d", userID),
-	})
+	return store.writeSession(w, r, &userID, false)
 }
 
 func (store Store) StartAdminSession(w http.ResponseWriter, r *http.Request) (string, error) {
-	return store.writeSession(w, r, map[string]string{
-		"admin_logged_in": "b:1",
-	})
+	return store.writeSession(w, r, nil, true)
 }
 
-func (store Store) writeSession(w http.ResponseWriter, r *http.Request, values map[string]string) (string, error) {
+func (store Store) writeSession(w http.ResponseWriter, r *http.Request, userID *int64, adminLoggedIn bool) (string, error) {
 	sessionID, err := randomHex(20)
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(store.SavePath, 0o755); err != nil {
-		return "", err
-	}
-	body := ""
-	for key, value := range values {
-		body += key + "|" + value + ";"
-	}
-	if err := os.WriteFile(filepath.Join(store.SavePath, "sess_"+sessionID), []byte(body), 0o600); err != nil {
+	expiresAt := time.Now().Add(store.Lifetime)
+	if err := store.Repo.Upsert(r.Context(), sessionID, userID, adminLoggedIn, expiresAt); err != nil {
 		return "", err
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -49,9 +39,9 @@ func (store Store) writeSession(w http.ResponseWriter, r *http.Request, values m
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   requestIsHTTPS(r),
+		Secure:   httpx.RequestIsHTTPS(r),
 		MaxAge:   int(store.Lifetime.Seconds()),
-		Expires:  time.Now().Add(store.Lifetime),
+		Expires:  expiresAt,
 	})
 	return sessionID, nil
 }
@@ -62,14 +52,4 @@ func randomHex(bytes int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buffer), nil
-}
-
-func requestIsHTTPS(r *http.Request) bool {
-	if r.TLS != nil {
-		return true
-	}
-	if r.Header.Get("X-Forwarded-Proto") == "https" || r.Header.Get("X-Forwarded-Ssl") == "on" {
-		return true
-	}
-	return false
 }

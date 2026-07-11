@@ -15,6 +15,12 @@ if ([string]::IsNullOrWhiteSpace($GoExe)) {
         $GoExe = $GoCommand.Source
     }
 }
+if ([string]::IsNullOrWhiteSpace($GoExe)) {
+    $StandardGo = Join-Path $env:ProgramFiles 'Go\bin\go.exe'
+    if (Test-Path -LiteralPath $StandardGo -PathType Leaf) {
+        $GoExe = $StandardGo
+    }
+}
 
 if ([string]::IsNullOrWhiteSpace($GoExe) -or -not (Test-Path -LiteralPath $GoExe -PathType Leaf)) {
     throw 'Go toolchain not found. Put go on PATH or set LOC_GO_EXE to go.exe.'

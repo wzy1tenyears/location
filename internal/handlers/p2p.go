@@ -42,7 +42,10 @@ type p2pRequest struct {
 
 func (handler P2PHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	var req p2pRequest
-	_ = httpx.DecodeJSON(r, &req)
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 	if strings.TrimSpace(req.Action) == "" {
 		req.Action = "status"
 	}

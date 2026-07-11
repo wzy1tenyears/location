@@ -1,25 +1,14 @@
 # location v3
 
-v3 是独立的 Go 后端目录，用来承接从 `v2` PHP 后端逐步迁出的接口。`v2` 继续保留现有 PHP 后端；`v3` 只负责 Go 服务本身，不反向污染 `v2/`。
+v3 是独立的 Go 后端目录，当前目标是承接线上全部 API，并让原生 App 成为后台管理的唯一入口。遗留网页后台不再作为管理入口对外开放。
 
-## 当前迁移范围
+## 当前状态
 
-- `GET /api/app_update.php`
-- `GET /api/admin_app_update.php`
-- `GET /api/announcement.php`
-- `GET|POST /api/invite_check.php`
-- `GET /api/me.php`
-- `GET|POST /api/settings.php`
-- `GET /api/locations.php`
-- `POST /api/history.php`
+- v3 以无后缀的纯 Go 路径作为主接口形状。
+- `/api/` 应直接反向代理到 Go 服务。
+- 后台管理走 `android-admin-client` 原生界面；遗留网页后台路径应在 Nginx 上显式返回 `410 Gone`。
 
-这些接口保持原有 JSON 形状，便于在 Nginx 上按路径灰度转发。
-
-## 目录定位
-
-- `v2/`：现有线上 App + PHP 后端
-- `v3/`：独立 Go 后端
-- 当前默认状态仍应是 PHP 在线上接流；`v3` 只在灰度时按路径接管
+本仓库仅包含可公开的 Go 后端源码、测试与通用部署样例，不包含 Android 私有源码、APK 或线上基础设施配置。
 
 ## 配置
 
@@ -30,28 +19,30 @@ v3 是独立的 Go 后端目录，用来承接从 `v2` PHP 后端逐步迁出的
 - `LOC_DB_NAME`
 - `LOC_DB_USER`
 - `LOC_DB_PASS`
+- `LOC_APP_SIGNING_SECRET`
 - `LOC_PUBLIC_BASE_DIR`
-- `LOC_PHP_SESSION_DIR`
 - `LOC_ANDROID_VERSION_CODE`
 - `LOC_ANDROID_ADMIN_VERSION_CODE`
 - `LOC_ADMIN_PASSWORD` / `LOC_ADMIN_PASSWORD_HASH`
 
-非敏感默认值只用于本地开发。线上部署时应由 systemd 环境文件或进程管理器注入。
+`LOC_APP_SIGNING_SECRET` 用于 App Challenge 与后台 APK 下载令牌签名，必须至少 32 个字符，并且不能再回退复用数据库密码。服务启动时会校验数据库、管理员凭据、签名密钥和 APK 相对路径，配置不完整会直接拒绝启动。
 
 ## 本地运行
 
 ```powershell
-cd F:\program\location\v3
+cd location
 $env:LOC_DB_PASS = '<database password>'
-$env:LOC_PUBLIC_BASE_DIR = 'F:\program\location\v2'
+$env:LOC_APP_SIGNING_SECRET = '<token signing secret>'
+$env:LOC_ADMIN_PASSWORD = '<admin password>'
+$env:LOC_PUBLIC_BASE_DIR = '.\public'
 go run .\cmd\server
 ```
 
-`LOC_PUBLIC_BASE_DIR` 指向实际托管 APK 和公开资源的目录；当前如果仍复用 `v2` 的 APK/资源，就应指向 `F:\program\location\v2`，而不是机械地写成 `v3`。
+`LOC_PUBLIC_BASE_DIR` 指向实际托管 APK 的目录。
 
-当前 v3 已覆盖全部 `/api/*.php` 兼容路径，不再需要旧 PHP API 回退入口。
-
-本机当前未检测到 Go 工具链；安装 Go 后可直接运行上面的命令。
+当前 v3 已覆盖当前线上所需 API。
+当前会话也已由 Go 自己管理，不再依赖旧文件式 session 目录。
+数据库首次启动使用 `schema_core.sql` 建立基础表，后续结构变化按 `internal/database/migrations/` 中的版本文件顺序执行并记录到 `schema_migrations`。
 
 ## 验证
 
@@ -59,7 +50,7 @@ go run .\cmd\server
 powershell.exe -ExecutionPolicy Bypass -File .\verify-v3.ps1
 ```
 
-有 Go 工具链时脚本会执行 `go test ./...`；没有 Go 工具链时仍会检查目录结构、路由覆盖、后台更新接口权限保护和敏感字面量。
+发布验证必须找到 Go 工具链并执行 `go test ./...`。仅需要检查目录、路由和敏感字面量时，可显式传入 `-StaticOnly`；该模式不能作为发布通过依据。
 
 ## 构建
 
@@ -72,4 +63,5 @@ powershell.exe -ExecutionPolicy Bypass -File .\build-v3.ps1
 ## 灰度部署
 
 - `deploy/family-location-go.service.sample`：systemd 示例，敏感环境变量放到 `/etc/family-location-v3.env`。
-- `deploy/nginx-go-backend.sample.conf`：Nginx `/api/` 直接切到纯 Go v3 的样例。
+- `deploy/nginx-go-backend.sample.conf`：Nginx `/api/` 直接切到纯 Go v3、并禁用旧网页后台的样例。
+- 旧 APK 只保留 `app_update.php` 与 `admin_app_update.php` 两个自动更新兼容入口，其余接口只使用无后缀路径。

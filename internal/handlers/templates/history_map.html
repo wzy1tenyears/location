@@ -28,6 +28,7 @@
     let currentMarkers = [];
     let currentPolylines = [];
     let infoWindow = null;
+    let fallbackScriptStarted = false;
     const colors = ['#0d5f54', '#1677ff', '#059669', '#dc2626', '#0891b2', '#be185d'];
 
     function state(message) {
@@ -296,7 +297,7 @@
 
     function initMap() {
       if (!window.AMap) {
-        state('高德地图脚本加载失败');
+        loadMapScript('1.4.15', false);
         return;
       }
       map = new AMap.Map('map', {
@@ -314,6 +315,34 @@
       }
     }
 
+    function loadMapScript(version, allowFallback) {
+      if (!allowFallback) {
+        if (fallbackScriptStarted) return;
+        fallbackScriptStarted = true;
+        state('正在加载兼容地图组件…');
+      }
+      const script = document.createElement('script');
+      script.src = `${serviceHost}/maps?v=${encodeURIComponent(version)}&key=${encodeURIComponent(AMAP_KEY)}`;
+      script.async = true;
+      script.onerror = () => {
+        if (allowFallback) {
+          loadMapScript('1.4.15', false);
+        } else {
+          state('高德地图脚本加载失败，请检查网络或更新系统 WebView');
+        }
+      };
+      script.onload = () => {
+        if (window.AMap) {
+          initMap();
+        } else if (allowFallback) {
+          loadMapScript('1.4.15', false);
+        } else {
+          state('当前系统 WebView 无法运行地图组件，请更新系统 WebView');
+        }
+      };
+      document.head.appendChild(script);
+    }
+
     window.renderLocHistoryMap = function(records) {
       renderRecords(Array.isArray(records) ? records : []);
     };
@@ -324,12 +353,7 @@
         state('地图密钥未配置');
         return;
       }
-      const script = document.createElement('script');
-      script.src = `${serviceHost}/maps?v=2.0&key=${encodeURIComponent(AMAP_KEY)}`;
-      script.async = true;
-      script.onerror = () => state('高德地图脚本加载失败，请检查服务器反代规则');
-      script.onload = initMap;
-      document.head.appendChild(script);
+      loadMapScript('2.0', true);
     });
   </script>
 </head>

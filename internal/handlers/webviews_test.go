@@ -17,7 +17,11 @@ func TestWebViewTemplatesDoNotEscapeJavaScriptInterpolation(t *testing.T) {
 }
 
 func TestMapTemplateBuildsAMapScriptURL(t *testing.T) {
-	if !strings.Contains(historyMapHTML, "`${serviceHost}/maps?v=2.0&key=${encodeURIComponent(AMAP_KEY)}`") {
+	if !strings.Contains(historyMapHTML, "`${serviceHost}/maps?v=${encodeURIComponent(version)}&key=${encodeURIComponent(AMAP_KEY)}`") {
 		t.Fatal("history map template does not build the AMap script URL dynamically")
+	}
+	if !strings.Contains(historyMapHTML, "loadMapScript('2.0', true)") ||
+		!strings.Contains(historyMapHTML, "loadMapScript('1.4.15', false)") {
+		t.Fatal("history map template must retain the legacy WebView fallback")
 	}
 }

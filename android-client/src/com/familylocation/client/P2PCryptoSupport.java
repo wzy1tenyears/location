@@ -165,7 +165,9 @@ final class P2PCryptoSupport {
             java.util.Iterator<String> keys = plaintext.keys();
             while (keys.hasNext()) {
                 String key = keys.next();
-                merged.put(key, plaintext.opt(key));
+                if (P2PRecordMergePolicy.isAllowedLocationPayloadField(key)) {
+                    merged.put(key, plaintext.opt(key));
+                }
             }
             merged.put("p2p_decrypted", true);
             return merged;

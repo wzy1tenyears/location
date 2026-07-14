@@ -37,17 +37,14 @@ try {
             $stmt = db()->prepare('UPDATE users SET password_hash = ? WHERE id = ?');
             $stmt->execute([password_hash($newPassword, PASSWORD_DEFAULT), (int) $user['id']]);
             session_regenerate_id(true);
-        } else {
-            $environmentDataConsent = input_bool('environment_data_consent');
-            $stmt = db()->prepare('UPDATE users SET environment_data_consent_at = ? WHERE id = ?');
-            $stmt->execute([$environmentDataConsent ? date('Y-m-d H:i:s') : null, (int) $user['id']]);
-            $user['environment_data_consent_at'] = $environmentDataConsent ? date('Y-m-d H:i:s') : null;
         }
     }
 
+    $userPayload = public_user_payload_for_group($user, $membership);
+
     json_response([
         'ok' => true,
-        'user' => public_user_payload_for_group($user, $membership),
+        'user' => $userPayload,
         'selected_group' => group_payload($membership),
         'report_interval_seconds' => user_report_interval_seconds($user),
         'server_time' => date('Y-m-d H:i:s'),

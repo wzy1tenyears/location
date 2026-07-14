@@ -887,8 +887,6 @@ public class AdminActivity extends Activity {
         card.addView(compactInfoPanel(onlineUserSummary(response.optJSONArray("users"))), blockParams(16));
 
         card.addView(sectionTitle("系统工具"), blockParams(8));
-        Button securityManage = secondaryButton("安全策略");
-        securityManage.setOnClickListener(view -> showSecurityManager(response, redirectPath));
         Button announcementManage = secondaryButton("公告管理");
         announcementManage.setOnClickListener(view -> showAnnouncementManager(response, redirectPath));
         Button inviteManage = secondaryButton("邀请码管理");
@@ -899,7 +897,6 @@ public class AdminActivity extends Activity {
         refresh.setOnClickListener(view -> showAdminHome(redirectPath));
         Button relogin = secondaryButton("重新登录");
         relogin.setOnClickListener(view -> showLogin(""));
-        card.addView(securityManage, blockParams(10));
         card.addView(buttonRow(announcementManage, inviteManage), blockParams(10));
         card.addView(checkUpdate, blockParams(10));
         card.addView(refresh, blockParams(10));
@@ -907,44 +904,6 @@ public class AdminActivity extends Activity {
         setScreen(card, false);
         setStatus("后台数据已加载：" + response.optString("server_time", ""));
     }
-
-
-
-    private void showSecurityManager(JSONObject response, String redirectPath) {
-        LinearLayout card = screen("安全策略");
-        JSONObject settings = response.optJSONObject("security_settings");
-        if (settings == null) {
-            settings = new JSONObject();
-        }
-        CheckBox banRoot = policyCheckBox("拦截 Root 环境", settings.optBoolean("ban_root_users", false));
-        CheckBox banAdb = policyCheckBox("拦截 ADB 调试", settings.optBoolean("ban_adb_users", false));
-        CheckBox banMock = policyCheckBox("拦截模拟定位", settings.optBoolean("ban_fake_location_users", false));
-        CheckBox banAccessibility = policyCheckBox("拦截无障碍风险", settings.optBoolean("ban_accessibility_users", false));
-        CheckBox banCapture = policyCheckBox("拦截抓包环境", settings.optBoolean("ban_packet_capture_users", false));
-        CheckBox banSuspiciousPackages = policyCheckBox("拦截可疑包名", settings.optBoolean("ban_suspicious_packages_users", false));
-        Button save = primaryButton("保存安全策略");
-        save.setOnClickListener(view -> {
-            JSONObject payload = adminPayload("update_security_settings");
-            putJson(payload, "ban_root_users", banRoot.isChecked());
-            putJson(payload, "ban_adb_users", banAdb.isChecked());
-            putJson(payload, "ban_fake_location_users", banMock.isChecked());
-            putJson(payload, "ban_accessibility_users", banAccessibility.isChecked());
-            putJson(payload, "ban_packet_capture_users", banCapture.isChecked());
-            putJson(payload, "ban_suspicious_packages_users", banSuspiciousPackages.isChecked());
-            postAdminAction(payload, redirectPath);
-        });
-        card.addView(infoPanel("安全策略开启后，命中风险的用户会按服务端规则限制登录或上报。调试模式账号不受拦截影响。\n\nRoot/ADB/模拟定位/无障碍/抓包按对应检测项拦截；可疑包名会拦截安装列表中命中的 Magisk、Xposed、Reqable、HttpCanary、Charles 等风险包名。"), blockParams(12));
-        card.addView(banRoot, blockParams(6));
-        card.addView(banAdb, blockParams(6));
-        card.addView(banMock, blockParams(6));
-        card.addView(banAccessibility, blockParams(6));
-        card.addView(banCapture, blockParams(6));
-        card.addView(banSuspiciousPackages, blockParams(12));
-        card.addView(save, blockParams(10));
-        setScreen(card, false);
-        setStatus("");
-    }
-
     private CheckBox policyCheckBox(String text, boolean checked) {
         CheckBox box = new CheckBox(this);
         box.setText(text);
@@ -1308,7 +1267,7 @@ public class AdminActivity extends Activity {
         EditText interval = input("上报间隔秒");
         interval.setInputType(InputType.TYPE_CLASS_NUMBER);
         interval.setText(String.valueOf(Math.max(30, user.optInt("report_interval_seconds", 300))));
-        CheckBox debug = policyCheckBox("调试模式", user.optBoolean("debug_mode", false));
+        CheckBox debug = policyCheckBox("调试模式（跳过设备指纹冲突）", user.optBoolean("debug_mode", false));
         EditText newPassword = input("新密码：留空不重置");
         newPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
 
@@ -1722,89 +1681,7 @@ public class AdminActivity extends Activity {
             }
         }
 
-        appendEnvironmentReportDetail(builder, location);
-
         showTextDetailDialog("定位详情", builder.toString());
-    }
-
-    private void appendEnvironmentReportDetail(StringBuilder builder, JSONObject location) {
-        JSONObject report = location.optJSONObject("environment_report");
-        if (report == null) {
-            report = environmentReportForUser(location.optInt("user_id", 0));
-        }
-        builder.append("\n设备/环境报告：");
-        if (report == null) {
-            builder.append("无\n");
-            return;
-        }
-        builder.append('\n');
-        appendIfPresent(builder, "上报时间", report.optString("created_at", ""));
-        JSONObject device = report.optJSONObject("device");
-        if (device != null) {
-            appendIfPresent(builder, "设备", firstText(device.optString("manufacturer", ""), device.optString("brand", ""))
-                + " " + firstText(device.optString("model", ""), device.optString("device", "")));
-            appendIfPresent(builder, "系统", firstText(device.optString("android_release", ""), "Android")
-                + " / SDK " + firstText(device.optString("android_sdk", ""), "未知"));
-            appendIfPresent(builder, "App", firstText(device.optString("app_version_name", ""), "未知")
-                + " (" + firstText(device.optString("app_version_code", ""), "0") + ")");
-            appendIfPresent(builder, "Root", boolLabel(device, "root_detected"));
-            appendIfPresent(builder, "ADB", boolLabel(device, "adb_enabled"));
-            appendIfPresent(builder, "模拟定位", boolLabel(device, "mock_location_enabled"));
-        }
-        JSONArray apps = report.optJSONArray("installed_apps");
-        int appCount = report.optInt("installed_apps_count", apps == null ? 0 : apps.length());
-        builder.append("安装应用：").append(appCount).append(" 个").append('\n');
-        if (apps != null && apps.length() > 0) {
-            int count = Math.min(appCount, Math.min(apps.length(), 40));
-            for (int index = 0; index < count; index += 1) {
-                JSONObject app = apps.optJSONObject(index);
-                if (app == null) {
-                    continue;
-                }
-                builder.append("  - ")
-                    .append(firstText(app.optString("label", ""), app.optString("package_name", ""), "未知应用"));
-                String packageName = app.optString("package_name", "");
-                if (!packageName.isEmpty()) {
-                    builder.append(" / ").append(packageName);
-                }
-                String versionName = app.optString("version_name", "");
-                if (!versionName.isEmpty()) {
-                    builder.append(" / ").append(versionName);
-                }
-                builder.append('\n');
-            }
-            if (apps.length() > count || appCount > count) {
-                builder.append("  ... 仅显示前 ").append(count).append(" 个\n");
-            }
-        }
-        JSONObject rawReport = report.optJSONObject("report");
-        if (rawReport != null) {
-            builder.append("环境报告 JSON：").append(prettyJson(rawReport)).append('\n');
-        }
-    }
-
-    private JSONObject environmentReportForUser(int userId) {
-        if (userId <= 0 || lastAdminSummary == null) {
-            return null;
-        }
-        JSONArray reports = lastAdminSummary.optJSONArray("environment_reports");
-        if (reports == null) {
-            return null;
-        }
-        for (int index = 0; index < reports.length(); index += 1) {
-            JSONObject report = reports.optJSONObject(index);
-            if (report != null && report.optInt("user_id", 0) == userId) {
-                return report;
-            }
-        }
-        return null;
-    }
-
-    private String boolLabel(JSONObject object, String key) {
-        if (object == null || !object.has(key) || object.isNull(key)) {
-            return "";
-        }
-        return object.optBoolean(key, false) ? "是" : "否";
     }
 
     private void showLogDetail(JSONObject log) {

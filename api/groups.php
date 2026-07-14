@@ -23,7 +23,7 @@ try {
             json_response(['ok' => false, 'message' => '组号尝试过多，请 30 分钟后再试。'], 423);
         }
 
-        if (!preg_match('/^[0-9a-z]{6}$/', $groupCode)) {
+        if (!preg_match('/^[0-9a-f]{32}$/', $groupCode)) {
             if (record_failed_group_join($pdo, (int) $user['id'], $joinIp)) {
                 json_response(['ok' => false, 'message' => '组号尝试过多，请 30 分钟后再试。'], 423);
             }

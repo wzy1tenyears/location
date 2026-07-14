@@ -2,7 +2,6 @@ package com.familylocation.client;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.ActivityManager;
 import android.app.AlarmManager;
 import android.app.Dialog;
 import android.app.DownloadManager;
@@ -13,8 +12,6 @@ import android.content.Context;
 import android.content.IntentFilter;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
@@ -34,7 +31,6 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
-import android.os.StatFs;
 import android.provider.Settings;
 import android.text.InputType;
 import android.text.SpannableString;
@@ -96,7 +92,7 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 85;
+    private static final int APP_VERSION_CODE = 86;
     private static final String APP_VERSION_NAME = "2.1.0";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
@@ -113,12 +109,10 @@ public class MainActivity extends Activity {
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
     private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String KEY_SEEN_ANNOUNCEMENT_PREFIX = "announcement_seen_";
-    private static final String KEY_ENVIRONMENT_REPORT_LAST_UPLOAD_PREFIX = "environment_report_last_upload_";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String TAG = "FamilyLocationNative";
     private static final String UPDATE_APK_NAME = "location-release.apk";
     private static final long MAX_CACHE_BYTES = 50L * 1024L * 1024L;
-    private static final long ENVIRONMENT_REPORT_INTERVAL_MS = 24L * 60L * 60L * 1000L;
     private static final String VIEW_TAG_DYNAMIC = "dynamic";
     private static final String VIEW_TAG_HOME_HISTORY = "home_history";
     private static final int TAB_POSITION = 0;
@@ -153,7 +147,6 @@ public class MainActivity extends Activity {
     private boolean backgroundLocationPermissionRequestInFlight;
     private volatile int challengeGeneration;
     private volatile boolean challengeCancelled;
-    private volatile boolean environmentReportUploading;
     private String loginDraftUsername = "";
     private String loginDraftPassword = "";
     private boolean loginDraftTerms;
@@ -250,7 +243,6 @@ public class MainActivity extends Activity {
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
                 runUi(this::showHome);
-                uploadDailyEnvironmentReportIfDue();
                 refreshLocations();
             } catch (Exception exception) {
                 runUi(this::showLogin);
@@ -318,13 +310,15 @@ public class MainActivity extends Activity {
         passwordConfirm.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         EditText inviteCode = input("邀请码");
         EditText groupName = input("家庭组名称：创建型邀请码需要填写");
-        EditText groupCode = input("家庭组号：加入型邀请码需要填写 6 位小写组号");
+        EditText groupCode = input("家庭组号：加入型邀请码需要填写 32 位小写十六进制组号");
         groupCode.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         CheckBox terms = termsCheckBox();
 
 
-        Button checkInvite = secondaryButton("检查邀请码");
+        Button checkInvite = secondaryButton("邀请码填写说明");
         checkInvite.setOnClickListener(view -> checkInviteCode(inviteCode.getText().toString(), groupName, groupCode));
+        Button pasteInvite = secondaryButton("从剪贴板填入邀请码");
+        pasteInvite.setOnClickListener(view -> offerClipboardInvite(inviteCode, groupName, groupCode));
         Button submit = primaryButton("完成注册");
         submit.setOnClickListener(view -> register(
             username.getText().toString(),
@@ -344,45 +338,41 @@ public class MainActivity extends Activity {
         card.addView(password, blockParams(12));
         card.addView(passwordConfirm, blockParams(12));
         card.addView(inviteCode, blockParams(10));
-        card.addView(checkInvite, blockParams(12));
+        card.addView(buttonRow(checkInvite, pasteInvite), blockParams(12));
         card.addView(groupName, blockParams(12));
         card.addView(groupCode, blockParams(12));
         card.addView(terms, blockParams(12));
         card.addView(submit, blockParams(10));
         card.addView(back, blockParams(0));
         setScreen(card, true);
-        maybeFillClipboardInvite(inviteCode, groupName, groupCode);
-        if (inviteCode.getText().toString().trim().isEmpty()) {
-            setStatus("请先填写邀请码；不确定类型时点“检查邀请码”。");
-        }
     }
 
 
-    private void maybeFillClipboardInvite(EditText inviteCode, EditText groupName, EditText groupCode) {
+    private void offerClipboardInvite(EditText inviteCode, EditText groupName, EditText groupCode) {
         String code = inviteCodeFromClipboardText(readClipboardText());
         if (code.isEmpty()) {
+            setStatus("剪贴板中没有可识别的邀请码。");
             return;
         }
-        runBackground(() -> {
-            try {
-                getJson("api/invite_check.php?code=" + urlEncode(code));
-                runUi(() -> {
-                    if (!inviteCode.getText().toString().trim().isEmpty()) {
-                        return;
-                    }
-                    inviteCode.setText(code);
-                    checkInviteCode(code, groupName, groupCode);
-                    showPopupDialog(
-                        "检测到邀请码",
-                        new String[][] {new String[] {"剪贴板", "剪贴板中存在可用邀请码，已自动填入注册表单。"}},
-                        "我知道了",
-                        null,
-                        null
-                    );
-                });
-            } catch (Exception ignored) {
-            }
-        });
+        showPopupDialog(
+            "检测到邀请码",
+            new String[][] {new String[] {"剪贴板", "是否把剪贴板中的邀请码填入注册表单？邀请码只会在你提交注册时发送。"}},
+            "填入邀请码",
+            () -> applyConfirmedClipboardInvite(code, inviteCode, groupName, groupCode),
+            "取消"
+        );
+    }
+
+    private void applyConfirmedClipboardInvite(String approvedCode, EditText inviteCode, EditText groupName, EditText groupCode) {
+        if (!inviteCode.getText().toString().trim().isEmpty()) {
+            return;
+        }
+        String code = sanitizeInviteCode(approvedCode);
+        if (code.isEmpty() || !code.equals(approvedCode)) {
+            return;
+        }
+        inviteCode.setText(code);
+        checkInviteCode(code, groupName, groupCode);
     }
 
     private String readClipboardText() {
@@ -510,46 +500,31 @@ public class MainActivity extends Activity {
     }
 
     private void checkInviteCode(String inviteCode, EditText groupName, EditText groupCode) {
-        String code = inviteCode.trim();
-        if (code.isEmpty()) {
+        String raw = inviteCode == null ? "" : inviteCode.trim().toLowerCase(Locale.ROOT);
+        String code = sanitizeInviteCode(raw);
+        if (raw.isEmpty()) {
             setStatus("请先输入邀请码。");
             return;
         }
-
-        setStatus("正在检查邀请码");
-        runBackground(() -> {
-            try {
-                JSONObject response = getJson("api/invite_check.php?code=" + urlEncode(code));
-                boolean requiresGroupName = response.optBoolean("requires_group_name", false);
-                boolean requiresGroupCode = response.optBoolean("requires_group_code", false);
-                runUi(() -> {
-                    groupName.setEnabled(requiresGroupName);
-                    groupCode.setEnabled(requiresGroupCode);
-                    if (!requiresGroupName) {
-                        groupName.setText("");
-                    }
-                    if (!requiresGroupCode) {
-                        groupCode.setText("");
-                    }
-                    if (requiresGroupName) {
-                        setStatus("邀请码可用：请填写要创建的家庭组名称。");
-                    } else if (requiresGroupCode) {
-                        setStatus("邀请码可用：请填写 6 位家庭组号。");
-                    } else {
-                        setStatus("邀请码可用：无需额外填写家庭组信息。");
-                    }
-                });
-            } catch (Exception exception) {
-                runUi(() -> setStatus(exception.getMessage()));
-            }
-        });
+        if (code.isEmpty() || !code.equals(raw)) {
+            setStatus("邀请码只能包含字母和数字。");
+            return;
+        }
+        groupName.setEnabled(true);
+        groupCode.setEnabled(true);
+        setStatus("邀请码将在提交注册时验证。创建家庭组可填写名称，加入已有家庭组可填写 32 位组号。");
     }
 
     private void register(String username, String displayName, String password, String passwordConfirm, String inviteCode, String groupName, String groupCode, boolean termsAccepted) {
         String usernameValue = username.trim();
         String inviteCodeValue = inviteCode.trim();
+        String groupCodeValue = groupCode.trim().toLowerCase(Locale.ROOT);
         if (usernameValue.isEmpty() || password.isEmpty() || passwordConfirm.isEmpty() || inviteCodeValue.isEmpty()) {
             setStatus("请填写账号、密码、确认密码和邀请码。");
+            return;
+        }
+        if (!groupCodeValue.isEmpty() && !groupCodeValue.matches("^[0-9a-f]{32}$")) {
+            setStatus("家庭组号必须是 32 位小写十六进制字符。");
             return;
         }
         if (!termsAccepted) {
@@ -568,7 +543,7 @@ public class MainActivity extends Activity {
                     .put("password_confirm", passwordConfirm)
                     .put("invite_code", inviteCodeValue)
                     .put("group_name", groupName.trim())
-                    .put("group_code", groupCode.trim().toLowerCase(java.util.Locale.US))
+                    .put("group_code", groupCodeValue)
                     .put("terms_accepted", true)
                     .put("cross_border_transfer_accepted", true)
                     .put("browser_fingerprint", deviceCookieValue())
@@ -582,7 +557,6 @@ public class MainActivity extends Activity {
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
                 runUi(this::showHome);
-                uploadDailyEnvironmentReportIfDue();
                 refreshLocations();
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
@@ -623,7 +597,6 @@ public class MainActivity extends Activity {
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
                 runUi(this::showHome);
-                uploadDailyEnvironmentReportIfDue();
                 refreshLocations();
             } catch (ChallengeCancelledException exception) {
                 runUi(() -> setStatus(""));
@@ -1566,7 +1539,7 @@ public class MainActivity extends Activity {
     private void showGroups() {
         currentTab = TAB_GROUPS;
         LinearLayout card = screen("家庭组管理");
-        EditText joinCode = input("输入 6 位家庭组号");
+        EditText joinCode = input("输入 32 位小写十六进制家庭组号");
         Button join = primaryButton("加入家庭组");
         Button refresh = secondaryButton("刷新家庭组");
         Button leave = secondaryButton("退出当前家庭组");
@@ -1688,8 +1661,8 @@ public class MainActivity extends Activity {
     }
     private void joinGroupByCode(String groupCode) {
         String code = groupCode.trim().toLowerCase(java.util.Locale.US);
-        if (!code.matches("^[0-9a-z]{6}$")) {
-            setStatus("请输入 6 位小写家庭组号。");
+        if (!code.matches("^[0-9a-f]{32}$")) {
+            setStatus("请输入 32 位小写十六进制家庭组号。");
             return;
         }
 
@@ -2089,23 +2062,6 @@ public class MainActivity extends Activity {
         currentTab = TAB_MINE;
         LinearLayout card = screen("我的");
         TextView account = infoPanel(userDisplayName(currentUser), false);
-        CheckBox environmentConsent = new CheckBox(this);
-        environmentConsent.setText("同意上传环境诊断数据");
-        environmentConsent.setTextColor(colorText());
-        environmentConsent.setChecked(currentUser != null && currentUser.optBoolean("environment_data_consent", false));
-        Button uploadEnvironment = secondaryButton("立即上报环境信息");
-        uploadEnvironment.setEnabled(environmentConsent.isChecked());
-        environmentConsent.setOnCheckedChangeListener((button, checked) -> {
-            uploadEnvironment.setEnabled(checked);
-            saveEnvironmentConsent(checked);
-        });
-        uploadEnvironment.setOnClickListener(view -> {
-            if (!environmentConsent.isChecked()) {
-                setStatus("请先勾选环境数据上报。");
-                return;
-            }
-            uploadEnvironmentReport(true, true, true);
-        });
         Button changePassword = secondaryButton("修改密码");
         changePassword.setOnClickListener(view -> showPasswordChange());
         Button logout = secondaryButton("退出登录");
@@ -2119,9 +2075,6 @@ public class MainActivity extends Activity {
         card.addView(sectionTitle("界面主题"), blockParams(8));
         card.addView(themeSummary, blockParams(8));
         card.addView(changeTheme, blockParams(14));
-        card.addView(sectionTitle("隐私与上报"), blockParams(8));
-        card.addView(environmentConsent, blockParams(8));
-        card.addView(uploadEnvironment, blockParams(12));
         card.addView(sectionTitle("账号安全"), blockParams(8));
         card.addView(compactInfoPanel("验证当前密码后修改，修改成功后继续保持当前登录状态。", false), blockParams(8));
         card.addView(changePassword, blockParams(14));
@@ -2176,29 +2129,6 @@ public class MainActivity extends Activity {
             return "暗色";
         }
         return "跟随系统";
-    }
-
-    private void saveEnvironmentConsent(boolean enabled) {
-        setStatus("正在保存环境数据设置");
-        runBackground(() -> {
-            try {
-                JSONObject payload = new JSONObject()
-                    .put("group_name", selectedGroupName)
-                    .put("environment_data_consent", enabled);
-                JSONObject response = postJson("api/settings.php", payload);
-                JSONObject user = response.optJSONObject("user");
-                if (user != null) {
-                    currentUser = user;
-                    persistUserSession(user, response.optInt("report_interval_seconds", prefs().getInt(KEY_REPORT_INTERVAL_SECONDS, 300)));
-                }
-                runUi(() -> setStatus(enabled ? "环境数据设置已保存，正在上传诊断。" : "环境数据设置已保存"));
-                if (enabled) {
-                    uploadEnvironmentReport(true, true, true, true);
-                }
-            } catch (Exception exception) {
-                runUi(() -> setStatus(exception.getMessage()));
-            }
-        });
     }
 
     private void saveGuardianContinuous(boolean enabled) {
@@ -2907,9 +2837,6 @@ public class MainActivity extends Activity {
         if (addressDiagnostics != null) {
             payload.put("address_diagnostics", addressDiagnostics);
         }
-        if (currentUser != null && currentUser.optBoolean("environment_data_consent", false)) {
-            payload.put("device_report", buildDeviceEnvironmentReport(false));
-        }
         return payload;
     }
 
@@ -3468,236 +3395,6 @@ public class MainActivity extends Activity {
         return String.format(java.util.Locale.US, "%.4f", value);
     }
 
-
-    private JSONObject buildDeviceEnvironmentReport(boolean includeInstalledApps) {
-        JSONObject report = new JSONObject();
-        try {
-            report.put("manufacturer", Build.MANUFACTURER);
-            report.put("brand", Build.BRAND);
-            report.put("model", Build.MODEL);
-            report.put("device", Build.DEVICE);
-            report.put("product", Build.PRODUCT);
-            report.put("android_release", Build.VERSION.RELEASE);
-            report.put("android_sdk", Build.VERSION.SDK_INT);
-            report.put("app_version_name", APP_VERSION_NAME);
-            report.put("app_version_code", APP_VERSION_CODE);
-            report.put("adb_enabled", isAdbEnabled());
-            report.put("root_detected", isRootLikely());
-            report.put("mock_location_risk", hasMockLocationRisk());
-            report.put("fake_location_detected", hasSuspiciousPackage("fakegps", "mocklocation", "mock.location"));
-            report.put("reqable_detected", hasSuspiciousPackage("reqable"));
-            report.put("accessibility_risk", hasAccessibilityRisk());
-            report.put("battery_optimization_ignored", isIgnoringBatteryOptimizations());
-            addMemoryAndStorage(report);
-            JSONArray suspiciousPackages = suspiciousPackages();
-            report.put("suspicious_packages", suspiciousPackages);
-            if (includeInstalledApps) {
-                report.put("installed_apps", installedAppsSummary());
-            }
-        } catch (Exception ignored) {
-            // Best effort only.
-        }
-        return report;
-    }
-
-    private void uploadEnvironmentReport(boolean includeInstalledApps, boolean force) {
-        uploadEnvironmentReport(includeInstalledApps, force, false);
-    }
-
-    private void uploadEnvironmentReport(boolean includeInstalledApps, boolean force, boolean showResult) {
-        uploadEnvironmentReport(includeInstalledApps, force, showResult, false);
-    }
-
-    private void uploadEnvironmentReport(boolean includeInstalledApps, boolean force, boolean showResult, boolean markDailyUpload) {
-        if (currentUser == null || !currentUser.optBoolean("environment_data_consent", false)) {
-            if (showResult) {
-                setStatus("环境上报未开启，请先保存环境数据设置。");
-            }
-            return;
-        }
-        if (environmentReportUploading) {
-            if (showResult) {
-                setStatus("环境信息正在上报，请稍候。");
-            }
-            return;
-        }
-        environmentReportUploading = true;
-        if (showResult) {
-            setStatus("正在上报环境信息");
-        }
-        runBackground(() -> {
-            try {
-                JSONObject payload = new JSONObject()
-                    .put("force", force)
-                    .put("report", buildDeviceEnvironmentReport(includeInstalledApps));
-                postJson("api/environment_report.php", payload);
-                if (markDailyUpload) {
-                    markEnvironmentReportUploaded();
-                }
-                if (showResult) {
-                    runUi(() -> setStatus("环境信息已上报。"));
-                }
-            } catch (Exception exception) {
-                Log.w(TAG, "Environment report failed: " + exception.getMessage());
-                if (showResult) {
-                    runUi(() -> setStatus("环境信息上报失败：" + exception.getMessage()));
-                }
-            } finally {
-                environmentReportUploading = false;
-            }
-        });
-    }
-
-    private void uploadDailyEnvironmentReportIfDue() {
-        if (currentUser == null || !currentUser.optBoolean("environment_data_consent", false)) {
-            return;
-        }
-        long lastUploadAt = prefs().getLong(environmentReportLastUploadKey(), 0L);
-        long now = System.currentTimeMillis();
-        if (lastUploadAt > 0L && now - lastUploadAt < ENVIRONMENT_REPORT_INTERVAL_MS) {
-            return;
-        }
-        uploadEnvironmentReport(true, false, false, true);
-    }
-
-    private void markEnvironmentReportUploaded() {
-        prefs().edit()
-            .putLong(environmentReportLastUploadKey(), System.currentTimeMillis())
-            .apply();
-    }
-
-    private String environmentReportLastUploadKey() {
-        int userId = currentUser == null ? 0 : currentUser.optInt("id", 0);
-        return KEY_ENVIRONMENT_REPORT_LAST_UPLOAD_PREFIX + userId;
-    }
-
-
-    private boolean isAdbEnabled() {
-        try {
-            return Settings.Global.getInt(getContentResolver(), Settings.Global.ADB_ENABLED, 0) == 1;
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    private boolean hasAccessibilityRisk() {
-        try {
-            int enabled = Settings.Secure.getInt(getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0);
-            String services = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-            return enabled == 1 && services != null && !services.trim().isEmpty();
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    private boolean isIgnoringBatteryOptimizations() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            return true;
-        }
-        try {
-            PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
-            return powerManager != null && powerManager.isIgnoringBatteryOptimizations(getPackageName());
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    private boolean hasMockLocationRisk() {
-        try {
-            return "1".equals(Settings.Secure.getString(getContentResolver(), "mock_location"));
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    private boolean isRootLikely() {
-        String[] paths = {
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/sbin/su",
-            "/su/bin/su",
-            "/magisk/.core/bin/su"
-        };
-        for (String path : paths) {
-            if (new File(path).exists()) {
-                return true;
-            }
-        }
-        return hasSuspiciousPackage("magisk", "supersu", "kingroot");
-    }
-
-    private boolean hasSuspiciousPackage(String... needles) {
-        try {
-            List<PackageInfo> packages = getPackageManager().getInstalledPackages(0);
-            for (PackageInfo packageInfo : packages) {
-                String packageName = packageInfo.packageName == null ? "" : packageInfo.packageName.toLowerCase(java.util.Locale.US);
-                for (String needle : needles) {
-                    if (!needle.isEmpty() && packageName.contains(needle.toLowerCase(java.util.Locale.US))) {
-                        return true;
-                    }
-                }
-            }
-        } catch (Exception ignored) {
-            // Keep best-effort result.
-        }
-        return false;
-    }
-
-    private JSONArray suspiciousPackages() {
-        JSONArray matches = new JSONArray();
-        String[] needles = {
-            "reqable",
-            "httpcanary",
-            "charles",
-            "fiddler",
-            "magisk",
-            "supersu",
-            "kingroot",
-            "fakegps",
-            "mocklocation",
-            "xposed"
-        };
-        try {
-            List<PackageInfo> packages = getPackageManager().getInstalledPackages(0);
-            for (PackageInfo packageInfo : packages) {
-                String packageName = packageInfo.packageName == null ? "" : packageInfo.packageName.toLowerCase(java.util.Locale.US);
-                for (String needle : needles) {
-                    if (packageName.contains(needle)) {
-                        matches.put(needle);
-                        break;
-                    }
-                }
-            }
-        } catch (Exception ignored) {
-            // Keep best-effort list.
-        }
-        return matches;
-    }
-
-    private JSONArray installedAppsSummary() {
-        return new JSONArray();
-    }
-
-    private void addMemoryAndStorage(JSONObject report) {
-        try {
-            ActivityManager manager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-            ActivityManager.MemoryInfo memoryInfo = new ActivityManager.MemoryInfo();
-            if (manager != null) {
-                manager.getMemoryInfo(memoryInfo);
-                report.put("memory_total_bytes", memoryInfo.totalMem);
-                report.put("memory_available_bytes", memoryInfo.availMem);
-                report.put("memory_low", memoryInfo.lowMemory);
-            }
-        } catch (Exception ignored) {
-        }
-
-        try {
-            StatFs statFs = new StatFs(Environment.getDataDirectory().getAbsolutePath());
-            report.put("storage_total_bytes", statFs.getTotalBytes());
-            report.put("storage_available_bytes", statFs.getAvailableBytes());
-        } catch (Exception ignored) {
-        }
-    }
 
     private JSONObject postLocationReport(String groupName, JSONObject payload) throws Exception {
         JSONObject encryptedPayload = P2PCryptoSupport.encryptedReportOrNull(this::postJson, this, groupName, payload);

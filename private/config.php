@@ -1,9 +1,8 @@
-﻿<?php
-
+<?php
 declare(strict_types=1);
 
 const APP_NAME = '位置';
-const ANDROID_VERSION_CODE = 85;
+const ANDROID_VERSION_CODE = 86;
 const ANDROID_VERSION_NAME = '2.1.0';
 const ANDROID_APK_FILENAME = 'location-release.apk';
 const ANDROID_ADMIN_VERSION_CODE = 59;

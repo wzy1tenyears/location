@@ -66,12 +66,18 @@ try {
 
     $pdo->beginTransaction();
 
+    $rejectInviteRegistration = static function () use ($pdo): void {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        json_response(['ok' => false, 'message' => '注册信息无效或邀请码不可用。'], 403);
+    };
+
     $stmt = $pdo->prepare('SELECT * FROM invite_codes WHERE code = ? AND is_active = 1 LIMIT 1 FOR UPDATE');
     $stmt->execute([$inviteCode]);
     $invite = $stmt->fetch();
     if (!$invite || (int) $invite['used_count'] >= (int) $invite['max_uses']) {
-        $pdo->rollBack();
-        json_response(['ok' => false, 'message' => '邀请码无效或次数已用完。'], 403);
+        $rejectInviteRegistration();
     }
 
     $role = 'guardian';
@@ -80,21 +86,21 @@ try {
         $assignedGroupName = trim((string) ($invite['assigned_group_name'] ?? ''));
         if ($assignedGroupName === '') {
             if ($groupName === '') {
-                json_response(['ok' => false, 'message' => '请填写要创建的家庭组名称。'], 422);
+                $rejectInviteRegistration();
             }
             $createdGroup = create_family_group_record($pdo, $groupName);
             $assignedGroupName = (string) $createdGroup['group_name'];
         }
         ensure_family_group_record($pdo, $assignedGroupName);
     } else {
-        if (!preg_match('/^[0-9a-z]{6}$/', $groupCode)) {
-            json_response(['ok' => false, 'message' => '请填写 6 位家庭组号。'], 422);
+        if (!preg_match('/^[0-9a-f]{32}$/', $groupCode)) {
+            $rejectInviteRegistration();
         }
         $stmt = $pdo->prepare('SELECT group_name FROM family_groups WHERE group_code = ? LIMIT 1');
         $stmt->execute([$groupCode]);
         $group = $stmt->fetch();
         if (!$group) {
-            json_response(['ok' => false, 'message' => '家庭组号不存在。'], 404);
+            $rejectInviteRegistration();
         }
         $assignedGroupName = (string) $group['group_name'];
     }

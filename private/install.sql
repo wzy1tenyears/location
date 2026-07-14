@@ -14,20 +14,10 @@ CREATE TABLE IF NOT EXISTS users (
     user_agreement_accepted_at DATETIME NULL,
     privacy_policy_accepted_at DATETIME NULL,
     cross_border_transfer_accepted_at DATETIME NULL,
-    environment_data_consent_at DATETIME NULL,
     debug_mode TINYINT(1) NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_users_group_role (group_name, role)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS environment_reports (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    user_id INT UNSIGNED NOT NULL,
-    report_json LONGTEXT NOT NULL,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_environment_reports_user_created (user_id, created_at),
-    CONSTRAINT fk_environment_reports_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS user_devices (
@@ -70,7 +60,7 @@ CREATE TABLE IF NOT EXISTS family_groups (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     group_name VARCHAR(100) NOT NULL UNIQUE,
     display_name VARCHAR(100) NOT NULL DEFAULT '',
-    group_code VARCHAR(6) NULL UNIQUE,
+    group_code VARCHAR(32) NULL UNIQUE,
     owner_user_id INT UNSIGNED NULL,
     p2p_enabled_at DATETIME NULL,
     p2p_enabled_by INT UNSIGNED NULL,

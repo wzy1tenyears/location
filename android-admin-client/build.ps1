@@ -1,12 +1,10 @@
 param(
-    [string]$AndroidHome = $(if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { "F:\android" }),
+    [string]$AndroidHome = $(if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { "" }),
     [int]$CompileSdk = 35,
     [string]$BuildToolsVersion = "35.0.0",
     [string]$OutputApk = "",
-    [string]$Keystore = "",
-    [string]$KeyAlias = "androiddebugkey",
-    [string]$StorePassword = "android",
-    [string]$KeyPassword = "android",
+    [string]$Keystore = $(if ($env:LOC_ANDROID_ADMIN_KEYSTORE) { $env:LOC_ANDROID_ADMIN_KEYSTORE } else { "" }),
+    [string]$KeyAlias = $(if ($env:LOC_ANDROID_ADMIN_KEY_ALIAS) { $env:LOC_ANDROID_ADMIN_KEY_ALIAS } else { "" }),
     [switch]$NoObfuscate
 )
 
@@ -63,6 +61,25 @@ function Invoke-Native {
 
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $ScriptRoot "..")).Path
+
+if ([string]::IsNullOrWhiteSpace($Keystore) -or
+    [string]::IsNullOrWhiteSpace($KeyAlias) -or
+    [string]::IsNullOrWhiteSpace($env:LOC_ANDROID_ADMIN_STORE_PASSWORD) -or
+    [string]::IsNullOrWhiteSpace($env:LOC_ANDROID_ADMIN_KEY_PASSWORD)) {
+    throw "Release signing requires LOC_ANDROID_ADMIN_KEYSTORE, LOC_ANDROID_ADMIN_KEY_ALIAS, LOC_ANDROID_ADMIN_STORE_PASSWORD, and LOC_ANDROID_ADMIN_KEY_PASSWORD."
+}
+$Keystore = Resolve-RequiredPath $Keystore "external admin release keystore"
+$ProjectRootPrefix = $ProjectRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+if ($Keystore.StartsWith($ProjectRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Release keystore must be stored outside the project tree."
+}
+if ($KeyAlias -match "(?i)debug" -or ([System.IO.Path]::GetFileName($Keystore)) -match "(?i)debug") {
+    throw "Debug signing keys are not allowed for release APKs."
+}
+if ([string]::IsNullOrWhiteSpace($AndroidHome)) {
+    throw "Android SDK path is required through ANDROID_HOME or -AndroidHome."
+}
+
 $AndroidHome = Resolve-RequiredPath $AndroidHome "Android SDK"
 $BuildTools = Resolve-RequiredPath (Join-Path $AndroidHome "build-tools\$BuildToolsVersion") "Android build-tools"
 $AndroidJar = Resolve-RequiredPath (Join-Path $AndroidHome "platforms\android-$CompileSdk\android.jar") "android.jar"
@@ -73,7 +90,6 @@ $Zipalign = Resolve-RequiredPath (Join-Path $BuildTools "zipalign.exe") "zipalig
 $ApkSigner = Resolve-RequiredPath (Join-Path $BuildTools "apksigner.bat") "apksigner"
 $Javac = Resolve-CommandPath "javac.exe" "javac"
 $Java = Resolve-CommandPath "java.exe" "java"
-$Keytool = Resolve-CommandPath "keytool.exe" "keytool"
 
 $Manifest = Resolve-RequiredPath (Join-Path $ScriptRoot "AndroidManifest.xml") "AndroidManifest.xml"
 $SourceDir = Resolve-RequiredPath (Join-Path $ScriptRoot "src") "src"
@@ -95,11 +111,6 @@ if ($OutputApk.Trim() -eq "") {
 }
 $OutputApk = [System.IO.Path]::GetFullPath($OutputApk)
 New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($OutputApk)) | Out-Null
-
-if ($Keystore.Trim() -eq "") {
-    $Keystore = Join-Path $ScriptRoot "local-debug.keystore"
-}
-$Keystore = [System.IO.Path]::GetFullPath($Keystore)
 
 Invoke-Step "Clean build directory" {
     $resolvedScriptRoot = [System.IO.Path]::GetFullPath($ScriptRoot)
@@ -173,31 +184,13 @@ Invoke-Step "Zipalign" {
     Invoke-Native $Zipalign @("-f", "-P", "16", "4", $PackageApk, $AlignedApk)
 }
 
-Invoke-Step "Prepare signing key" {
-    if (-not (Test-Path -LiteralPath $Keystore)) {
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Keystore) | Out-Null
-        Invoke-Native $Keytool @(
-            "-genkeypair",
-            "-keystore", $Keystore,
-            "-storepass", $StorePassword,
-            "-keypass", $KeyPassword,
-            "-alias", $KeyAlias,
-            "-keyalg", "RSA",
-            "-keysize", "2048",
-            "-validity", "10000",
-            "-dname", "CN=Android Debug,O=Local,C=CN",
-            "-noprompt"
-        )
-    }
-}
-
 Invoke-Step "Sign APK" {
     Invoke-Native $ApkSigner @(
         "sign",
         "--ks", $Keystore,
         "--ks-key-alias", $KeyAlias,
-        "--ks-pass", "pass:$StorePassword",
-        "--key-pass", "pass:$KeyPassword",
+        "--ks-pass", "env:LOC_ANDROID_ADMIN_STORE_PASSWORD",
+        "--key-pass", "env:LOC_ANDROID_ADMIN_KEY_PASSWORD",
         "--out", $SignedApk,
         $AlignedApk
     )
@@ -205,6 +198,13 @@ Invoke-Step "Sign APK" {
 
 Invoke-Step "Verify APK" {
     Invoke-Native $ApkSigner @("verify", "--verbose", $SignedApk)
+    $SignerInfo = & $ApkSigner "verify" "--print-certs" $SignedApk 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not inspect the APK signing certificate."
+    }
+    if (($SignerInfo -join "`n") -match "(?i)Android Debug|androiddebugkey") {
+        throw "Debug signing certificates are not allowed for release APKs."
+    }
 }
 
 Invoke-Step "Write output APK" {

@@ -254,12 +254,8 @@ function user_history_locations_cache_set(string $groupName, int $userId, array 
 
 function generate_group_code(PDO $pdo): string
 {
-    $alphabet = '0123456789abcdefghijklmnopqrstuvwxyz';
     for ($attempt = 0; $attempt < 80; $attempt += 1) {
-        $code = '';
-        for ($index = 0; $index < 6; $index += 1) {
-            $code .= $alphabet[random_int(0, strlen($alphabet) - 1)];
-        }
+        $code = bin2hex(random_bytes(16));
 
         $stmt = $pdo->prepare('SELECT id FROM family_groups WHERE group_code = ? LIMIT 1');
         $stmt->execute([$code]);
@@ -273,11 +269,65 @@ function generate_group_code(PDO $pdo): string
 
 function ensure_family_group_codes(PDO $pdo): void
 {
-    $stmt = $pdo->query("SELECT id FROM family_groups WHERE group_code IS NULL OR group_code = ''");
-    foreach ($stmt->fetchAll() as $row) {
-        $code = generate_group_code($pdo);
-        $update = $pdo->prepare('UPDATE family_groups SET group_code = ? WHERE id = ?');
-        $update->execute([$code, (int) $row['id']]);
+    $migrationKey = 'migration_group_codes_32_v1';
+    $check = $pdo->prepare('SELECT setting_value FROM app_settings WHERE setting_key = ? LIMIT 1');
+    $check->execute([$migrationKey]);
+    if ($check->fetchColumn() === 'done') {
+        return;
+    }
+
+    $seed = $pdo->prepare("INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES (?, 'pending')");
+    $seed->execute([$migrationKey]);
+
+    $ownsTransaction = !$pdo->inTransaction();
+    if ($ownsTransaction) {
+        $pdo->beginTransaction();
+    }
+
+    try {
+        $marker = $pdo->prepare('SELECT setting_value FROM app_settings WHERE setting_key = ? FOR UPDATE');
+        $marker->execute([$migrationKey]);
+        if ($marker->fetchColumn() === 'done') {
+            if ($ownsTransaction) {
+                $pdo->commit();
+            }
+            return;
+        }
+
+        $stmt = $pdo->query("
+            SELECT id
+            FROM family_groups
+            WHERE group_code IS NULL
+               OR CHAR_LENGTH(group_code) <> 32
+               OR BINARY group_code NOT REGEXP '^[0-9a-f]{32}$'
+            FOR UPDATE
+        ");
+        foreach ($stmt->fetchAll() as $row) {
+            $code = generate_group_code($pdo);
+            $update = $pdo->prepare("
+                UPDATE family_groups
+                SET group_code = ?
+                WHERE id = ?
+                  AND (
+                      group_code IS NULL
+                      OR CHAR_LENGTH(group_code) <> 32
+                      OR BINARY group_code NOT REGEXP '^[0-9a-f]{32}$'
+                  )
+            ");
+            $update->execute([$code, (int) $row['id']]);
+        }
+
+        $complete = $pdo->prepare("UPDATE app_settings SET setting_value = 'done' WHERE setting_key = ?");
+        $complete->execute([$migrationKey]);
+
+        if ($ownsTransaction) {
+            $pdo->commit();
+        }
+    } catch (Throwable $th) {
+        if ($ownsTransaction && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $th;
     }
 }
 
@@ -325,7 +375,6 @@ function ensure_schema(PDO $pdo): void
             user_agreement_accepted_at DATETIME NULL,
             privacy_policy_accepted_at DATETIME NULL,
             cross_border_transfer_accepted_at DATETIME NULL,
-            environment_data_consent_at DATETIME NULL,
             debug_mode TINYINT(1) NOT NULL DEFAULT 0,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -338,7 +387,7 @@ function ensure_schema(PDO $pdo): void
             id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
             group_name VARCHAR(100) NOT NULL UNIQUE,
             display_name VARCHAR(100) NOT NULL DEFAULT '',
-            group_code VARCHAR(6) NULL UNIQUE,
+            group_code VARCHAR(32) NULL UNIQUE,
             owner_user_id INT UNSIGNED NULL,
             p2p_enabled_at DATETIME NULL,
             p2p_enabled_by INT UNSIGNED NULL,
@@ -422,11 +471,13 @@ function ensure_schema(PDO $pdo): void
     add_column_if_missing($pdo, 'users', 'user_agreement_accepted_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'privacy_policy_accepted_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'cross_border_transfer_accepted_at', 'DATETIME NULL');
-    add_column_if_missing($pdo, 'users', 'environment_data_consent_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'users', 'debug_mode', 'TINYINT(1) NOT NULL DEFAULT 0');
     add_column_if_missing($pdo, 'users', 'report_interval_seconds', 'INT UNSIGNED NOT NULL DEFAULT ' . DEFAULT_REPORT_INTERVAL_SECONDS);
     add_column_if_missing($pdo, 'family_groups', 'display_name', "VARCHAR(100) NOT NULL DEFAULT ''");
-    add_column_if_missing($pdo, 'family_groups', 'group_code', 'VARCHAR(6) NULL UNIQUE');
+    add_column_if_missing($pdo, 'family_groups', 'group_code', 'VARCHAR(32) NULL UNIQUE');
+    if (strtolower(column_type($pdo, 'family_groups', 'group_code')) !== 'varchar(32)') {
+        $pdo->exec('ALTER TABLE family_groups MODIFY group_code VARCHAR(32) NULL');
+    }
     add_column_if_missing($pdo, 'family_groups', 'owner_user_id', 'INT UNSIGNED NULL');
     add_column_if_missing($pdo, 'family_groups', 'p2p_enabled_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'family_groups', 'p2p_enabled_by', 'INT UNSIGNED NULL');
@@ -479,7 +530,6 @@ function ensure_schema(PDO $pdo): void
         FROM user_groups
         WHERE group_name <> ''
     ");
-    ensure_family_group_codes($pdo);
     ensure_family_group_owners($pdo);
 
     if (table_exists($pdo, 'latest_locations')) {
@@ -499,17 +549,6 @@ function ensure_schema(PDO $pdo): void
             FROM latest_locations
         ");
     }
-
-    $pdo->exec("
-        CREATE TABLE IF NOT EXISTS environment_reports (
-            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            user_id INT UNSIGNED NOT NULL,
-            report_json LONGTEXT NOT NULL,
-            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_environment_reports_user_created (user_id, created_at),
-            CONSTRAINT fk_environment_reports_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    ");
 
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS p2p_user_keys (
@@ -648,6 +687,7 @@ function ensure_schema(PDO $pdo): void
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
+    ensure_family_group_codes($pdo);
 
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS admin_login_failures (
@@ -728,10 +768,11 @@ function create_family_group_record(PDO $pdo, string $displayName, ?int $ownerUs
 function family_group_internal_name(PDO $pdo, string $displayName, string $code): string
 {
     $base = $displayName;
-    if (function_exists('mb_strlen') && mb_strlen($base, 'UTF-8') > 93) {
-        $base = mb_substr($base, 0, 93, 'UTF-8');
-    } elseif (!function_exists('mb_strlen') && strlen($base) > 93) {
-        $base = substr($base, 0, 93);
+    $maxBaseLength = max(1, 99 - strlen($code));
+    if (function_exists('mb_strlen') && mb_strlen($base, 'UTF-8') > $maxBaseLength) {
+        $base = mb_substr($base, 0, $maxBaseLength, 'UTF-8');
+    } elseif (!function_exists('mb_strlen') && strlen($base) > $maxBaseLength) {
+        $base = substr($base, 0, $maxBaseLength);
     }
 
     $candidate = $base;
@@ -876,151 +917,6 @@ function assert_safe_identifier(string $identifier): void
     if (!preg_match('/^[A-Za-z0-9_]+$/', $identifier)) {
         throw new RuntimeException('Unsafe SQL identifier.');
     }
-}
-
-function app_setting_keys(): array
-{
-    return [
-        'ban_root_users',
-        'ban_adb_users',
-        'ban_fake_location_users',
-        'ban_accessibility_users',
-        'ban_packet_capture_users',
-        'ban_suspicious_packages_users',
-    ];
-}
-
-function app_setting(string $key, string $default = ''): string
-{
-    if (!in_array($key, app_setting_keys(), true)) {
-        return $default;
-    }
-
-    $stmt = db()->prepare('SELECT setting_value FROM app_settings WHERE setting_key = ? LIMIT 1');
-    $stmt->execute([$key]);
-    $value = $stmt->fetchColumn();
-    return is_string($value) ? $value : $default;
-}
-
-function app_setting_bool(string $key, bool $default = false): bool
-{
-    $value = app_setting($key, $default ? '1' : '0');
-    return in_array(strtolower(trim($value)), ['1', 'true', 'yes', 'on'], true);
-}
-
-function set_app_setting(string $key, string $value): void
-{
-    if (!in_array($key, app_setting_keys(), true)) {
-        throw new RuntimeException('设置项不存在。');
-    }
-
-    $stmt = db()->prepare('
-        INSERT INTO app_settings (setting_key, setting_value)
-        VALUES (?, ?)
-        ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)
-    ');
-    $stmt->execute([$key, $value]);
-}
-
-function security_policy_settings(): array
-{
-    $settings = [];
-    foreach (app_setting_keys() as $key) {
-        $settings[$key] = app_setting_bool($key);
-    }
-
-    return $settings;
-}
-
-function security_policy_enabled(): bool
-{
-    foreach (app_setting_keys() as $key) {
-        if (app_setting_bool($key)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-function device_report_policy_violations(array $report): array
-{
-    $violations = [];
-
-    if (app_setting_bool('ban_root_users') && !empty($report['root_detected'])) {
-        $violations[] = 'Root';
-    }
-    if (app_setting_bool('ban_adb_users') && !empty($report['adb_enabled'])) {
-        $violations[] = 'ADB';
-    }
-    if (
-        app_setting_bool('ban_fake_location_users')
-        && (!empty($report['mock_location_risk']) || !empty($report['fake_location_detected']))
-    ) {
-        $violations[] = '模拟定位';
-    }
-    if (
-        app_setting_bool('ban_accessibility_users')
-        && (!empty($report['accessibility_risk']) || !empty($report['accessibility_services']))
-    ) {
-        $violations[] = '无障碍风险服务';
-    }
-    if (app_setting_bool('ban_packet_capture_users') && device_report_has_packet_capture_risk($report)) {
-        $violations[] = '抓包工具';
-    }
-    if (app_setting_bool('ban_suspicious_packages_users') && device_report_has_suspicious_packages($report)) {
-        $violations[] = '可疑包名';
-    }
-
-    return $violations;
-}
-
-function device_report_has_suspicious_packages(array $report): bool
-{
-    $packages = $report['suspicious_packages'] ?? [];
-    return is_array($packages) && count($packages) > 0;
-}
-
-function device_report_has_packet_capture_risk(array $report): bool
-{
-    if (!empty($report['reqable_detected'])) {
-        return true;
-    }
-
-    $packages = $report['suspicious_packages'] ?? [];
-    if (!is_array($packages)) {
-        return false;
-    }
-
-    foreach ($packages as $package) {
-        $name = strtolower((string) $package);
-        if (str_contains($name, 'reqable') || str_contains($name, 'httpcanary') || str_contains($name, 'charles')) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-function enforce_device_report_policy(array $user, ?array $report): void
-{
-    if (!security_policy_enabled() || !empty($user['debug_mode'])) {
-        return;
-    }
-
-    if (!$report) {
-        json_response(['ok' => false, 'message' => '缺少设备环境数据，已拒绝请求。'], 403);
-    }
-
-    $violations = device_report_policy_violations($report);
-    if (!$violations) {
-        return;
-    }
-
-    json_response([
-        'ok' => false,
-        'message' => '当前设备环境不符合后台安全策略：' . implode('、', $violations) . '。',
-    ], 403);
 }
 
 function e(string $value): string
@@ -1170,11 +1066,6 @@ function user_privacy_policy_accepted(array $user): bool
 function user_cross_border_transfer_accepted(array $user): bool
 {
     return !empty($user['cross_border_transfer_accepted_at']);
-}
-
-function user_environment_data_consent(array $user): bool
-{
-    return !empty($user['environment_data_consent_at']);
 }
 
 function require_app_user_agent(): void
@@ -1507,7 +1398,6 @@ function public_user_payload(array $user): array
         'role_label' => $membership ? role_label((string) $membership['role']) : '',
         'terms_accepted' => user_terms_accepted($user),
         'cross_border_transfer_accepted' => user_cross_border_transfer_accepted($user),
-        'environment_data_consent' => user_environment_data_consent($user),
         'groups' => $payloadGroups,
         'report_interval_seconds' => user_report_interval_seconds($user),
     ];

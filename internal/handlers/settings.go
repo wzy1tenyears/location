@@ -12,14 +12,16 @@ import (
 )
 
 type SettingsHandler struct {
-	scope scopedHandler
-	users repositories.UserRepository
+	scope        scopedHandler
+	users        repositories.UserRepository
+	sessionStore session.Store
 }
 
-func NewSettingsHandler(db *sql.DB, sessions session.Reader) SettingsHandler {
+func NewSettingsHandler(db *sql.DB, sessions session.Reader, sessionLifetime time.Duration) SettingsHandler {
 	return SettingsHandler{
-		scope: newScopedHandler(db, sessions),
-		users: repositories.NewUserRepository(db),
+		scope:        newScopedHandler(db, sessions),
+		users:        repositories.NewUserRepository(db),
+		sessionStore: session.Store{CookieName: sessions.CookieName, Repo: sessions.Repo, Lifetime: sessionLifetime},
 	}
 }
 
@@ -49,7 +51,7 @@ func (handler SettingsHandler) ShowOrUpdate(w http.ResponseWriter, r *http.Reque
 
 	if r.Method == http.MethodPost {
 		if req.Action == "change_password" {
-			if err := handler.changePassword(r, scope.User.ID, scope.User.PasswordHash, req); err != nil {
+			if err := handler.changePassword(w, r, scope.User.ID, scope.User.PasswordHash, req); err != nil {
 				httpx.Error(w, err)
 				return
 			}
@@ -79,7 +81,7 @@ func (handler SettingsHandler) ShowOrUpdate(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-func (handler SettingsHandler) changePassword(r *http.Request, userID int64, currentHash string, req settingsRequest) error {
+func (handler SettingsHandler) changePassword(w http.ResponseWriter, r *http.Request, userID int64, currentHash string, req settingsRequest) error {
 	if req.CurrentPassword == "" || req.NewPassword == "" || req.NewPasswordConfirm == "" {
 		return httpx.Unprocessable("请填写完整密码信息。")
 	}
@@ -95,9 +97,25 @@ func (handler SettingsHandler) changePassword(r *http.Request, userID int64, cur
 	if services.CheckPassword(req.NewPassword, currentHash) {
 		return httpx.Unprocessable("新密码不能与当前密码相同。")
 	}
+	currentSession, ok := handler.scope.sessions.Record(r)
+	if !ok || !currentSession.UserID.Valid || currentSession.UserID.Int64 != userID {
+		return httpx.Unauthorized("请先登录。")
+	}
 	hash, err := services.HashPassword(req.NewPassword)
 	if err != nil {
 		return err
 	}
-	return handler.users.UpdatePasswordHash(r.Context(), userID, hash)
+	changed, err := handler.scope.sessions.Repo.ChangePasswordAndRevokeUserSessions(r.Context(), userID, currentHash, hash)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		handler.scope.sessions.Clear(w, r)
+		return httpx.Unauthorized("密码已被其他操作修改，请重新登录。")
+	}
+	if _, err := handler.sessionStore.StartUserSession(w, r, userID, hash); err != nil {
+		handler.scope.sessions.Clear(w, r)
+		return err
+	}
+	return nil
 }

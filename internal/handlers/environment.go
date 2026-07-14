@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"time"
 
 	"familylocation/location-v3/internal/httpx"
 	"familylocation/location-v3/internal/repositories"
@@ -14,6 +16,7 @@ import (
 type EnvironmentHandler struct {
 	scope    scopedHandler
 	reports  repositories.EnvironmentReportRepository
+	rates    repositories.RateLimitRepository
 	settings repositories.SettingRepository
 }
 
@@ -21,14 +24,20 @@ func NewEnvironmentHandler(db *sql.DB, sessions session.Reader) EnvironmentHandl
 	return EnvironmentHandler{
 		scope:    newScopedHandler(db, sessions),
 		reports:  repositories.NewEnvironmentReportRepository(db),
+		rates:    repositories.NewRateLimitRepository(db),
 		settings: repositories.NewSettingRepository(db),
 	}
 }
 
 type environmentReportRequest struct {
 	Report map[string]any `json:"report"`
-	Force  bool           `json:"force"`
 }
+
+const (
+	environmentReportWriteLimit = 12
+	deviceReportWriteLimit      = 48
+	reportWriteWindow           = 24 * time.Hour
+)
 
 func (handler EnvironmentHandler) EnvironmentReport(w http.ResponseWriter, r *http.Request) {
 	handler.saveReport(w, r, false)
@@ -68,33 +77,46 @@ func (handler EnvironmentHandler) saveReport(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	duplicatePattern := `%"installed_apps"%`
+	reportKind := repositories.EnvironmentReportKindEnvironment
+	rateBucket := "environment_report_write"
+	rateLimit := environmentReportWriteLimit
 	tooLargeMessage := "环境数据过大。"
 	if deviceIntegrity {
-		req.Report["report_kind"] = "device_integrity"
+		reportKind = repositories.EnvironmentReportKindDeviceIntegrity
+		rateBucket = "device_report_write"
+		rateLimit = deviceReportWriteLimit
 		req.Report["forced_device_report"] = true
-		duplicatePattern = `%"report_kind":"device_integrity"%`
 		tooLargeMessage = "设备数据过大。"
+	} else {
+		delete(req.Report, "forced_device_report")
 	}
+	req.Report["report_kind"] = reportKind
 
 	payload, err := json.Marshal(req.Report)
-	if err != nil || len(payload) > 200000 {
+	if err != nil || len(payload) > repositories.EnvironmentReportPayloadLimit {
 		httpx.Error(w, httpx.Unprocessable(tooLargeMessage))
 		return
 	}
-	if !req.Force {
-		exists, err := handler.reports.HasReportTodayLike(r.Context(), scope.User.ID, duplicatePattern)
-		if err != nil {
-			httpx.Error(w, err)
-			return
-		}
-		if exists {
-			httpx.OK(w, map[string]any{"ok": true, "skipped": true})
-			return
-		}
-	}
-	if err := handler.reports.Insert(r.Context(), scope.User.ID, string(payload)); err != nil {
+	allowed, err := handler.rates.Hit(r.Context(), rateBucket, strconv.FormatInt(scope.User.ID, 10), rateLimit, reportWriteWindow)
+	if err != nil {
 		httpx.Error(w, err)
+		return
+	}
+	if !allowed {
+		httpx.Error(w, httpx.APIError{Status: http.StatusTooManyRequests, Message: "上报过于频繁，请稍后再试。"})
+		return
+	}
+	result, err := handler.reports.StoreDaily(r.Context(), scope.User.ID, reportKind, string(payload))
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	if result == repositories.EnvironmentReportQuotaExceeded {
+		httpx.Error(w, httpx.APIError{Status: http.StatusTooManyRequests, Message: "今日环境数据上报已达上限。"})
+		return
+	}
+	if result == repositories.EnvironmentReportUnchanged {
+		httpx.OK(w, map[string]any{"ok": true, "skipped": true})
 		return
 	}
 	httpx.OK(w, map[string]any{"ok": true})

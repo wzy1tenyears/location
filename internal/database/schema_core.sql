@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS environment_reports (
     report_json LONGTEXT NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_environment_reports_user_created (user_id, created_at),
+    INDEX idx_environment_reports_user_id (user_id, id),
     CONSTRAINT fk_environment_reports_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -52,6 +53,9 @@ CREATE TABLE IF NOT EXISTS support_tickets (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_support_tickets_user_updated (user_id, updated_at),
+    INDEX idx_support_tickets_user_created (user_id, created_at),
+    INDEX idx_support_tickets_group_created (group_name, created_at),
+    INDEX idx_support_tickets_group_status_updated (group_name, status, updated_at),
     INDEX idx_support_tickets_status_updated (status, updated_at),
     CONSTRAINT fk_support_tickets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -63,6 +67,8 @@ CREATE TABLE IF NOT EXISTS support_ticket_messages (
     message TEXT NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_ticket_messages_ticket_created (ticket_id, created_at),
+    INDEX idx_ticket_messages_ticket_sender_created (ticket_id, sender_type, created_at),
+    INDEX idx_ticket_messages_ticket_id (ticket_id, id),
     CONSTRAINT fk_ticket_messages_ticket FOREIGN KEY (ticket_id) REFERENCES support_tickets(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -70,7 +76,7 @@ CREATE TABLE IF NOT EXISTS family_groups (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     group_name VARCHAR(100) NOT NULL UNIQUE,
     display_name VARCHAR(100) NOT NULL DEFAULT '',
-    group_code VARCHAR(6) NULL UNIQUE,
+    group_code VARCHAR(32) NULL UNIQUE,
     owner_user_id INT UNSIGNED NULL,
     p2p_enabled_at DATETIME NULL,
     p2p_enabled_by INT UNSIGNED NULL,
@@ -112,6 +118,7 @@ CREATE TABLE IF NOT EXISTS locations (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_locations_group_created (group_name, created_at),
     INDEX idx_locations_user_created (user_id, created_at),
+    INDEX idx_locations_group_user_id (group_name, user_id, id),
     CONSTRAINT fk_locations_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -209,7 +216,9 @@ CREATE TABLE IF NOT EXISTS user_logs (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_user_logs_created (created_at),
     INDEX idx_user_logs_user_created (user_id, created_at),
+    INDEX idx_user_logs_user_type_id (user_id, event_type, id),
     INDEX idx_user_logs_group_created (group_name, created_at),
+    INDEX idx_user_logs_group_type_id (group_name, event_type, id),
     INDEX idx_user_logs_type_created (event_type, created_at),
     CONSTRAINT fk_user_logs_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -145,19 +145,6 @@ func (repo UserRepository) ClearFailedLogin(ctx context.Context, userID int64) e
 	return err
 }
 
-func (repo UserRepository) RecordFailedLogin(ctx context.Context, user models.User, maxFailures int, now any) (bool, error) {
-	failedCount := user.FailedLoginCount + 1
-	if failedCount >= maxFailures {
-		_, err := repo.db.ExecContext(ctx, `
-UPDATE users
-SET failed_login_count = ?, login_locked_at = COALESCE(login_locked_at, ?)
-WHERE id = ?`, failedCount, now, user.ID)
-		return true, err
-	}
-	_, err := repo.db.ExecContext(ctx, "UPDATE users SET failed_login_count = ? WHERE id = ?", failedCount, user.ID)
-	return false, err
-}
-
 func (repo UserRepository) RecordLog(ctx context.Context, userID *int64, groupName string, eventType string, message string, metaJSON any, ip string, userAgent string) error {
 	_, err := repo.db.ExecContext(ctx, `
 INSERT INTO user_logs (user_id, group_name, event_type, message, meta_json, ip, user_agent)

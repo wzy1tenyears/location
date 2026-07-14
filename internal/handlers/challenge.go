@@ -26,21 +26,26 @@ var challengeIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
 var challengeSecretPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var deviceFingerprintPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
+const appChallengeVerificationLease = 15 * time.Second
+
 type ChallengeHandler struct {
-	cfg   config.Config
-	rates repositories.RateLimitRepository
-	store repositories.AppChallengeRepository
+	cfg               config.Config
+	rates             hitLimiter
+	store             repositories.AppChallengeRepository
+	turnstileVerifier func(token string, secret string, remoteIP string) (bool, error)
 }
 
 func NewChallengeHandler(cfg config.Config, db *sql.DB) ChallengeHandler {
 	return ChallengeHandler{
-		cfg:   cfg,
-		rates: repositories.NewRateLimitRepository(db),
-		store: repositories.NewAppChallengeRepository(db),
+		cfg:               cfg,
+		rates:             repositories.NewRateLimitRepository(db),
+		store:             repositories.NewAppChallengeRepository(db),
+		turnstileVerifier: verifyTurnstileSiteToken,
 	}
 }
 
 func (handler ChallengeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	_ = handler.store.DeleteExpiredIfDue(r.Context(), time.Now(), time.Minute, 500)
 	if r.Method == http.MethodPost && strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
 		handler.start(w, r)
 		return
@@ -217,7 +222,17 @@ func (handler ChallengeHandler) verifyBrowserChallenge(r *http.Request, challeng
 	if repositories.ChallengeExpired(challenge, time.Now()) {
 		return "质询已过期，请回到 App 重新发起。"
 	}
-	ok, err := verifyTurnstileSiteToken(turnstileToken, handler.cfg.External.TurnstileSecretKey, httpx.ClientIP(r))
+	if challenge.VerifiedAt.Valid {
+		return "验证已完成，请回到 App 继续登录。"
+	}
+	allowed, err := handler.rates.Hit(r.Context(), "app_challenge_verify_id", challenge.ID, 1, appChallengeVerificationLease)
+	if err != nil {
+		return "验证请求保存失败，请重试。"
+	}
+	if !allowed {
+		return "验证正在处理中，请稍后重试。"
+	}
+	ok, err := handler.verifyTurnstileToken(turnstileToken, handler.cfg.External.TurnstileSecretKey, httpx.ClientIP(r))
 	if err != nil || !ok {
 		return "Cloudflare 验证失败，请重试。"
 	}
@@ -225,6 +240,13 @@ func (handler ChallengeHandler) verifyBrowserChallenge(r *http.Request, challeng
 		return "验证状态保存失败，请重试。"
 	}
 	return "验证已完成，请回到 App 继续登录。"
+}
+
+func (handler ChallengeHandler) verifyTurnstileToken(token string, secret string, remoteIP string) (bool, error) {
+	if handler.turnstileVerifier != nil {
+		return handler.turnstileVerifier(token, secret, remoteIP)
+	}
+	return verifyTurnstileSiteToken(token, secret, remoteIP)
 }
 
 func (handler ChallengeHandler) render(w http.ResponseWriter, r *http.Request, message string) {

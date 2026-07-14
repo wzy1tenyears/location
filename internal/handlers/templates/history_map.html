@@ -182,7 +182,13 @@
       if (item.provider) lines.push(`来源：${item.provider}`);
       if (item.ip) lines.push(`IP：${item.ip}`);
       if (item.time) lines.push(`时间：${item.time}`);
-      return lines.join('<br>');
+      const content = document.createElement('div');
+      lines.forEach((line) => {
+        const row = document.createElement('div');
+        row.textContent = line;
+        content.appendChild(row);
+      });
+      return content;
     }
 
     function normalizeRecord(record, index) {

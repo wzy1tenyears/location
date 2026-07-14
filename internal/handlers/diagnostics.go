@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"familylocation/location-v3/internal/config"
 	"familylocation/location-v3/internal/httpx"
@@ -15,10 +17,23 @@ import (
 	"familylocation/location-v3/internal/session"
 )
 
+const (
+	diagnosticProviderQuotaBucket         = "diagnostic-provider-lookup"
+	diagnosticProviderQuotaMaxHits        = 600
+	diagnosticProviderQuotaWindow         = time.Hour
+	diagnosticProviderUserMissQuotaBucket = "diagnostic-provider-user-miss"
+	diagnosticProviderSharedQuotaBucket   = "diagnostic-provider-upstream"
+)
+
+type diagnosticRateLimiter interface {
+	Hit(context.Context, string, string, int, time.Duration) (bool, error)
+}
+
 type DiagnosticHandler struct {
 	cfg   config.Config
 	scope scopedHandler
 	geo   repositories.GeoRepository
+	rates diagnosticRateLimiter
 }
 
 func NewDiagnosticHandler(cfg config.Config, db *sql.DB, sessions session.Reader) DiagnosticHandler {
@@ -26,6 +41,7 @@ func NewDiagnosticHandler(cfg config.Config, db *sql.DB, sessions session.Reader
 		cfg:   cfg,
 		scope: newScopedHandler(db, sessions),
 		geo:   repositories.NewGeoRepository(db),
+		rates: repositories.NewRateLimitRepository(db),
 	}
 }
 
@@ -105,7 +121,8 @@ func (handler DiagnosticHandler) GeoAliases(w http.ResponseWriter, r *http.Reque
 }
 
 func (handler DiagnosticHandler) IPGeo(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := handler.scope.requireScope(r, ""); err != nil {
+	scope, _, err := handler.scope.requireScope(r, "")
+	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -122,8 +139,18 @@ func (handler DiagnosticHandler) IPGeo(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, httpx.Unprocessable("IP 地址不正确。"))
 		return
 	}
+	if err := handler.consumeProviderQuota(r.Context(), scope.User.ID); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 
-	payload, ok, err := services.LookupIPGeo(req.IP, req.Provider, handler.cfg.External)
+	payload, ok, err := services.LookupIPGeoContextWithBudget(
+		r.Context(),
+		req.IP,
+		req.Provider,
+		handler.cfg.External,
+		handler.providerFetchBudget(scope.User.ID),
+	)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -137,7 +164,8 @@ func (handler DiagnosticHandler) IPGeo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler DiagnosticHandler) IPInfoLite(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := handler.scope.requireScope(r, ""); err != nil {
+	scope, _, err := handler.scope.requireScope(r, "")
+	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -153,8 +181,17 @@ func (handler DiagnosticHandler) IPInfoLite(w http.ResponseWriter, r *http.Reque
 		httpx.Error(w, httpx.Unprocessable("IP 地址不正确。"))
 		return
 	}
+	if err := handler.consumeProviderQuota(r.Context(), scope.User.ID); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 
-	payload, ok, err := services.LookupIPInfoLite(req.IP, handler.cfg.External.IPInfoLiteToken)
+	payload, ok, err := services.LookupIPInfoLiteContextWithBudget(
+		r.Context(),
+		req.IP,
+		handler.cfg.External.IPInfoLiteToken,
+		handler.providerFetchBudget(scope.User.ID),
+	)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -165,6 +202,66 @@ func (handler DiagnosticHandler) IPInfoLite(w http.ResponseWriter, r *http.Reque
 	}
 	payload["ok"] = true
 	httpx.OK(w, payload)
+}
+
+func (handler DiagnosticHandler) consumeProviderQuota(ctx context.Context, userID int64) error {
+	allowed, err := handler.rates.Hit(
+		ctx,
+		diagnosticProviderQuotaBucket,
+		strconv.FormatInt(userID, 10),
+		diagnosticProviderQuotaMaxHits,
+		diagnosticProviderQuotaWindow,
+	)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return httpx.APIError{Status: http.StatusTooManyRequests, Message: "IP 查询过于频繁，请稍后再试。"}
+	}
+	return nil
+}
+
+func (handler DiagnosticHandler) providerFetchBudget(userID int64) services.ProviderFetchBudget {
+	return func(ctx context.Context, provider string) error {
+		return handler.consumeProviderMissQuotas(ctx, userID, provider)
+	}
+}
+
+func (handler DiagnosticHandler) consumeProviderMissQuotas(ctx context.Context, userID int64, provider string) error {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	quota, ok := handler.cfg.External.IPGeoQuota(provider)
+	if !ok || quota.AvailableRequests() <= 0 || quota.UserMaxMisses <= 0 || quota.Window <= 0 {
+		return httpx.APIError{Status: http.StatusServiceUnavailable, Message: "IP 查询源配额未配置。"}
+	}
+
+	allowed, err := handler.rates.Hit(
+		ctx,
+		diagnosticProviderUserMissQuotaBucket,
+		provider+"|"+strconv.FormatInt(userID, 10),
+		quota.UserMaxMisses,
+		quota.Window,
+	)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return httpx.APIError{Status: http.StatusTooManyRequests, Message: "IP 查询次数过多，请稍后再试。"}
+	}
+
+	allowed, err = handler.rates.Hit(
+		ctx,
+		diagnosticProviderSharedQuotaBucket,
+		provider,
+		quota.AvailableRequests(),
+		quota.Window,
+	)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return httpx.APIError{Status: http.StatusTooManyRequests, Message: "IP 查询服务繁忙，请稍后再试。"}
+	}
+	return nil
 }
 
 func addGeoAlias(aliases map[string]string, name string) {

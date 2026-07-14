@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>查看位置分享</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #eef3f1; --surface: #fff; --text: #172724; --muted: #667772; --line: #cfdbd7; --accent: #0b6b5d; --danger: #a53030; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #101815; --surface: #17221f; --text: #edf6f3; --muted: #a7b7b1; --line: #344640; --accent: #59c7b3; --danger: #ff9d9d; } }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { display: grid; place-items: center; padding: 20px; }
+    main { width: min(100%, 420px); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 22px; box-shadow: 0 8px 24px rgba(0,0,0,.12); }
+    h1 { margin: 0 0 8px; font-size: 22px; letter-spacing: 0; }
+    p { margin: 0 0 18px; color: var(--muted); font-size: 14px; line-height: 1.6; }
+    label { display: block; margin-bottom: 7px; font-size: 14px; font-weight: 700; }
+    input { width: 100%; height: 48px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--text); padding: 0 13px; font-size: 17px; letter-spacing: 0; outline: none; }
+    input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+    button { width: 100%; height: 48px; margin-top: 14px; border: 0; border-radius: 7px; background: var(--accent); color: #fff; font-size: 16px; font-weight: 800; cursor: pointer; }
+    .message { margin: 12px 0 0; color: var(--danger); font-size: 14px; }
+    .message:empty { display: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>位置分享</h1>
+    <p>输入分享者提供的分享码后查看地图。</p>
+    <form method="post" action="__SHARE_ACTION__">
+      <label for="access-code">分享码</label>
+      <input id="access-code" name="access_code" type="password" minlength="4" maxlength="16" autocomplete="one-time-code" required autofocus>
+      <button type="submit">查看位置</button>
+      <div class="message" role="alert">__SHARE_MESSAGE__</div>
+    </form>
+  </main>
+</body>
+</html>

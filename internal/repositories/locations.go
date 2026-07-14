@@ -7,6 +7,11 @@ import (
 	"familylocation/location-v3/internal/models"
 )
 
+const (
+	defaultLocationHistoryLimit = 5000
+	locationHistoryPruneBatch   = 500
+)
+
 type LocationRepository struct {
 	db *sql.DB
 }
@@ -15,10 +20,33 @@ func NewLocationRepository(db *sql.DB) LocationRepository {
 	return LocationRepository{db: db}
 }
 
+func (repo LocationRepository) PruneHistoryForUserTx(ctx context.Context, tx *sql.Tx, groupName string, userID int64, limit int) error {
+	if limit <= 0 {
+		limit = defaultLocationHistoryLimit
+	}
+	_, err := tx.ExecContext(ctx, `
+DELETE FROM locations
+WHERE group_name = ? AND user_id = ? AND id <= COALESCE(
+	(
+		SELECT cutoff_id FROM (
+			SELECT id AS cutoff_id
+			FROM locations
+			WHERE group_name = ? AND user_id = ?
+			ORDER BY id DESC
+			LIMIT 1 OFFSET ?
+		) retention_cutoff
+	),
+	0
+)
+ORDER BY id ASC
+LIMIT ?`, groupName, userID, groupName, userID, limit, locationHistoryPruneBatch)
+	return err
+}
+
 func (repo LocationRepository) LatestForGroup(ctx context.Context, groupName string) ([]models.Location, error) {
 	const query = `
 SELECT
-	0 AS id,
+	COALESCE(ll.latest_location_id, 0) AS id,
 	ll.user_id,
 	u.username,
 	COALESCE(u.display_name, ''),
@@ -45,6 +73,34 @@ WHERE ll.group_name = ? AND u.is_active = 1
 ORDER BY ug.role ASC, u.username ASC`
 
 	return repo.queryLocations(ctx, query, groupName)
+}
+
+func (repo LocationRepository) HistoryByID(ctx context.Context, groupName string, userID int64, locationID int64) (*models.Location, error) {
+	query := historySelect() + `
+WHERE l.group_name = ? AND l.user_id = ? AND l.id = ? AND u.is_active = 1
+LIMIT 1`
+	locations, err := repo.queryLocations(ctx, query, groupName, userID, locationID)
+	if err != nil {
+		return nil, err
+	}
+	if len(locations) == 0 {
+		return nil, nil
+	}
+	return &locations[0], nil
+}
+
+func (repo LocationRepository) HistoryByIDForGroup(ctx context.Context, groupName string, locationID int64) (*models.Location, error) {
+	query := historySelect() + `
+WHERE l.group_name = ? AND l.id = ? AND u.is_active = 1
+LIMIT 1`
+	locations, err := repo.queryLocations(ctx, query, groupName, locationID)
+	if err != nil {
+		return nil, err
+	}
+	if len(locations) == 0 {
+		return nil, nil
+	}
+	return &locations[0], nil
 }
 
 func (repo LocationRepository) CountHistory(ctx context.Context, groupName string, userID int64) (int, error) {

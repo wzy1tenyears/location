@@ -5,5 +5,6 @@ CREATE TABLE IF NOT EXISTS app_sessions (
     expires_at DATETIME NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_app_sessions_expires_at (expires_at)
+    INDEX idx_app_sessions_expires_at (expires_at),
+    INDEX idx_app_sessions_user_id (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

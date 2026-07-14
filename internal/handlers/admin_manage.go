@@ -561,7 +561,7 @@ func (handler AdminManageHandler) resetPassword(r *http.Request, data map[string
 	if err != nil {
 		return "", err
 	}
-	if err := handler.users.UpdatePasswordHash(r.Context(), userID, hash); err != nil {
+	if err := handler.sessions.Repo.UpdatePasswordAndRevokeUserSessions(r.Context(), userID, hash); err != nil {
 		return "", err
 	}
 	_ = handler.users.ClearFailedLogin(r.Context(), userID)
@@ -606,9 +606,24 @@ func (handler AdminManageHandler) replyTicket(r *http.Request, data map[string]a
 		return "", err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var lockedTicketID int64
+	if err := tx.QueryRowContext(r.Context(), "SELECT id FROM support_tickets WHERE id = ? FOR UPDATE", ticketID).Scan(&lockedTicketID); err == sql.ErrNoRows {
+		return "", httpx.Unprocessable("工单不存在。")
+	} else if err != nil {
+		return "", err
+	}
+	var messageCount int
+	if err := tx.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM support_ticket_messages WHERE ticket_id = ?", ticketID).Scan(&messageCount); err != nil {
+		return "", err
+	}
+	if messageCount >= maxMessagesPerTicket {
+		return "", httpx.APIError{Status: http.StatusTooManyRequests, Message: "工单消息已达上限。"}
+	}
 	if _, err := tx.ExecContext(r.Context(), "INSERT INTO support_ticket_messages (ticket_id, sender_type, message) VALUES (?, 'admin', ?)", ticketID, reply); err != nil {
 		return "", err
 	}
+	// Administrators may reopen beyond user-create open caps, but never beyond
+	// the absolute per-ticket message allocation checked above.
 	if _, err := tx.ExecContext(r.Context(), "UPDATE support_tickets SET status = 'open', updated_at = NOW() WHERE id = ?", ticketID); err != nil {
 		return "", err
 	}

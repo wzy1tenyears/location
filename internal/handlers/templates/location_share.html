@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>位置分享</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #eef3f1; --surface: #fff; --text: #172724; --muted: #657772; --line: #cedad6; --accent: #0b6b5d; --active: #e1f1ed; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #101815; --surface: #17221f; --text: #edf6f3; --muted: #a8b8b2; --line: #344640; --accent: #59c7b3; --active: #203b35; } }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    header { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: 20px; letter-spacing: 0; }
+    .expiry { color: var(--muted); font-size: 12px; text-align: right; }
+    #map { position: relative; width: 100%; height: clamp(320px, 48vh, 560px); background: #dfe9e6; }
+    .map-state { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(238,243,241,.92); color: #536863; text-align: center; font-size: 14px; }
+    .marker { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border: 2px solid #fff; border-radius: 50%; background: #0b6b5d; color: #fff; font-size: 14px; font-weight: 900; box-shadow: 0 5px 15px rgba(0,0,0,.28); }
+    .marker.selected { background: #c24136; box-shadow: 0 0 0 7px rgba(194,65,54,.17), 0 6px 18px rgba(0,0,0,.3); }
+    section { width: min(100%, 820px); margin: 0 auto; padding: 14px 14px 28px; }
+    h2 { margin: 0 0 8px; font-size: 18px; letter-spacing: 0; }
+    .history { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+    .history-row { display: block; width: 100%; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--text); padding: 12px 14px; text-align: left; cursor: pointer; }
+    .history-row:last-child { border-bottom: 0; }
+    .history-row.active { background: var(--active); }
+    .row-title { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 800; }
+    .row-name { min-width: 0; flex: 1 1 auto; }
+    .row-time { flex: 0 0 auto; color: var(--muted); font-size: 12px; font-weight: 500; }
+    .row-toggle { flex: 0 0 auto; width: 20px; color: var(--muted); font-size: 17px; line-height: 1; transition: transform .16s ease; }
+    .history-row.expanded .row-toggle { transform: rotate(180deg); }
+    .row-address { margin-top: 6px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+    .row-details { margin-top: 10px; border-top: 1px solid var(--line); }
+    .detail-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 14px; line-height: 1.45; }
+    .detail-row:last-child { border-bottom: 0; padding-bottom: 1px; }
+    .detail-label { color: var(--text); font-weight: 800; }
+    .detail-value { min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
+    [hidden] { display: none !important; }
+    .amap-info-content { color: #173b35; font-size: 13px; line-height: 1.5; }
+  </style>
+  <script data-cfasync="false">
+    const AMAP_KEY = __AMAP_KEY__;
+    const AMAP_SERVICE_PATH = __AMAP_SERVICE_PATH__;
+    const SHARE = __SHARE_PAYLOAD__;
+    const serviceHost = new URL(AMAP_SERVICE_PATH || '/_AMapService', window.location.origin).toString().replace(/\/$/, '');
+    window._AMapSecurityConfig = { serviceHost };
+    let map = null;
+    let markers = [];
+    let records = [];
+    let infoWindow = null;
+
+    function text() {
+      for (const value of arguments) {
+        const result = value === null || value === undefined ? '' : String(value).trim();
+        if (result) return result;
+      }
+      return '';
+    }
+    function escapeHTML(value) { return text(value).replace(/[&<>"']/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character])); }
+    function valid(lat, lng) { return Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 && !(lat === 0 && lng === 0); }
+    function outOfChina(lng, lat) { return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271; }
+    function transformLat(x, y) { let r=-100+2*x+3*y+.2*y*y+.1*x*y+.2*Math.sqrt(Math.abs(x));r+=(20*Math.sin(6*x*Math.PI)+20*Math.sin(2*x*Math.PI))*2/3;r+=(20*Math.sin(y*Math.PI)+40*Math.sin(y/3*Math.PI))*2/3;r+=(160*Math.sin(y/12*Math.PI)+320*Math.sin(y*Math.PI/30))*2/3;return r; }
+    function transformLng(x, y) { let r=300+x+2*y+.1*x*x+.1*x*y+.1*Math.sqrt(Math.abs(x));r+=(20*Math.sin(6*x*Math.PI)+20*Math.sin(2*x*Math.PI))*2/3;r+=(20*Math.sin(x*Math.PI)+40*Math.sin(x/3*Math.PI))*2/3;r+=(150*Math.sin(x/12*Math.PI)+300*Math.sin(x/30*Math.PI))*2/3;return r; }
+    function wgsToGcj(lng,lat){if(outOfChina(lng,lat))return{lng,lat};const a=6378245,ee=.00669342162296594323,rad=lat/180*Math.PI;let dLat=transformLat(lng-105,lat-35),dLng=transformLng(lng-105,lat-35),magic=Math.sin(rad);magic=1-ee*magic*magic;const root=Math.sqrt(magic);dLat=dLat*180/((a*(1-ee))/(magic*root)*Math.PI);dLng=dLng*180/(a/root*Math.cos(rad)*Math.PI);return{lat:lat+dLat,lng:lng+dLng};}
+    function bdToGcj(lng,lat){const x=lng-.0065,y=lat-.006,z=Math.sqrt(x*x+y*y)-.00002*Math.sin(y*Math.PI*3000/180),theta=Math.atan2(y,x)-.000003*Math.cos(x*Math.PI*3000/180);return{lng:z*Math.cos(theta),lat:z*Math.sin(theta)};}
+    function coordinate(record){const meta=record.location_meta||{},diag=record.address_diagnostics||{};let system=text(diag.preferred_coordinate_system,meta.coordinate_system).toLowerCase().replace(/[^a-z0-9]/g,'');const lat=Number(record.latitude),lng=Number(record.longitude);if(system==='gcj02'||system==='amap'||system==='gaode')return{lng,lat};if(system==='bd09'||system==='baidu'||meta.mock_provider===true)return bdToGcj(lng,lat);return wgsToGcj(lng,lat);}
+    function address(record){return text(record.address,record.address_diagnostics&&record.address_diagnostics.preferred_address,'位置地址暂未解析');}
+    function city(record){return text(record.city,record.address_diagnostics&&record.address_diagnostics.preferred_city,'暂未识别');}
+    function state(message){let node=document.querySelector('.map-state');if(!message){if(node)node.remove();return;}if(!node){node=document.createElement('div');node.className='map-state';document.querySelector('#map').appendChild(node);}node.textContent=message;}
+    function initial(name){return Array.from(text(name,'位'))[0]||'位';}
+
+    function setExpandedRow(index, toggle) {
+      const rows = Array.from(document.querySelectorAll('.history-row'));
+      const target = rows[index];
+      if (!target) return;
+      const expand = toggle ? !target.classList.contains('expanded') : target.classList.contains('expanded');
+      rows.forEach((row,rowIndex)=>{
+        const expanded=rowIndex===index&&expand;
+        row.classList.toggle('expanded',expanded);
+        row.setAttribute('aria-expanded',expanded?'true':'false');
+        const details=row.querySelector('.row-details');
+        if(details)details.hidden=!expanded;
+      });
+    }
+
+    function focusLocation(index, toggleDetails) {
+      document.querySelectorAll('.history-row').forEach((row, rowIndex) => row.classList.toggle('active', rowIndex === index));
+      if (toggleDetails) setExpandedRow(index,true);
+      if (!map || !markers[index]) return;
+      map.setZoomAndCenter(17, markers[index].getPosition());
+      const record = records[index];
+      const role=text(record.role_label);
+      infoWindow.setContent(`<strong>${escapeHTML(text(record.display_name,'成员'))}</strong>${role?` · ${escapeHTML(role)}`:''}<br>${escapeHTML(address(record))}<br>${escapeHTML(text(record.created_at))}`);
+      infoWindow.open(map, markers[index].getPosition());
+    }
+
+    function renderMap() {
+      records = (Array.isArray(SHARE.locations) ? SHARE.locations : []).filter(record => valid(Number(record.latitude), Number(record.longitude)));
+      if (!records.length) { state('没有可显示的定位'); return; }
+      state('');
+      infoWindow = new AMap.InfoWindow({offset:new AMap.Pixel(0,-18)});
+      const selectedID = Number(SHARE.selected_id || 0);
+      records.forEach((record,index) => {
+        const point=coordinate(record),selected=Number(record.id)===selectedID;
+        const node=document.createElement('div');node.className='marker'+(selected?' selected':'');node.textContent=initial(record.display_name);
+        const marker=new AMap.Marker({position:[point.lng,point.lat],content:node,offset:new AMap.Pixel(-18,-18),zIndex:selected?130:100});
+        marker.on('click',()=>focusLocation(index,true));marker.setMap(map);markers.push(marker);
+      });
+      const paths=new Map();records.forEach(record=>{const key=text(record.member_key,record.display_name,'member');if(!paths.has(key))paths.set(key,[]);paths.get(key).push({time:text(record.created_at),point:coordinate(record)});});
+      Array.from(paths.values()).forEach(items=>{items.sort((a,b)=>a.time.localeCompare(b.time));if(items.length>1)new AMap.Polyline({path:items.map(item=>[item.point.lng,item.point.lat]),strokeColor:'#0b6b5d',strokeOpacity:.82,strokeWeight:5,lineJoin:'round',lineCap:'round'}).setMap(map);});
+      if(markers.length===1)map.setZoomAndCenter(17,markers[0].getPosition());else map.setFitView(markers,false,[32,24,32,24],17);
+      const selectedIndex=Math.max(0,records.findIndex(record=>Number(record.id)===selectedID));focusLocation(selectedIndex,false);
+    }
+    function initMap(){map=new AMap.Map('map',{zoom:15,resizeEnable:true,viewMode:'2D'});map.on('complete',renderMap);}
+    function loadMap(version,fallback){const script=document.createElement('script');script.src=`${serviceHost}/maps?v=${encodeURIComponent(version)}&key=${encodeURIComponent(AMAP_KEY)}`;script.async=true;script.onerror=()=>{if(fallback)loadMap('1.4.15',false);else state('地图加载失败，请稍后重试');};script.onload=()=>window.AMap?initMap():(fallback?loadMap('1.4.15',false):state('当前浏览器无法运行地图'));document.head.appendChild(script);}
+    function detailRow(label,value){const row=document.createElement('div');row.className='detail-row';const key=document.createElement('span');key.className='detail-label';key.textContent=label;const content=document.createElement('span');content.className='detail-value';content.textContent=text(value,'暂无');row.append(key,content);return row;}
+    function renderHistory(){const root=document.querySelector('.history');root.textContent='';(Array.isArray(SHARE.locations)?SHARE.locations:[]).forEach((record,index)=>{const button=document.createElement('button');button.type='button';button.className='history-row';button.setAttribute('aria-expanded','false');const heading=document.createElement('div');heading.className='row-title';const name=document.createElement('span');name.className='row-name';name.textContent=text(record.display_name,'成员');const time=document.createElement('span');time.className='row-time';time.textContent=text(record.created_at);const toggle=document.createElement('span');toggle.className='row-toggle';toggle.setAttribute('aria-hidden','true');toggle.textContent='⌄';heading.append(name,time,toggle);const location=document.createElement('div');location.className='row-address';location.textContent=address(record);const details=document.createElement('div');details.className='row-details';details.hidden=true;details.append(detailRow('位置',address(record)),detailRow('城市',city(record)),detailRow('身份',text(record.role_label,'成员')),detailRow('时间',record.created_at));button.append(heading,location,details);button.addEventListener('click',()=>focusLocation(index,true));root.appendChild(button);});document.querySelector('.expiry').textContent=`有效期至 ${text(SHARE.expires_at)}`;}
+    window.addEventListener('DOMContentLoaded',()=>{renderHistory();state('正在加载高德地图…');if(!AMAP_KEY){state('地图密钥未配置');return;}loadMap('2.0',true);});
+  </script>
+</head>
+<body>
+  <header><h1>位置分享</h1><div class="expiry"></div></header>
+  <div id="map"></div>
+  <section><h2>历史位置</h2><div class="history"></div></section>
+</body>
+</html>

@@ -79,17 +79,30 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		if applied > 0 {
 			continue
 		}
-		if err := execEmbeddedSQL(ctx, db, "migrations/"+entry.Name()); err != nil {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("migration %s connection: %w", version, err)
+		}
+		if err := execEmbeddedSQL(ctx, conn, "migrations/"+entry.Name()); err != nil {
+			_ = conn.Close()
 			return fmt.Errorf("migration %s: %w", version, err)
 		}
-		if _, err := db.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", version); err != nil {
+		if _, err := conn.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", version); err != nil {
+			_ = conn.Close()
 			return fmt.Errorf("record migration %s: %w", version, err)
+		}
+		if err := conn.Close(); err != nil {
+			return fmt.Errorf("close migration %s connection: %w", version, err)
 		}
 	}
 	return nil
 }
 
-func execEmbeddedSQL(ctx context.Context, db *sql.DB, name string) error {
+type sqlExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func execEmbeddedSQL(ctx context.Context, executor sqlExecutor, name string) error {
 	raw, err := schemaFiles.ReadFile(name)
 	if err != nil {
 		return err
@@ -98,7 +111,7 @@ func execEmbeddedSQL(ctx context.Context, db *sql.DB, name string) error {
 		if strings.TrimSpace(statement) == "" {
 			continue
 		}
-		if _, err := db.ExecContext(ctx, statement); err != nil {
+		if _, err := executor.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("%s: %w", truncateStatement(statement), err)
 		}
 	}

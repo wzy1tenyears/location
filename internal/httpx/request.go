@@ -24,7 +24,10 @@ func IntQuery(r *http.Request, key string, fallback int) int {
 
 func PublicURL(r *http.Request, path string) string {
 	target := "/" + strings.TrimLeft(path, "/")
-	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	host := ""
+	if requestFromLoopbackProxy(r) {
+		host = strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	}
 	if host == "" {
 		host = strings.TrimSpace(r.Host)
 	}
@@ -41,19 +44,14 @@ func PublicURL(r *http.Request, path string) string {
 }
 
 func ClientIP(r *http.Request) string {
-	for _, key := range []string{"X-Real-IP", "X-Forwarded-For", "CF-Connecting-IP"} {
-		if value := validHeaderIP(r.Header.Get(key)); value != "" {
+	remoteIP := requestRemoteIP(r)
+	if remoteIP != nil && remoteIP.IsLoopback() {
+		if value := validHeaderIP(r.Header.Get("X-Real-IP")); value != "" {
 			return value
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		if ip := net.ParseIP(strings.TrimSpace(host)); ip != nil {
-			return ip.String()
-		}
-	}
-	if ip := net.ParseIP(strings.TrimSpace(r.RemoteAddr)); ip != nil {
-		return ip.String()
+	if remoteIP != nil {
+		return remoteIP.String()
 	}
 	return r.RemoteAddr
 }
@@ -87,6 +85,9 @@ func RequestIsHTTPS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
+	if !requestFromLoopbackProxy(r) {
+		return false
+	}
 	if proto := firstHeaderPart(r.Header.Get("X-Forwarded-Proto")); strings.EqualFold(proto, "https") {
 		return true
 	}
@@ -97,6 +98,19 @@ func RequestIsHTTPS(r *http.Request) bool {
 		return true
 	}
 	return false
+}
+
+func requestFromLoopbackProxy(r *http.Request) bool {
+	ip := requestRemoteIP(r)
+	return ip != nil && ip.IsLoopback()
+}
+
+func requestRemoteIP(r *http.Request) net.IP {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil {
+		return net.ParseIP(strings.TrimSpace(host))
+	}
+	return net.ParseIP(strings.TrimSpace(r.RemoteAddr))
 }
 
 func validHeaderIP(value string) string {

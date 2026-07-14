@@ -20,24 +20,26 @@ import (
 )
 
 type ReportLocationHandler struct {
-	cfg      config.Config
-	db       *sql.DB
-	scope    scopedHandler
-	users    repositories.UserRepository
-	reports  repositories.EnvironmentReportRepository
-	settings repositories.SettingRepository
-	rates    repositories.RateLimitRepository
+	cfg       config.Config
+	db        *sql.DB
+	scope     scopedHandler
+	users     repositories.UserRepository
+	locations repositories.LocationRepository
+	reports   repositories.EnvironmentReportRepository
+	settings  repositories.SettingRepository
+	rates     repositories.RateLimitRepository
 }
 
 func NewReportLocationHandler(cfg config.Config, db *sql.DB, sessions session.Reader) ReportLocationHandler {
 	return ReportLocationHandler{
-		cfg:      cfg,
-		db:       db,
-		scope:    newScopedHandler(db, sessions),
-		users:    repositories.NewUserRepository(db),
-		reports:  repositories.NewEnvironmentReportRepository(db),
-		settings: repositories.NewSettingRepository(db),
-		rates:    repositories.NewRateLimitRepository(db),
+		cfg:       cfg,
+		db:        db,
+		scope:     newScopedHandler(db, sessions),
+		users:     repositories.NewUserRepository(db),
+		locations: repositories.NewLocationRepository(db),
+		reports:   repositories.NewEnvironmentReportRepository(db),
+		settings:  repositories.NewSettingRepository(db),
+		rates:     repositories.NewRateLimitRepository(db),
 	}
 }
 
@@ -190,6 +192,14 @@ func (handler ReportLocationHandler) insertEncryptedLocation(w http.ResponseWrit
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockReportUserTx(r.Context(), tx, scope.User.ID); err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	if err := handler.enforceReportIntervalTx(r.Context(), tx, scope); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 
 	role := services.NormalizeRole(scope.Membership.Role)
 	result, err := tx.ExecContext(r.Context(), `
@@ -223,11 +233,15 @@ ON DUPLICATE KEY UPDATE
 		httpx.Error(w, err)
 		return
 	}
-	handler.storeDeviceReportTx(r.Context(), tx, scope.User.ID, deviceReport, locationID, scope.Membership.GroupName)
+	if err := handler.locations.PruneHistoryForUserTx(r.Context(), tx, scope.Membership.GroupName, scope.User.ID, handler.cfg.Location.HistoryLimit); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		httpx.Error(w, err)
 		return
 	}
+	handler.storeDeviceReport(r.Context(), scope.User.ID, deviceReport, locationID, scope.Membership.GroupName)
 	handler.afterReport(r, scope, locationID, nil, false, "上报端到端加密位置", map[string]any{"location_id": locationID, "p2p_key_version": p2pKeyVersion})
 	httpx.OK(w, map[string]any{"ok": true, "message": "加密位置已上报。", "location_id": locationID, "reported_at": nowString()})
 }
@@ -251,11 +265,6 @@ func (handler ReportLocationHandler) insertPlainLocation(w http.ResponseWriter, 
 		httpx.Error(w, err)
 		return
 	}
-	if err := handler.assertPlausible(r, scope, latitude, longitude, optionalFloat(hasAccuracy, accuracy)); err != nil {
-		httpx.Error(w, err)
-		return
-	}
-
 	metaJSON := sanitizedLocationMeta(data)
 	tx, err := handler.db.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -263,6 +272,19 @@ func (handler ReportLocationHandler) insertPlainLocation(w http.ResponseWriter, 
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockReportUserTx(r.Context(), tx, scope.User.ID); err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	if err := handler.enforceReportIntervalTx(r.Context(), tx, scope); err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	jumpMeta, err := handler.assertPlausibleTx(r.Context(), tx, scope, latitude, longitude, optionalFloat(hasAccuracy, accuracy))
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
 
 	role := services.NormalizeRole(scope.Membership.Role)
 	result, err := tx.ExecContext(r.Context(), `
@@ -326,20 +348,16 @@ ON DUPLICATE KEY UPDATE
 		httpx.Error(w, err)
 		return
 	}
-	handler.storeDeviceReportTx(r.Context(), tx, scope.User.ID, deviceReport, locationID, scope.Membership.GroupName)
-	if handler.cfg.Location.HistoryLimit > 0 {
-		_, _ = tx.ExecContext(r.Context(), fmt.Sprintf(`
-DELETE FROM locations
-WHERE id NOT IN (
-	SELECT id FROM (
-		SELECT id FROM locations ORDER BY id DESC LIMIT %d
-	) keep_rows
-)`, handler.cfg.Location.HistoryLimit))
+	if err := handler.locations.PruneHistoryForUserTx(r.Context(), tx, scope.Membership.GroupName, scope.User.ID, handler.cfg.Location.HistoryLimit); err != nil {
+		httpx.Error(w, err)
+		return
 	}
 	if err := tx.Commit(); err != nil {
 		httpx.Error(w, err)
 		return
 	}
+	handler.recordLocationJump(r, scope, jumpMeta)
+	handler.storeDeviceReport(r.Context(), scope.User.ID, deviceReport, locationID, scope.Membership.GroupName)
 	handler.afterReport(r, scope, locationID, optionalFloat(hasAccuracy, accuracy), addressMismatch, "上报位置", map[string]any{"location_id": locationID, "accuracy": nullableNumber(hasAccuracy, accuracy), "address_mismatch": addressMismatch})
 	httpx.OK(w, map[string]any{"ok": true, "message": "位置已上报。", "location_id": locationID, "reported_at": nowString()})
 }
@@ -360,20 +378,27 @@ func (handler ReportLocationHandler) validateMeasurements(accuracy *float64, hea
 	return nil
 }
 
-func (handler ReportLocationHandler) assertPlausible(r *http.Request, scope *userScope, latitude float64, longitude float64, accuracy *float64) error {
-	if math.Abs(latitude) < 0.000001 && math.Abs(longitude) < 0.000001 {
-		return httpx.Unprocessable("定位坐标异常，已拒绝上报。")
+func lockReportUserTx(ctx context.Context, tx *sql.Tx, userID int64) error {
+	var lockedUserID int64
+	return tx.QueryRowContext(ctx, `
+SELECT id
+FROM users
+WHERE id = ?
+LIMIT 1
+FOR UPDATE`, userID).Scan(&lockedUserID)
+}
+
+func (handler ReportLocationHandler) enforceReportIntervalTx(ctx context.Context, tx *sql.Tx, scope *userScope) error {
+	if handler.cfg.Location.MinReportSeconds <= 0 {
+		return nil
 	}
-	var previousLatitude float64
-	var previousLongitude float64
-	var previousAccuracy sql.NullFloat64
 	var createdAt time.Time
-	err := handler.db.QueryRowContext(r.Context(), `
-SELECT latitude, longitude, accuracy, created_at
+	err := tx.QueryRowContext(ctx, `
+SELECT created_at
 FROM locations
 WHERE user_id = ? AND group_name = ?
 ORDER BY created_at DESC, id DESC
-LIMIT 1`, scope.User.ID, scope.Membership.GroupName).Scan(&previousLatitude, &previousLongitude, &previousAccuracy, &createdAt)
+LIMIT 1`, scope.User.ID, scope.Membership.GroupName).Scan(&createdAt)
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -381,11 +406,35 @@ LIMIT 1`, scope.User.ID, scope.Membership.GroupName).Scan(&previousLatitude, &pr
 		return err
 	}
 	elapsed := time.Since(createdAt).Seconds()
-	if elapsed >= 0 && elapsed < float64(handler.cfg.Location.MinReportSeconds) {
+	if elapsed < float64(handler.cfg.Location.MinReportSeconds) {
 		return httpx.APIError{Status: http.StatusTooManyRequests, Message: "上报过于频繁，请稍后再试。"}
 	}
+	return nil
+}
+
+func (handler ReportLocationHandler) assertPlausibleTx(ctx context.Context, tx *sql.Tx, scope *userScope, latitude float64, longitude float64, accuracy *float64) (map[string]any, error) {
+	if math.Abs(latitude) < 0.000001 && math.Abs(longitude) < 0.000001 {
+		return nil, httpx.Unprocessable("定位坐标异常，已拒绝上报。")
+	}
+	var previousLatitude float64
+	var previousLongitude float64
+	var previousAccuracy sql.NullFloat64
+	var createdAt time.Time
+	err := tx.QueryRowContext(ctx, `
+SELECT latitude, longitude, accuracy, created_at
+FROM locations
+WHERE user_id = ? AND group_name = ?
+ORDER BY created_at DESC, id DESC
+	LIMIT 1`, scope.User.ID, scope.Membership.GroupName).Scan(&previousLatitude, &previousLongitude, &previousAccuracy, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	elapsed := time.Since(createdAt).Seconds()
 	if elapsed <= 0 {
-		return nil
+		return nil, nil
 	}
 	distance := haversineMeters(previousLatitude, previousLongitude, latitude, longitude)
 	previousAccuracyValue := 0.0
@@ -398,37 +447,44 @@ LIMIT 1`, scope.User.ID, scope.Membership.GroupName).Scan(&previousLatitude, &pr
 	}
 	effectiveDistance := math.Max(0, distance-previousAccuracyValue-currentAccuracy-1000)
 	speed := effectiveDistance / elapsed
-	if speed > handler.cfg.Location.MaxReasonableTravelMPS {
-		id := scope.User.ID
-		_ = handler.users.RecordLog(r.Context(), &id, scope.Membership.GroupName, "location_jump_anomaly", "位置变化异常", map[string]any{
-			"previous_latitude":   previousLatitude,
-			"previous_longitude":  previousLongitude,
-			"latitude":            latitude,
-			"longitude":           longitude,
-			"distance_meters":     math.Round(distance*100) / 100,
-			"elapsed_seconds":     int(elapsed),
-			"effective_speed_mps": math.Round(speed*100) / 100,
-			"previous_accuracy":   previousAccuracyValue,
-			"current_accuracy":    currentAccuracy,
-		}, httpx.ClientIP(r), r.UserAgent())
+	if speed <= handler.cfg.Location.MaxReasonableTravelMPS {
+		return nil, nil
 	}
-	return nil
+	return map[string]any{
+		"previous_latitude":   previousLatitude,
+		"previous_longitude":  previousLongitude,
+		"latitude":            latitude,
+		"longitude":           longitude,
+		"distance_meters":     math.Round(distance*100) / 100,
+		"elapsed_seconds":     int(elapsed),
+		"effective_speed_mps": math.Round(speed*100) / 100,
+		"previous_accuracy":   previousAccuracyValue,
+		"current_accuracy":    currentAccuracy,
+	}, nil
 }
 
-func (handler ReportLocationHandler) storeDeviceReportTx(ctx context.Context, tx *sql.Tx, userID int64, report map[string]any, locationID int64, groupName string) {
+func (handler ReportLocationHandler) recordLocationJump(r *http.Request, scope *userScope, meta map[string]any) {
+	if meta == nil {
+		return
+	}
+	id := scope.User.ID
+	_ = handler.users.RecordLog(r.Context(), &id, scope.Membership.GroupName, "location_jump_anomaly", "位置变化异常", meta, httpx.ClientIP(r), r.UserAgent())
+}
+
+func (handler ReportLocationHandler) storeDeviceReport(ctx context.Context, userID int64, report map[string]any, locationID int64, groupName string) {
 	if len(report) == 0 {
 		return
 	}
-	report["report_kind"] = "device_integrity"
+	report["report_kind"] = repositories.EnvironmentReportKindDeviceIntegrity
 	report["from_location_report"] = true
 	report["location_id"] = locationID
 	report["group_name"] = groupName
 	report["reported_at"] = nowString()
 	payload, err := json.Marshal(report)
-	if err != nil || len(payload) > 200000 {
+	if err != nil || len(payload) > repositories.EnvironmentReportPayloadLimit {
 		return
 	}
-	_, _ = tx.ExecContext(ctx, "INSERT INTO environment_reports (user_id, report_json) VALUES (?, ?)", userID, string(payload))
+	_, _ = handler.reports.StoreDaily(ctx, userID, repositories.EnvironmentReportKindDeviceIntegrity, string(payload))
 }
 
 func (handler ReportLocationHandler) afterReport(r *http.Request, scope *userScope, locationID int64, accuracy *float64, addressMismatch bool, message string, meta map[string]any) {

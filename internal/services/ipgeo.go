@@ -1,94 +1,187 @@
 package services
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"familylocation/location-v3/internal/config"
-	"familylocation/location-v3/internal/httpx"
 )
 
 type IPGeoPayload map[string]any
 
-func LookupIPGeo(ip string, provider string, cfg config.ExternalConfig) (IPGeoPayload, bool, error) {
+type ProviderFetchBudget func(context.Context, string) error
+
+const ipGeoResponseLimit int64 = 2 << 20
+
+var ipGeoAllowedHosts = map[string]struct{}{
+	"api.ip2location.io": {},
+	"api.ipdata.co":      {},
+	"api.ipinfo.io":      {},
+	"api.ipregistry.co":  {},
+}
+
+type ipGeoCacheEntry struct {
+	payload   IPGeoPayload
+	ok        bool
+	expiresAt time.Time
+}
+
+type ipGeoInflight struct {
+	done    chan struct{}
+	payload IPGeoPayload
+	ok      bool
+	err     error
+}
+
+type ipGeoService struct {
+	client     *http.Client
+	cacheTTL   time.Duration
+	maxEntries int
+	now        func() time.Time
+
+	mu       sync.Mutex
+	cache    map[string]ipGeoCacheEntry
+	inflight map[string]*ipGeoInflight
+}
+
+var defaultIPGeoService = newIPGeoService(secureIPGeoClient(4*time.Second), 30*time.Minute, 2048)
+
+func secureIPGeoClient(timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func newIPGeoService(client *http.Client, cacheTTL time.Duration, maxEntries int) *ipGeoService {
+	if client == nil {
+		client = secureIPGeoClient(4 * time.Second)
+	}
+	if cacheTTL <= 0 {
+		cacheTTL = 30 * time.Minute
+	}
+	if maxEntries <= 0 {
+		maxEntries = 2048
+	}
+	return &ipGeoService{
+		client:     client,
+		cacheTTL:   cacheTTL,
+		maxEntries: maxEntries,
+		now:        time.Now,
+		cache:      make(map[string]ipGeoCacheEntry),
+		inflight:   make(map[string]*ipGeoInflight),
+	}
+}
+
+func LookupIPGeoContextWithBudget(ctx context.Context, ip string, provider string, cfg config.ExternalConfig, budget ProviderFetchBudget) (IPGeoPayload, bool, error) {
+	return defaultIPGeoService.lookupIPGeoWithBudget(ctx, ip, provider, cfg, budget)
+}
+
+func (service *ipGeoService) lookupIPGeoWithBudget(ctx context.Context, ip string, provider string, cfg config.ExternalConfig, budget ProviderFetchBudget) (IPGeoPayload, bool, error) {
 	ip = strings.TrimSpace(ip)
-	if net.ParseIP(ip) == nil {
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
 		return nil, false, nil
 	}
+	ip = parsedIP.String()
 
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "ip-api":
-		return lookupIPAPI(ip)
+		// The free ip-api endpoint does not support TLS, so it is intentionally unavailable.
+		return nil, false, nil
 	case "ip2location":
 		if strings.TrimSpace(cfg.IP2LocationKey) == "" {
 			return nil, false, nil
 		}
-		return lookupIP2Location(ip, cfg.IP2LocationKey)
+		return service.cached(ctx, "ip2location|"+ip, func(ctx context.Context) (IPGeoPayload, bool, error) {
+			if err := authorizeProviderFetch(ctx, budget, "ip2location"); err != nil {
+				return nil, false, err
+			}
+			return service.lookupIP2Location(ctx, ip, cfg.IP2LocationKey)
+		})
 	case "ipdata":
 		if strings.TrimSpace(cfg.IPDataKey) == "" {
 			return nil, false, nil
 		}
-		return lookupIPData(ip, cfg.IPDataKey)
+		return service.cached(ctx, "ipdata|"+ip, func(ctx context.Context) (IPGeoPayload, bool, error) {
+			if err := authorizeProviderFetch(ctx, budget, "ipdata"); err != nil {
+				return nil, false, err
+			}
+			return service.lookupIPData(ctx, ip, cfg.IPDataKey)
+		})
 	case "ipregistry":
 		if strings.TrimSpace(cfg.IPRegistryKey) == "" {
 			return nil, false, nil
 		}
-		return lookupIPRegistry(ip, cfg.IPRegistryKey)
+		return service.cached(ctx, "ipregistry|"+ip, func(ctx context.Context) (IPGeoPayload, bool, error) {
+			if err := authorizeProviderFetch(ctx, budget, "ipregistry"); err != nil {
+				return nil, false, err
+			}
+			return service.lookupIPRegistry(ctx, ip, cfg.IPRegistryKey)
+		})
 	default:
 		return nil, false, nil
 	}
 }
 
-func LookupIPInfoLite(ip string, token string) (IPGeoPayload, bool, error) {
+func LookupIPInfoLiteContextWithBudget(ctx context.Context, ip string, token string, budget ProviderFetchBudget) (IPGeoPayload, bool, error) {
+	return defaultIPGeoService.lookupIPInfoLiteWithBudget(ctx, ip, token, budget)
+}
+
+func (service *ipGeoService) lookupIPInfoLiteWithBudget(ctx context.Context, ip string, token string, budget ProviderFetchBudget) (IPGeoPayload, bool, error) {
 	ip = strings.TrimSpace(ip)
-	if net.ParseIP(ip) == nil || strings.TrimSpace(token) == "" {
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil || strings.TrimSpace(token) == "" {
 		return nil, false, nil
 	}
+	ip = parsedIP.String()
 
-	var data map[string]any
-	endpoint := "https://api.ipinfo.io/lite/" + url.PathEscape(ip) + "?token=" + url.QueryEscape(token)
-	if err := httpx.GetJSON(endpoint, 4*time.Second, &data); err != nil {
-		return nil, false, err
-	}
+	return service.cached(ctx, "ipinfo-lite|"+ip, func(ctx context.Context) (IPGeoPayload, bool, error) {
+		if err := authorizeProviderFetch(ctx, budget, "ipinfo-lite"); err != nil {
+			return nil, false, err
+		}
+		var data map[string]any
+		endpoint := "https://api.ipinfo.io/lite/" + url.PathEscape(ip) + "?token=" + url.QueryEscape(token)
+		if err := service.getJSON(ctx, endpoint, &data); err != nil {
+			return nil, false, err
+		}
 
-	return IPGeoPayload{
-		"ip":        ip,
-		"country":   stringValue(data, "country", "country_code"),
-		"region":    stringValue(data, "region"),
-		"city":      stringValue(data, "city"),
-		"latitude":  numericOrNil(data["latitude"]),
-		"longitude": numericOrNil(data["longitude"]),
-		"provider":  "IPinfo Lite",
-	}, true, nil
+		return IPGeoPayload{
+			"ip":        ip,
+			"country":   stringValue(data, "country", "country_code"),
+			"region":    stringValue(data, "region"),
+			"city":      stringValue(data, "city"),
+			"latitude":  numericOrNil(data["latitude"]),
+			"longitude": numericOrNil(data["longitude"]),
+			"provider":  "IPinfo Lite",
+		}, true, nil
+	})
 }
 
-func lookupIPAPI(ip string) (IPGeoPayload, bool, error) {
-	var data map[string]any
-	endpoint := "http://ip-api.com/json/" + url.PathEscape(ip) + "?lang=zh-CN&fields=status,message,country,regionName,city,lat,lon,query,isp,org,as,asname,mobile"
-	if err := httpx.GetJSON(endpoint, 4*time.Second, &data); err != nil {
-		return nil, false, err
+func authorizeProviderFetch(ctx context.Context, budget ProviderFetchBudget, provider string) error {
+	if budget == nil {
+		return fmt.Errorf("provider fetch budget is required")
 	}
-	if fmt.Sprint(data["status"]) != "success" {
-		return nil, false, nil
-	}
-
-	return ipGeoPayload(ip, "ip-api", data["country"], data["regionName"], data["city"], data["lat"], data["lon"], map[string]any{
-		"asn":            data["as"],
-		"isp":            data["isp"],
-		"org":            data["org"],
-		"carrier":        data["asname"],
-		"mobile_network": data["mobile"],
-	}), true, nil
+	return budget(ctx, provider)
 }
 
-func lookupIP2Location(ip string, key string) (IPGeoPayload, bool, error) {
+func (service *ipGeoService) lookupIP2Location(ctx context.Context, ip string, key string) (IPGeoPayload, bool, error) {
 	var data map[string]any
 	endpoint := "https://api.ip2location.io/?key=" + url.QueryEscape(key) + "&ip=" + url.QueryEscape(ip) + "&format=json"
-	if err := httpx.GetJSON(endpoint, 4*time.Second, &data); err != nil {
+	if err := service.getJSON(ctx, endpoint, &data); err != nil {
 		return nil, false, err
 	}
 
@@ -99,10 +192,10 @@ func lookupIP2Location(ip string, key string) (IPGeoPayload, bool, error) {
 	}), true, nil
 }
 
-func lookupIPData(ip string, key string) (IPGeoPayload, bool, error) {
+func (service *ipGeoService) lookupIPData(ctx context.Context, ip string, key string) (IPGeoPayload, bool, error) {
 	var data map[string]any
 	endpoint := "https://api.ipdata.co/" + url.PathEscape(ip) + "?api-key=" + url.QueryEscape(key)
-	if err := httpx.GetJSON(endpoint, 4*time.Second, &data); err != nil {
+	if err := service.getJSON(ctx, endpoint, &data); err != nil {
 		return nil, false, err
 	}
 	asn := nestedMap(data, "asn")
@@ -114,10 +207,10 @@ func lookupIPData(ip string, key string) (IPGeoPayload, bool, error) {
 	}), true, nil
 }
 
-func lookupIPRegistry(ip string, key string) (IPGeoPayload, bool, error) {
+func (service *ipGeoService) lookupIPRegistry(ctx context.Context, ip string, key string) (IPGeoPayload, bool, error) {
 	var data map[string]any
 	endpoint := "https://api.ipregistry.co/" + url.PathEscape(ip) + "?key=" + url.QueryEscape(key)
-	if err := httpx.GetJSON(endpoint, 4*time.Second, &data); err != nil {
+	if err := service.getJSON(ctx, endpoint, &data); err != nil {
 		return nil, false, err
 	}
 	location := nestedMap(data, "location")
@@ -130,6 +223,121 @@ func lookupIPRegistry(ip string, key string) (IPGeoPayload, bool, error) {
 		"isp": connection["isp"],
 		"org": connection["organization"],
 	}), true, nil
+}
+
+func (service *ipGeoService) cached(ctx context.Context, key string, load func(context.Context) (IPGeoPayload, bool, error)) (IPGeoPayload, bool, error) {
+	service.mu.Lock()
+	now := service.now()
+	if entry, exists := service.cache[key]; exists {
+		if now.Before(entry.expiresAt) {
+			service.mu.Unlock()
+			return cloneIPGeoPayload(entry.payload), entry.ok, nil
+		}
+		delete(service.cache, key)
+	}
+	if call, exists := service.inflight[key]; exists {
+		done := call.done
+		service.mu.Unlock()
+		select {
+		case <-done:
+			return cloneIPGeoPayload(call.payload), call.ok, call.err
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		}
+	}
+
+	call := &ipGeoInflight{done: make(chan struct{})}
+	service.inflight[key] = call
+	service.mu.Unlock()
+
+	payload, ok, err := load(ctx)
+	payload = cloneIPGeoPayload(payload)
+
+	service.mu.Lock()
+	call.payload = cloneIPGeoPayload(payload)
+	call.ok = ok
+	call.err = err
+	if err == nil {
+		service.evictLocked(service.now())
+		service.cache[key] = ipGeoCacheEntry{
+			payload:   cloneIPGeoPayload(payload),
+			ok:        ok,
+			expiresAt: service.now().Add(service.cacheTTL),
+		}
+	}
+	delete(service.inflight, key)
+	close(call.done)
+	service.mu.Unlock()
+
+	return payload, ok, err
+}
+
+func (service *ipGeoService) evictLocked(now time.Time) {
+	for key, entry := range service.cache {
+		if !now.Before(entry.expiresAt) {
+			delete(service.cache, key)
+		}
+	}
+	for len(service.cache) >= service.maxEntries {
+		for key := range service.cache {
+			delete(service.cache, key)
+			break
+		}
+	}
+}
+
+func (service *ipGeoService) getJSON(ctx context.Context, endpoint string, target any) error {
+	if err := validateIPGeoEndpoint(endpoint); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "loc-app-server")
+
+	resp, err := service.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("request failed with status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, ipGeoResponseLimit+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) > ipGeoResponseLimit {
+		return fmt.Errorf("response body exceeds %d bytes", ipGeoResponseLimit)
+	}
+	return json.Unmarshal(body, target)
+}
+
+func validateIPGeoEndpoint(endpoint string) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid IP geolocation endpoint: %w", err)
+	}
+	host := strings.ToLower(parsed.Hostname())
+	_, allowed := ipGeoAllowedHosts[host]
+	if parsed.Scheme != "https" || !allowed || parsed.User != nil || (parsed.Port() != "" && parsed.Port() != "443") {
+		return fmt.Errorf("untrusted IP geolocation endpoint")
+	}
+	return nil
+}
+
+func cloneIPGeoPayload(payload IPGeoPayload) IPGeoPayload {
+	if payload == nil {
+		return nil
+	}
+	cloned := make(IPGeoPayload, len(payload))
+	for key, value := range payload {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func ipGeoPayload(ip string, provider string, country any, region any, city any, latitude any, longitude any, network map[string]any) IPGeoPayload {

@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"time"
 
@@ -10,27 +11,37 @@ import (
 	"familylocation/location-v3/internal/repositories"
 )
 
+var ErrUserCredentialChanged = errors.New("user credentials changed during session creation")
+
 type Store struct {
 	CookieName string
 	Repo       *repositories.SessionRepository
 	Lifetime   time.Duration
 }
 
-func (store Store) StartUserSession(w http.ResponseWriter, r *http.Request, userID int64) (string, error) {
-	return store.writeSession(w, r, &userID, false)
+func (store Store) StartUserSession(w http.ResponseWriter, r *http.Request, userID int64, expectedPasswordHash string) (string, error) {
+	return store.writeSession(w, r, &userID, expectedPasswordHash)
 }
 
 func (store Store) StartAdminSession(w http.ResponseWriter, r *http.Request) (string, error) {
-	return store.writeSession(w, r, nil, true)
+	return store.writeSession(w, r, nil, "")
 }
 
-func (store Store) writeSession(w http.ResponseWriter, r *http.Request, userID *int64, adminLoggedIn bool) (string, error) {
+func (store Store) writeSession(w http.ResponseWriter, r *http.Request, userID *int64, expectedPasswordHash string) (string, error) {
 	sessionID, err := randomHex(20)
 	if err != nil {
 		return "", err
 	}
 	expiresAt := time.Now().Add(store.Lifetime)
-	if err := store.Repo.Upsert(r.Context(), sessionID, userID, adminLoggedIn, expiresAt); err != nil {
+	if userID != nil {
+		created, err := store.Repo.CreateUserSessionIfPasswordMatches(r.Context(), sessionID, *userID, expectedPasswordHash, expiresAt)
+		if err != nil {
+			return "", err
+		}
+		if !created {
+			return "", ErrUserCredentialChanged
+		}
+	} else if err := store.Repo.UpsertAdmin(r.Context(), sessionID, expiresAt); err != nil {
 		return "", err
 	}
 	http.SetCookie(w, &http.Cookie{

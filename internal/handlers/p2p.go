@@ -21,6 +21,7 @@ type P2PHandler struct {
 	db    *sql.DB
 	scope scopedHandler
 	users repositories.UserRepository
+	rates repositories.RateLimitRepository
 }
 
 func NewP2PHandler(db *sql.DB, sessions session.Reader) P2PHandler {
@@ -28,16 +29,18 @@ func NewP2PHandler(db *sql.DB, sessions session.Reader) P2PHandler {
 		db:    db,
 		scope: newScopedHandler(db, sessions),
 		users: repositories.NewUserRepository(db),
+		rates: repositories.NewRateLimitRepository(db),
 	}
 }
 
 type p2pRequest struct {
-	Action       string         `json:"action"`
-	GroupName    string         `json:"group_name"`
-	PublicKeyJWK map[string]any `json:"public_key_jwk"`
-	Consent      bool           `json:"consent"`
-	KeyVersion   int            `json:"key_version"`
-	WrappedKeys  map[string]any `json:"wrapped_keys"`
+	Action          string         `json:"action"`
+	GroupName       string         `json:"group_name"`
+	PublicKeyJWK    map[string]any `json:"public_key_jwk"`
+	CurrentPassword string         `json:"current_password"`
+	Consent         bool           `json:"consent"`
+	KeyVersion      int            `json:"key_version"`
+	WrappedKeys     map[string]any `json:"wrapped_keys"`
 }
 
 func (handler P2PHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -63,17 +66,22 @@ func (handler P2PHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, err)
 			return
 		}
-		_, err = handler.db.ExecContext(r.Context(), `
-INSERT INTO p2p_user_keys (user_id, public_key_jwk)
-VALUES (?, ?)
-ON DUPLICATE KEY UPDATE public_key_jwk = VALUES(public_key_jwk), updated_at = NOW()`,
-			scope.User.ID, publicKey)
+		allowed, err := handler.rates.Hit(r.Context(), "p2p_public_key_publish", strconv.FormatInt(scope.User.ID, 10), 10, 15*time.Minute)
+		if err != nil {
+			httpx.Error(w, err)
+			return
+		}
+		if !allowed {
+			httpx.Error(w, httpx.APIError{Status: http.StatusTooManyRequests, Message: "公钥登记尝试过于频繁，请稍后再试。"})
+			return
+		}
+		change, err := handler.publishPublicKey(r, scope, publicKey, req.CurrentPassword)
 		if err != nil {
 			httpx.Error(w, err)
 			return
 		}
 		id := scope.User.ID
-		_ = handler.users.RecordLog(r.Context(), &id, groupName, "p2p_public_key_update", "更新端到端加密公钥", nil, httpx.ClientIP(r), r.UserAgent())
+		_ = handler.users.RecordLog(r.Context(), &id, groupName, "p2p_public_key_update", "更新端到端加密公钥", map[string]any{"change": change}, httpx.ClientIP(r), r.UserAgent())
 	case "consent":
 		var consentAt any
 		if req.Consent {
@@ -118,6 +126,68 @@ ON DUPLICATE KEY UPDATE consent_at = VALUES(consent_at), updated_at = NOW()`,
 		return
 	}
 	httpx.OK(w, payload)
+}
+
+func (handler P2PHandler) publishPublicKey(r *http.Request, scope *userScope, publicKey string, currentPassword string) (string, error) {
+	tx, err := handler.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var lockedUserID int64
+	var passwordHash string
+	if err := tx.QueryRowContext(r.Context(), `
+SELECT id, password_hash
+FROM users
+WHERE id = ? AND is_active = 1
+LIMIT 1
+FOR UPDATE`, scope.User.ID).Scan(&lockedUserID, &passwordHash); err != nil {
+		return "", err
+	}
+
+	var currentKey string
+	err = tx.QueryRowContext(r.Context(), `
+SELECT public_key_jwk
+FROM p2p_user_keys
+WHERE user_id = ?
+LIMIT 1`, scope.User.ID).Scan(&currentKey)
+	change := "unchanged"
+	switch {
+	case err == sql.ErrNoRows:
+		if strings.TrimSpace(currentPassword) == "" || !services.CheckPassword(currentPassword, passwordHash) {
+			return "", httpx.Forbidden("登记或更换端到端加密公钥需要验证当前密码。")
+		}
+		if _, err := tx.ExecContext(r.Context(), `
+INSERT INTO p2p_user_keys (user_id, public_key_jwk)
+VALUES (?, ?)`, scope.User.ID, publicKey); err != nil {
+			return "", err
+		}
+		change = "created"
+	case err != nil:
+		return "", err
+	case currentKey == publicKey:
+	case strings.TrimSpace(currentPassword) == "" || !services.CheckPassword(currentPassword, passwordHash):
+		return "", httpx.Forbidden("登记或更换端到端加密公钥需要验证当前密码。")
+	default:
+		if _, err := tx.ExecContext(r.Context(), `
+UPDATE p2p_user_keys
+SET public_key_jwk = ?, updated_at = NOW()
+WHERE user_id = ?`, publicKey, scope.User.ID); err != nil {
+			return "", err
+		}
+		if _, err := tx.ExecContext(r.Context(), `
+UPDATE p2p_group_members
+SET wrapped_group_key = NULL, key_version = 0, updated_at = NOW()
+WHERE user_id = ?`, scope.User.ID); err != nil {
+			return "", err
+		}
+		change = "replaced"
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return change, nil
 }
 
 func (handler P2PHandler) enableGroup(w http.ResponseWriter, r *http.Request, scope *userScope, req p2pRequest) error {

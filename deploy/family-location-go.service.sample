@@ -15,7 +15,9 @@ Environment=LOC_DB_PORT=3306
 Environment=LOC_DB_NAME=family_loc
 Environment=LOC_DB_USER=family_loc
 # /etc/family-location-v3.env should provide both LOC_DB_PASS and
-# LOC_APP_SIGNING_SECRET.
+# LOC_APP_SIGNING_SECRET. Provider quota overrides are optional; when needed,
+# use each LOC_<PROVIDER>_QUOTA_{MAX_REQUESTS,RESERVE_REQUESTS,
+# USER_MAX_MISSES,WINDOW_SECONDS} variable documented in README.md.
 EnvironmentFile=-/etc/family-location-v3.env
 
 [Install]

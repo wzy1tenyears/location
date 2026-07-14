@@ -2,8 +2,11 @@ package handlers
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -19,7 +22,9 @@ import (
 
 var registerUsernamePattern = regexp.MustCompile(`^[A-Za-z0-9_]{6,64}$`)
 var registerInviteCodePattern = regexp.MustCompile(`^[0-9a-zA-Z]{1,255}$`)
-var groupCodePattern = regexp.MustCompile(`^[0-9a-z]{6}$`)
+var groupCodePattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+const groupCodeBytes = 16
 
 type RegisterHandler struct {
 	cfg        config.Config
@@ -178,7 +183,7 @@ func (handler RegisterHandler) Register(w http.ResponseWriter, r *http.Request) 
 		}
 	} else {
 		if !groupCodePattern.MatchString(req.GroupCode) {
-			httpx.Error(w, httpx.Unprocessable("请填写 6 位家庭组号。"))
+			httpx.Error(w, httpx.Unprocessable("请填写 32 位家庭组号。"))
 			return
 		}
 		groupName, err := findGroupNameByCodeTx(r.Context(), tx, req.GroupCode)
@@ -248,7 +253,7 @@ func (handler RegisterHandler) Register(w http.ResponseWriter, r *http.Request) 
 		httpx.Error(w, err)
 		return
 	}
-	if _, err := handler.sessions.StartUserSession(w, r, userID); err != nil {
+	if _, err := handler.sessions.StartUserSession(w, r, userID, user.PasswordHash); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -431,18 +436,10 @@ func ensureFamilyGroupRecordTx(ctx context.Context, tx *sql.Tx, groupName string
 }
 
 func generateGroupCodeTx(ctx context.Context, tx *sql.Tx) (string, error) {
-	alphabet := "0123456789abcdefghijklmnopqrstuvwxyz"
 	for attempt := 0; attempt < 80; attempt++ {
-		raw, err := randomHex(3)
+		code, err := randomGroupCode(rand.Reader)
 		if err != nil {
 			return "", err
-		}
-		code := ""
-		for _, ch := range raw {
-			code += string(alphabet[int(ch)%len(alphabet)])
-			if len(code) == 6 {
-				break
-			}
 		}
 		var exists int
 		err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM family_groups WHERE group_code = ? LIMIT 1", code).Scan(&exists)
@@ -454,6 +451,14 @@ func generateGroupCodeTx(ctx context.Context, tx *sql.Tx) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("failed to generate group code")
+}
+
+func randomGroupCode(reader io.Reader) (string, error) {
+	raw := make([]byte, groupCodeBytes)
+	if _, err := io.ReadFull(reader, raw); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw), nil
 }
 
 func familyGroupInternalNameTx(ctx context.Context, tx *sql.Tx, displayName string, code string) (string, error) {
@@ -470,5 +475,10 @@ func familyGroupInternalNameTx(ctx context.Context, tx *sql.Tx, displayName stri
 	if exists == 0 {
 		return candidate, nil
 	}
-	return candidate + "#" + code, nil
+	suffixBase := base
+	maxSuffixBase := 100 - 1 - len(code)
+	if len(suffixBase) > maxSuffixBase {
+		suffixBase = suffixBase[:maxSuffixBase]
+	}
+	return string(suffixBase) + "#" + code, nil
 }

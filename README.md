@@ -7,6 +7,7 @@ v3 是独立的 Go 后端目录，当前目标是承接线上全部 API，并让
 - v3 以无后缀的纯 Go 路径作为主接口形状。
 - `/api/` 应直接反向代理到 Go 服务。
 - 后台管理走 `android-admin-client` 原生界面；遗留网页后台路径应在 Nginx 上显式返回 `410 Gone`。
+- `POST /api/share` 创建带分享码和有效期的位置分享；公开 `/share?token=...` 页面只有在分享码验证通过后才返回所选地图与历史位置数据。
 
 ## 目录定位
 
@@ -30,6 +31,22 @@ v3 是独立的 Go 后端目录，当前目标是承接线上全部 API，并让
 - `LOC_ANDROID_VERSION_CODE`
 - `LOC_ANDROID_ADMIN_VERSION_CODE`
 - `LOC_ADMIN_PASSWORD` / `LOC_ADMIN_PASSWORD_HASH`
+
+IP 地理位置供应商凭据按需配置：
+
+- `LOC_IPINFO_LITE_TOKEN`
+- `LOC_IP2LOCATION_IO_KEY`
+- `LOC_IPDATA_API_KEY`
+- `LOC_IPREGISTRY_API_KEY`
+
+每个已启用供应商都有保守的默认上游预算。现有部署只配置凭据即可继续启动；实际套餐不同时，可用供应商前缀加以下后缀覆盖：
+
+- `_QUOTA_MAX_REQUESTS`：套餐窗口内的请求上限
+- `_QUOTA_RESERVE_REQUESTS`：为其他用途保留的请求数
+- `_QUOTA_USER_MAX_MISSES`：单用户在同一窗口内可触发的缓存未命中上限
+- `_QUOTA_WINDOW_SECONDS`：套餐计数窗口秒数
+
+例如，IPinfo Lite 使用 `LOC_IPINFO_LITE_QUOTA_MAX_REQUESTS`、`LOC_IPINFO_LITE_QUOTA_RESERVE_REQUESTS`、`LOC_IPINFO_LITE_QUOTA_USER_MAX_MISSES` 和 `LOC_IPINFO_LITE_QUOTA_WINDOW_SECONDS`。缓存命中与合并请求不消耗供应商预算；显式配置不合法时服务会拒绝启动。
 
 `LOC_APP_SIGNING_SECRET` 用于 App Challenge 与后台 APK 下载令牌签名，必须至少 32 个字符，并且不能再回退复用数据库密码。服务启动时会校验数据库、管理员凭据、签名密钥和 APK 相对路径，配置不完整会直接拒绝启动。
 

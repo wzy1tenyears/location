@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const defaultLocationHistoryLimit = 5000
+
 type Config struct {
 	Server   ServerConfig
 	App      AppConfig
@@ -55,14 +57,43 @@ type FileConfig struct {
 }
 
 type ExternalConfig struct {
-	IPInfoLiteToken    string
-	IP2LocationKey     string
-	IPDataKey          string
-	IPRegistryKey      string
-	TurnstileSiteKey   string
-	TurnstileSecretKey string
-	AMapJSAPIKey       string
-	AMapServicePath    string
+	IPInfoLiteToken     string
+	IP2LocationKey      string
+	IPDataKey           string
+	IPRegistryKey       string
+	IPGeoProviderQuotas map[string]IPGeoProviderQuota
+	TurnstileSiteKey    string
+	TurnstileSecretKey  string
+	AMapJSAPIKey        string
+	AMapServicePath     string
+	AMapSharePath       string
+}
+
+type IPGeoProviderQuota struct {
+	MaxRequests     int
+	ReserveRequests int
+	UserMaxMisses   int
+	Window          time.Duration
+}
+
+var defaultIPGeoProviderQuotas = map[string]IPGeoProviderQuota{
+	"ipinfo-lite": {MaxRequests: 1000, ReserveRequests: 500, UserMaxMisses: 100, Window: 24 * time.Hour},
+	"ip2location": {MaxRequests: 1000, ReserveRequests: 500, UserMaxMisses: 50, Window: 30 * 24 * time.Hour},
+	"ipdata":      {MaxRequests: 200, ReserveRequests: 100, UserMaxMisses: 25, Window: 24 * time.Hour},
+	"ipregistry":  {MaxRequests: 1000, ReserveRequests: 500, UserMaxMisses: 50, Window: 30 * 24 * time.Hour},
+}
+
+func (quota IPGeoProviderQuota) AvailableRequests() int {
+	available := quota.MaxRequests - quota.ReserveRequests
+	if available < 0 {
+		return 0
+	}
+	return available
+}
+
+func (cfg ExternalConfig) IPGeoQuota(provider string) (IPGeoProviderQuota, bool) {
+	quota, ok := cfg.IPGeoProviderQuotas[strings.ToLower(strings.TrimSpace(provider))]
+	return quota, ok
 }
 
 type LocationConfig struct {
@@ -92,7 +123,7 @@ func Load() Config {
 		App: AppConfig{
 			Name:              env("LOC_APP_NAME", "位置"),
 			UserAgentToken:    env("LOC_APP_USER_AGENT_TOKEN", "loc-app"),
-			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 135),
+			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 140),
 			VersionName:       env("LOC_ANDROID_VERSION_NAME", "2.1.0"),
 			ForceUpdate:       envBool("LOC_ANDROID_FORCE_UPDATE", true),
 			DeviceCookieName:  env("LOC_DEVICE_COOKIE_NAME", "loc_device"),
@@ -116,17 +147,24 @@ func Load() Config {
 			AdminAPKFilename: env("LOC_ANDROID_ADMIN_APK_FILENAME", "private/location-admin-release.apk"),
 		},
 		External: ExternalConfig{
-			IPInfoLiteToken:    env("LOC_IPINFO_LITE_TOKEN", ""),
-			IP2LocationKey:     env("LOC_IP2LOCATION_IO_KEY", ""),
-			IPDataKey:          env("LOC_IPDATA_API_KEY", ""),
-			IPRegistryKey:      env("LOC_IPREGISTRY_API_KEY", ""),
+			IPInfoLiteToken: env("LOC_IPINFO_LITE_TOKEN", ""),
+			IP2LocationKey:  env("LOC_IP2LOCATION_IO_KEY", ""),
+			IPDataKey:       env("LOC_IPDATA_API_KEY", ""),
+			IPRegistryKey:   env("LOC_IPREGISTRY_API_KEY", ""),
+			IPGeoProviderQuotas: map[string]IPGeoProviderQuota{
+				"ipinfo-lite": loadIPGeoProviderQuota("LOC_IPINFO_LITE", defaultIPGeoProviderQuotas["ipinfo-lite"]),
+				"ip2location": loadIPGeoProviderQuota("LOC_IP2LOCATION", defaultIPGeoProviderQuotas["ip2location"]),
+				"ipdata":      loadIPGeoProviderQuota("LOC_IPDATA", defaultIPGeoProviderQuotas["ipdata"]),
+				"ipregistry":  loadIPGeoProviderQuota("LOC_IPREGISTRY", defaultIPGeoProviderQuotas["ipregistry"]),
+			},
 			TurnstileSiteKey:   env("LOC_CF_TURNSTILE_SITE_KEY", ""),
 			TurnstileSecretKey: env("LOC_CF_TURNSTILE_SECRET_KEY", ""),
 			AMapJSAPIKey:       env("LOC_AMAP_JS_API_KEY", ""),
 			AMapServicePath:    env("LOC_AMAP_SERVICE_PROXY_PATH", "/_AMapService"),
+			AMapSharePath:      env("LOC_AMAP_SHARE_PROXY_PATH", "/_ShareMapService"),
 		},
 		Location: LocationConfig{
-			HistoryLimit:             envInt("LOC_LOCATION_HISTORY_LIMIT", 5000),
+			HistoryLimit:             envPositiveInt("LOC_LOCATION_HISTORY_LIMIT", defaultLocationHistoryLimit),
 			MinReportSeconds:         envInt("LOC_MIN_LOCATION_REPORT_SECONDS", 10),
 			MaxAccuracyMeters:        envFloat("LOC_MAX_LOCATION_ACCURACY_METERS", 5000),
 			MaxSpeedMPS:              envFloat("LOC_MAX_LOCATION_SPEED_MPS", 120),
@@ -164,6 +202,32 @@ func Validate(cfg Config) error {
 	if strings.TrimSpace(cfg.Database.Name) == "" || strings.TrimSpace(cfg.Database.User) == "" || strings.TrimSpace(cfg.Database.Pass) == "" {
 		return fmt.Errorf("LOC_DB_NAME, LOC_DB_USER and LOC_DB_PASS are required")
 	}
+	for _, provider := range []struct {
+		name       string
+		credential string
+	}{
+		{name: "ipinfo-lite", credential: cfg.External.IPInfoLiteToken},
+		{name: "ip2location", credential: cfg.External.IP2LocationKey},
+		{name: "ipdata", credential: cfg.External.IPDataKey},
+		{name: "ipregistry", credential: cfg.External.IPRegistryKey},
+	} {
+		if strings.TrimSpace(provider.credential) == "" {
+			continue
+		}
+		quota, ok := cfg.External.IPGeoQuota(provider.name)
+		if !ok {
+			return fmt.Errorf("%s provider quota is required when its credential is configured", provider.name)
+		}
+		if quota.MaxRequests <= 0 || quota.ReserveRequests <= 0 || quota.ReserveRequests >= quota.MaxRequests {
+			return fmt.Errorf("%s provider quota requires a positive plan maximum and safety reserve below that maximum", provider.name)
+		}
+		if quota.Window <= 0 {
+			return fmt.Errorf("%s provider quota reset window must be positive", provider.name)
+		}
+		if quota.UserMaxMisses <= 0 || quota.UserMaxMisses > quota.AvailableRequests() {
+			return fmt.Errorf("%s per-user miss quota must be positive and no greater than the provider lane", provider.name)
+		}
+	}
 	for name, value := range map[string]string{
 		"LOC_ANDROID_APK_FILENAME":       cfg.Files.UserAPKFilename,
 		"LOC_ANDROID_ADMIN_APK_FILENAME": cfg.Files.AdminAPKFilename,
@@ -196,6 +260,14 @@ func envInt(key string, fallback int) int {
 	return value
 }
 
+func envPositiveInt(key string, fallback int) int {
+	value := envInt(key, fallback)
+	if value <= 0 {
+		return fallback
+	}
+	return value
+}
+
 func envBool(key string, fallback bool) bool {
 	raw := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
 	if raw == "" {
@@ -221,4 +293,13 @@ func envFloat(key string, fallback float64) float64 {
 		return fallback
 	}
 	return value
+}
+
+func loadIPGeoProviderQuota(prefix string, fallback IPGeoProviderQuota) IPGeoProviderQuota {
+	return IPGeoProviderQuota{
+		MaxRequests:     envInt(prefix+"_QUOTA_MAX_REQUESTS", fallback.MaxRequests),
+		ReserveRequests: envInt(prefix+"_QUOTA_RESERVE_REQUESTS", fallback.ReserveRequests),
+		UserMaxMisses:   envInt(prefix+"_QUOTA_USER_MAX_MISSES", fallback.UserMaxMisses),
+		Window:          time.Duration(envInt(prefix+"_QUOTA_WINDOW_SECONDS", int(fallback.Window/time.Second))) * time.Second,
+	}
 }

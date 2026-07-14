@@ -81,18 +81,17 @@ func (handler GroupsHandler) joinByCode(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	ip := httpx.ClientIP(r)
-	locked, err := handler.limits.GroupJoinLocked(r.Context(), scope.User.ID, ip, 30*time.Minute)
+	admitted, exhausted, err := handler.limits.ReserveGroupJoinAttempt(r.Context(), scope.User.ID, ip, 10, 30*time.Minute)
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
-	if locked {
+	if !admitted {
 		httpx.Error(w, httpx.APIError{Status: 423, Message: "组号尝试过多，请 30 分钟后再试。"})
 		return
 	}
 	if !groupCodePattern.MatchString(groupCode) {
-		lockedNow, _ := handler.limits.RecordFailedGroupJoin(r.Context(), scope.User.ID, ip, 10, 30*time.Minute)
-		if lockedNow {
+		if exhausted {
 			httpx.Error(w, httpx.APIError{Status: 423, Message: "组号尝试过多，请 30 分钟后再试。"})
 			return
 		}
@@ -102,8 +101,7 @@ func (handler GroupsHandler) joinByCode(w http.ResponseWriter, r *http.Request, 
 	var groupName string
 	err = handler.db.QueryRowContext(r.Context(), "SELECT group_name FROM family_groups WHERE group_code = ? LIMIT 1", groupCode).Scan(&groupName)
 	if err == sql.ErrNoRows {
-		lockedNow, _ := handler.limits.RecordFailedGroupJoin(r.Context(), scope.User.ID, ip, 10, 30*time.Minute)
-		if lockedNow {
+		if exhausted {
 			httpx.Error(w, httpx.APIError{Status: 423, Message: "组号尝试过多，请 30 分钟后再试。"})
 			return
 		}
@@ -298,21 +296,27 @@ LIMIT 1`, targetUserID, group.GroupName).Scan(&found)
 		httpx.Error(w, httpx.APIError{Status: http.StatusConflict, Message: "该成员属于多个家庭组，请前往工单系统申请重置密码。"})
 		return
 	}
-	hash, err := services.HashPassword(newPassword)
-	if err != nil {
+	if err := handler.updateMemberPasswordAndRevokeSessions(r, targetUserID, newPassword); err != nil {
 		httpx.Error(w, err)
 		return
 	}
-	if err := handler.users.UpdatePasswordHash(r.Context(), targetUserID, hash); err != nil {
-		httpx.Error(w, err)
-		return
-	}
-	_ = handler.users.ClearFailedLogin(r.Context(), targetUserID)
 	id := scope.User.ID
 	_ = handler.users.RecordLog(r.Context(), &id, group.GroupName, "member_password_reset", "家庭组管理员重置成员密码", map[string]any{"target_user_id": targetUserID}, httpx.ClientIP(r), r.UserAgent())
 	targetID := targetUserID
 	_ = handler.users.RecordLog(r.Context(), &targetID, group.GroupName, "password_reset_by_group_owner", "家庭组管理员重置了账号密码", nil, httpx.ClientIP(r), r.UserAgent())
 	handler.respondFreshUser(w, r, scope.User.ID)
+}
+
+func (handler GroupsHandler) updateMemberPasswordAndRevokeSessions(r *http.Request, userID int64, newPassword string) error {
+	hash, err := services.HashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	if err := handler.scope.sessions.Repo.UpdatePasswordAndRevokeUserSessions(r.Context(), userID, hash); err != nil {
+		return err
+	}
+	_ = handler.users.ClearFailedLogin(r.Context(), userID)
+	return nil
 }
 
 func (handler GroupsHandler) renameGroup(w http.ResponseWriter, r *http.Request, scope *userScope, groupID int64, newGroupName string) {

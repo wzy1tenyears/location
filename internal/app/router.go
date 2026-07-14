@@ -30,7 +30,7 @@ func NewRouter(cfg config.Config, db *sql.DB) http.Handler {
 	announcements := handlers.NewAnnouncementHandler(db, sessions)
 	invites := handlers.NewInviteHandler(db)
 	me := handlers.NewMeHandler(db, sessions)
-	settings := handlers.NewSettingsHandler(db, sessions)
+	settings := handlers.NewSettingsHandler(db, sessions, cfg.App.SessionLifetime)
 	locations := handlers.NewLocationsHandler(cfg, db, sessions)
 	history := handlers.NewHistoryHandler(cfg, db, sessions)
 	legal := handlers.NewLegalDocumentsHandler()
@@ -39,6 +39,7 @@ func NewRouter(cfg config.Config, db *sql.DB) http.Handler {
 	environment := handlers.NewEnvironmentHandler(db, sessions)
 	diagnostics := handlers.NewDiagnosticHandler(cfg, db, sessions)
 	downloads := handlers.NewDownloadHandler(cfg, sessions)
+	shares := handlers.NewShareHandler(cfg, db, sessions)
 
 	appOnly := middleware.RequireAppUserAgent(cfg.App)
 	mux.Handle("/api/app-challenge", http.HandlerFunc(challenge.ServeHTTP))
@@ -77,6 +78,12 @@ func NewRouter(cfg config.Config, db *sql.DB) http.Handler {
 	mux.Handle("POST /api/ip-geo", middleware.Chain(http.HandlerFunc(diagnostics.IPGeo), appOnly))
 	mux.Handle("POST /api/ipinfo-lite", middleware.Chain(http.HandlerFunc(diagnostics.IPInfoLite), appOnly))
 	mux.Handle("GET /api/cloudflare-location", middleware.Chain(http.HandlerFunc(diagnostics.CloudflareLocation), appOnly))
+	mux.Handle("GET /api/share", middleware.Chain(http.HandlerFunc(shares.List), appOnly))
+	mux.Handle("POST /api/share", middleware.Chain(http.HandlerFunc(shares.Create), appOnly))
+	mux.Handle("GET /share", http.HandlerFunc(shares.PublicPage))
+	mux.Handle("POST /share", http.HandlerFunc(shares.PublicPage))
+	mux.Handle("GET /share/", http.HandlerFunc(shares.PublicPage))
+	mux.Handle("POST /share/", http.HandlerFunc(shares.PublicPage))
 
 	return middleware.Chain(mux, middleware.Recover, middleware.AccessLog)
 }

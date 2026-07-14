@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/subtle"
 	"database/sql"
 	"net/http"
@@ -17,26 +18,37 @@ import (
 )
 
 type LoginHandler struct {
-	cfg        config.Config
-	users      repositories.UserRepository
-	groups     repositories.GroupRepository
-	devices    repositories.DeviceRepository
-	limits     repositories.AuthLimitRepository
-	rates      repositories.RateLimitRepository
-	challenges repositories.AppChallengeRepository
-	sessions   session.Store
+	cfg                config.Config
+	users              repositories.UserRepository
+	groups             repositories.GroupRepository
+	devices            repositories.DeviceRepository
+	limits             adminLoginAttemptLimiter
+	rates              resettableRateLimiter
+	challenges         repositories.AppChallengeRepository
+	sessions           session.Store
+	checkUserPassword  func(string, string) bool
+	checkAdminPassword func(string) bool
+}
+
+type adminLoginAttemptLimiter interface {
+	ReserveAdminLoginAttempt(ctx context.Context, ip string, limit int, lockWindow time.Duration) (bool, bool, error)
+	ClearFailedAdminLogin(ctx context.Context, ip string) error
 }
 
 func NewLoginHandler(cfg config.Config, db *sql.DB, sessions session.Reader) LoginHandler {
 	return LoginHandler{
-		cfg:        cfg,
-		users:      repositories.NewUserRepository(db),
-		groups:     repositories.NewGroupRepository(db),
-		devices:    repositories.NewDeviceRepository(db),
-		limits:     repositories.NewAuthLimitRepository(db),
-		rates:      repositories.NewRateLimitRepository(db),
-		challenges: repositories.NewAppChallengeRepository(db),
-		sessions:   session.Store{CookieName: sessions.CookieName, Repo: sessions.Repo, Lifetime: cfg.App.SessionLifetime},
+		cfg:               cfg,
+		users:             repositories.NewUserRepository(db),
+		groups:            repositories.NewGroupRepository(db),
+		devices:           repositories.NewDeviceRepository(db),
+		limits:            repositories.NewAuthLimitRepository(db),
+		rates:             repositories.NewRateLimitRepository(db),
+		challenges:        repositories.NewAppChallengeRepository(db),
+		sessions:          session.Store{CookieName: sessions.CookieName, Repo: sessions.Repo, Lifetime: cfg.App.SessionLifetime},
+		checkUserPassword: services.CheckPassword,
+		checkAdminPassword: func(password string) bool {
+			return configuredAdminPasswordMatches(cfg, password)
+		},
 	}
 }
 
@@ -86,29 +98,25 @@ func (handler LoginHandler) Login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler LoginHandler) loginAdmin(w http.ResponseWriter, r *http.Request, req loginRequest) {
-	locked, err := handler.limits.AdminLoginLocked(r.Context(), httpx.ClientIP(r), 30*time.Minute)
+	ip := httpx.ClientIP(r)
+	admitted, exhausted, err := handler.limits.ReserveAdminLoginAttempt(r.Context(), ip, 5, 30*time.Minute)
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
-	if locked {
+	if !admitted {
 		httpx.Error(w, httpx.APIError{Status: 423, Message: "管理员登录尝试过多，请 30 分钟后再试。"})
 		return
 	}
 	if !handler.adminPasswordMatches(req.Password) {
-		lockedNow, err := handler.limits.RecordFailedAdminLogin(r.Context(), httpx.ClientIP(r), 5, 30*time.Minute)
-		if err != nil {
-			httpx.Error(w, err)
-			return
-		}
-		if lockedNow {
+		if exhausted {
 			httpx.Error(w, httpx.APIError{Status: 423, Message: "管理员登录尝试过多，请 30 分钟后再试。"})
 			return
 		}
 		httpx.Error(w, httpx.APIError{Status: http.StatusUnauthorized, Message: "账号或密码错误。"})
 		return
 	}
-	if err := handler.limits.ClearFailedAdminLogin(r.Context(), httpx.ClientIP(r)); err != nil {
+	if err := handler.limits.ClearFailedAdminLogin(r.Context(), ip); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -125,6 +133,18 @@ func (handler LoginHandler) loginAdmin(w http.ResponseWriter, r *http.Request, r
 }
 
 func (handler LoginHandler) loginUser(w http.ResponseWriter, r *http.Request, req loginRequest) {
+	ip := httpx.ClientIP(r)
+	attemptIdentity := userLoginAttemptIdentity(ip, req.Username)
+	allowed, err := handler.rates.Hit(r.Context(), "login_user_password", attemptIdentity, 5, 30*time.Minute)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	if !allowed {
+		httpx.Error(w, httpx.APIError{Status: http.StatusTooManyRequests, Message: "登录尝试过多，请 30 分钟后再试。"})
+		return
+	}
+
 	user, err := handler.users.FindByUsername(r.Context(), req.Username)
 	if err != nil {
 		httpx.Error(w, err)
@@ -134,25 +154,7 @@ func (handler LoginHandler) loginUser(w http.ResponseWriter, r *http.Request, re
 		httpx.Error(w, httpx.APIError{Status: http.StatusUnauthorized, Message: "账号或密码错误。"})
 		return
 	}
-	if user.LoginLockedAt.Valid && user.LoginLockedAt.Time.Before(time.Now().Add(-30*time.Minute)) {
-		_ = handler.users.ClearFailedLogin(r.Context(), user.ID)
-		user.LoginLockedAt.Valid = false
-		user.FailedLoginCount = 0
-	}
-	if user.LoginLockedAt.Valid && user.LoginLockedAt.Time.After(time.Now().Add(-30*time.Minute)) {
-		httpx.Error(w, httpx.APIError{Status: 423, Message: "账号已锁定 30 分钟，请稍后再试。"})
-		return
-	}
-	if !services.CheckPassword(req.Password, user.PasswordHash) {
-		lockedNow, err := handler.users.RecordFailedLogin(r.Context(), *user, 3, time.Now())
-		if err != nil {
-			httpx.Error(w, err)
-			return
-		}
-		if lockedNow {
-			httpx.Error(w, httpx.APIError{Status: 423, Message: "账号已锁定 30 分钟，请稍后再试。"})
-			return
-		}
+	if !handler.userPasswordMatches(req.Password, user.PasswordHash) {
 		httpx.Error(w, httpx.APIError{Status: http.StatusUnauthorized, Message: "账号或密码错误。"})
 		return
 	}
@@ -181,7 +183,11 @@ func (handler LoginHandler) loginUser(w http.ResponseWriter, r *http.Request, re
 		httpx.Error(w, err)
 		return
 	}
-	if _, err := handler.sessions.StartUserSession(w, r, user.ID); err != nil {
+	if err := handler.rates.Clear(r.Context(), "login_user_password", attemptIdentity); err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	if _, err := handler.sessions.StartUserSession(w, r, user.ID, user.PasswordHash); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -196,9 +202,9 @@ func (handler LoginHandler) loginUser(w http.ResponseWriter, r *http.Request, re
 	user.PrivacyPolicyAcceptedAt.Time = acceptedAt
 	user.CrossBorderTransferAcceptedAt.Valid = true
 	user.CrossBorderTransferAcceptedAt.Time = acceptedAt
-	_ = handler.users.TouchPresence(r.Context(), user.ID, user.GroupName, r.UserAgent(), httpx.ClientIP(r))
+	_ = handler.users.TouchPresence(r.Context(), user.ID, user.GroupName, r.UserAgent(), ip)
 	id := user.ID
-	_ = handler.users.RecordLog(r.Context(), &id, user.GroupName, "online", "用户登录", nil, httpx.ClientIP(r), r.UserAgent())
+	_ = handler.users.RecordLog(r.Context(), &id, user.GroupName, "online", "用户登录", nil, ip, r.UserAgent())
 	groups, _ := handler.groups.ForUser(r.Context(), user.ID)
 	httpx.OK(w, map[string]any{
 		"ok":   true,
@@ -262,10 +268,28 @@ func (handler LoginHandler) verifyTurnstile(r *http.Request, token string, purpo
 }
 
 func (handler LoginHandler) adminPasswordMatches(password string) bool {
-	if strings.TrimSpace(handler.cfg.Auth.AdminPasswordHash) != "" {
-		return services.CheckPassword(password, handler.cfg.Auth.AdminPasswordHash)
+	if handler.checkAdminPassword != nil {
+		return handler.checkAdminPassword(password)
 	}
-	return subtle.ConstantTimeCompare([]byte(password), []byte(handler.cfg.Auth.AdminPassword)) == 1
+	return configuredAdminPasswordMatches(handler.cfg, password)
+}
+
+func (handler LoginHandler) userPasswordMatches(password string, hash string) bool {
+	if handler.checkUserPassword != nil {
+		return handler.checkUserPassword(password, hash)
+	}
+	return services.CheckPassword(password, hash)
+}
+
+func configuredAdminPasswordMatches(cfg config.Config, password string) bool {
+	if strings.TrimSpace(cfg.Auth.AdminPasswordHash) != "" {
+		return services.CheckPassword(password, cfg.Auth.AdminPasswordHash)
+	}
+	return subtle.ConstantTimeCompare([]byte(password), []byte(cfg.Auth.AdminPassword)) == 1
+}
+
+func userLoginAttemptIdentity(ip string, username string) string {
+	return ip + "\x00" + strings.ToLower(strings.TrimSpace(username))
 }
 
 func firstMembership(groups []models.Membership) *models.Membership {

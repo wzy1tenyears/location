@@ -16,6 +16,17 @@ $RequiredFiles = @(
     'internal/database/schema_core.sql',
     'internal/database/china_regions_seed.sql',
     'internal/database/migrations/001_app_sessions.sql',
+    'internal/database/migrations/002_location_shares.sql',
+    'internal/database/migrations/003_location_share_plaintext.sql',
+    'internal/database/migrations/004_location_share_quota_indexes.sql',
+    'internal/database/migrations/005_support_ticket_quota_indexes.sql',
+    'internal/database/migrations/006_group_code_entropy.sql',
+    'internal/database/migrations/007_heartbeat_log_indexes.sql',
+    'internal/database/migrations/008_app_sessions_user_id_index.sql',
+    'internal/database/migrations/009_location_retention_index.sql',
+    'internal/database/migrations/010_environment_report_retention_index.sql',
+    'deploy/family-location-go.service.sample',
+    'deploy/nginx-go-backend.sample.conf',
     'internal/httpx/json.go',
     'internal/httpx/request.go',
     'internal/middleware/middleware.go',
@@ -29,11 +40,14 @@ $RequiredFiles = @(
     'internal/handlers/tickets.go',
     'internal/handlers/p2p.go',
     'internal/handlers/webviews.go',
+	'internal/handlers/shares.go',
     'internal/handlers/admin_manage.go',
     'internal/handlers/admin_summary.go',
     'internal/handlers/templates/history_map.html',
     'internal/handlers/templates/amap_reverse.html',
     'internal/handlers/templates/webrtc_probe.html',
+	'internal/handlers/templates/location_share.html',
+	'internal/handlers/templates/location_share_unlock.html',
     'internal/handlers/announcements.go',
     'internal/handlers/invites.go',
     'internal/handlers/me.go',
@@ -59,6 +73,7 @@ $RequiredFiles = @(
     'internal/repositories/app_challenges.go',
     'internal/repositories/rate_limits.go',
     'internal/repositories/settings.go',
+    'internal/repositories/support_tickets.go',
     'internal/httpx/client.go',
     'internal/services/users.go',
     'internal/services/passwords.go',
@@ -67,11 +82,13 @@ $RequiredFiles = @(
     'internal/models/models.go'
     'internal/session/store.go'
 	'internal/repositories/sessions.go'
+	'internal/repositories/shares.go'
 	'internal/config/config_test.go'
 	'internal/database/schema_test.go'
 	'internal/httpx/request_test.go'
 	'internal/session/session_test.go'
 	'internal/handlers/webviews_test.go'
+	'internal/handlers/shares_test.go'
 )
 
 foreach ($File in $RequiredFiles) {
@@ -96,6 +113,14 @@ foreach ($Pattern in $ForbiddenSecretPatterns) {
     if ($AllText -match [regex]::Escape($Pattern)) {
         throw 'v3 contains a private secret-like literal.'
     }
+}
+
+$NginxSampleText = Get-Content -LiteralPath (Join-Path $Root 'deploy/nginx-go-backend.sample.conf') -Raw -Encoding UTF8
+if ($NginxSampleText -notmatch 'include /etc/nginx/snippets/family-location-cloudflare-realip\.conf;') {
+    throw 'public Nginx sample must require the external Cloudflare real-IP snippet.'
+}
+if ($NginxSampleText -match 'location \^~ /_ShareMapService/') {
+    throw 'public Nginx sample must not include a catch-all third-party map proxy.'
 }
 
 $RouterText = Get-Content -LiteralPath (Join-Path $Root 'internal/app/router.go') -Raw -Encoding UTF8
@@ -131,6 +156,8 @@ $ExpectedRoutes = @(
     '/api/ip-geo',
     '/api/ipinfo-lite',
     '/api/cloudflare-location',
+	'/api/share',
+	'/share',
     '/api/'
 )
 
@@ -148,6 +175,40 @@ if ($UpdateText -notmatch 'sessions\.IsAdmin') {
 $ConfigText = Get-Content -LiteralPath (Join-Path $Root 'internal/config/config.go') -Raw -Encoding UTF8
 if ($ConfigText -notmatch 'LOC_APP_SIGNING_SECRET') {
     throw 'v3 config must expose a dedicated app signing secret'
+}
+
+$IPGeoQuotaPrefixes = @(
+    'LOC_IPINFO_LITE',
+    'LOC_IP2LOCATION',
+    'LOC_IPDATA',
+    'LOC_IPREGISTRY'
+)
+$IPGeoQuotaSuffixes = @(
+    '_QUOTA_MAX_REQUESTS',
+    '_QUOTA_RESERVE_REQUESTS',
+    '_QUOTA_USER_MAX_MISSES',
+    '_QUOTA_WINDOW_SECONDS'
+)
+foreach ($Prefix in $IPGeoQuotaPrefixes) {
+    if ($ConfigText -notmatch [regex]::Escape($Prefix)) {
+        throw "v3 config is missing provider quota prefix: $Prefix"
+    }
+}
+foreach ($Suffix in $IPGeoQuotaSuffixes) {
+    if ($ConfigText -notmatch [regex]::Escape($Suffix)) {
+        throw "v3 config is missing optional provider quota suffix: $Suffix"
+    }
+}
+
+$ReadmeText = Get-Content -LiteralPath (Join-Path $Root 'README.md') -Raw -Encoding UTF8
+foreach ($Suffix in $IPGeoQuotaSuffixes) {
+    if ($ReadmeText -notmatch [regex]::Escape($Suffix)) {
+        throw "v3 README is missing optional provider quota documentation: $Suffix"
+    }
+}
+$ServiceSampleText = Get-Content -LiteralPath (Join-Path $Root 'deploy/family-location-go.service.sample') -Raw -Encoding UTF8
+if ($ServiceSampleText -notmatch 'Provider quota overrides are optional') {
+    throw 'v3 systemd sample must keep provider quota overrides optional'
 }
 
 foreach ($Path in @(

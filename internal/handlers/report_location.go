@@ -97,9 +97,10 @@ func (handler ReportLocationHandler) Report(w http.ResponseWriter, r *http.Reque
 	}
 
 	diagnostics := sanitizeAddressDiagnostics(mapFromAny(data["address_diagnostics"]))
-	diagnosticsJSON := marshalOptional(diagnostics)
-	if len(diagnosticsJSON) > handler.cfg.Location.MaxDiagnosticsBytes {
-		diagnosticsJSON = diagnosticsJSON[:handler.cfg.Location.MaxDiagnosticsBytes]
+	diagnosticsJSON, err := marshalAddressDiagnostics(diagnostics, handler.cfg.Location.MaxDiagnosticsBytes)
+	if err != nil {
+		httpx.Error(w, err)
+		return
 	}
 	addressMismatch := diagnostics != nil && boolFromMap(diagnostics, "mismatch")
 
@@ -552,7 +553,8 @@ func sanitizeAddressDiagnostics(diagnostics map[string]any) map[string]any {
 			clean := map[string]any{"type": sourceType}
 			for key, limit := range map[string]int{
 				"name": 40, "provider": 80, "source": 80, "source_region": 40, "coordinate_system": 16,
-				"address": 600, "detail": 240, "poi": 120, "city": 80, "region": 80, "country": 80,
+				"address": 600, "detail": 240, "poi": 120, "district": 120, "street": 160, "postal_code": 32,
+				"city": 80, "region": 80, "country": 80,
 				"ip": 80, "ipv4": 80, "ipv6": 80, "server_ip": 80, "stun_server": 120, "stun_label": 80,
 				"stun_scope": 20, "candidate_type": 24, "asn": 80, "isp": 120, "org": 120, "carrier": 120,
 			} {
@@ -570,12 +572,12 @@ func sanitizeAddressDiagnostics(diagnostics map[string]any) map[string]any {
 			} else {
 				clean["longitude"] = nil
 			}
+			if value, ok := validDiagnosticAccuracy(source["accuracy"]); ok {
+				clean["accuracy"] = value
+			}
 			clean["variants"] = sanitizeProbeList(source["variants"], "ip_variant")
 			clean["candidates"] = sanitizeProbeList(source["candidates"], "webrtc_candidate")
 			sources = append(sources, clean)
-			if len(sources) >= 6 {
-				break
-			}
 		}
 	}
 	mismatch := diagnosticsPlaceMismatch(sources)
@@ -594,8 +596,14 @@ func sanitizeAddressDiagnostics(diagnostics map[string]any) map[string]any {
 		"complete":                    truthyAny(diagnostics["complete"]),
 		"preferred_source":            stringFromMap(diagnostics, "preferred_source", 24),
 		"preferred_address":           stringFromMap(diagnostics, "preferred_address", 600),
+		"preferred_country":           stringFromMap(diagnostics, "preferred_country", 80),
+		"preferred_region":            stringFromMap(diagnostics, "preferred_region", 80),
 		"preferred_city":              stringFromMap(diagnostics, "preferred_city", 80),
 		"preferred_poi":               stringFromMap(diagnostics, "preferred_poi", 120),
+		"preferred_detail":            stringFromMap(diagnostics, "preferred_detail", 240),
+		"preferred_district":          stringFromMap(diagnostics, "preferred_district", 120),
+		"preferred_street":            stringFromMap(diagnostics, "preferred_street", 160),
+		"preferred_postal_code":       stringFromMap(diagnostics, "preferred_postal_code", 32),
 		"preferred_coordinate_system": stringFromMap(diagnostics, "preferred_coordinate_system", 16),
 		"sources":                     sources,
 	}
@@ -625,7 +633,12 @@ func sanitizeProbeList(value any, kind string) []map[string]any {
 		}
 		entry := map[string]any{}
 		if kind == "ip_variant" {
-			for key, limit := range map[string]int{"label": 24, "ip": 80, "address": 240, "city": 80, "region": 80, "country": 80, "provider": 80, "source": 80, "source_region": 40, "asn": 80, "isp": 120, "org": 120, "carrier": 120} {
+			for key, limit := range map[string]int{
+				"label": 24, "ip": 80, "server_ip": 80, "ipv4": 80, "ipv6": 80,
+				"address": 600, "detail": 240, "poi": 120, "district": 120, "street": 160, "postal_code": 32,
+				"city": 80, "region": 80, "country": 80, "provider": 80, "source": 80, "source_region": 40,
+				"coordinate_system": 16, "asn": 80, "isp": 120, "org": 120, "carrier": 120,
+			} {
 				addString(entry, key, truncateString(fmt.Sprint(item[key]), limit))
 			}
 			entry["domestic_source"] = truthyAny(item["domestic_source"])
@@ -641,16 +654,292 @@ func sanitizeProbeList(value any, kind string) []map[string]any {
 				entry["longitude"] = nil
 			}
 		} else {
-			for key, limit := range map[string]int{"ip": 80, "candidate_type": 24, "stun_server": 120, "stun_label": 80, "stun_scope": 20} {
+			for key, limit := range map[string]int{
+				"ip": 80, "server_ip": 80, "ipv4": 80, "ipv6": 80,
+				"candidate_type": 24, "stun_server": 120, "stun_label": 80, "stun_scope": 20,
+				"address": 600, "detail": 240, "poi": 120, "district": 120, "street": 160, "postal_code": 32,
+				"city": 80, "region": 80, "country": 80, "provider": 80, "source": 80, "source_region": 40,
+				"coordinate_system": 16, "asn": 80, "isp": 120, "org": 120, "carrier": 120,
+			} {
 				addString(entry, key, truncateString(fmt.Sprint(item[key]), limit))
 			}
+			entry["domestic_source"] = truthyAny(item["domestic_source"])
+			entry["mobile_network"] = truthyAny(item["mobile_network"])
+			if number, ok := numericAny(item["latitude"]); ok && number >= -90 && number <= 90 {
+				entry["latitude"] = number
+			}
+			if number, ok := numericAny(item["longitude"]); ok && number >= -180 && number <= 180 {
+				entry["longitude"] = number
+			}
+		}
+		if number, ok := validDiagnosticAccuracy(item["accuracy"]); ok {
+			entry["accuracy"] = number
 		}
 		clean = append(clean, entry)
-		if len(clean) >= 12 {
-			break
-		}
 	}
 	return clean
+}
+
+func validDiagnosticAccuracy(value any) (float64, bool) {
+	number, ok := numericAny(value)
+	return number, ok && !math.IsNaN(number) && !math.IsInf(number, 0) && number >= 0
+}
+
+func marshalAddressDiagnostics(diagnostics map[string]any, maxBytes int) (string, error) {
+	if len(diagnostics) == 0 {
+		return "", nil
+	}
+	if maxBytes <= 0 {
+		return "", httpx.Unprocessable("位置诊断数据大小限制无效。")
+	}
+
+	bounded, ok := cloneAddressDiagnosticValue(diagnostics).(map[string]any)
+	if !ok {
+		return "", httpx.Unprocessable("位置诊断数据格式不正确。")
+	}
+
+	marshal := func() (string, error) {
+		raw, err := json.Marshal(bounded)
+		if err != nil {
+			return "", err
+		}
+		return string(raw), nil
+	}
+	payload, err := marshal()
+	if err != nil {
+		return "", err
+	}
+	if len(payload) <= maxBytes {
+		return payload, nil
+	}
+
+	// Drop only redundant evidence, one item at a time. The best coherent
+	// candidate remains available for every source throughout compaction.
+	if sources, ok := bounded["sources"].([]map[string]any); ok {
+		for sourceIndex := range sources {
+			for _, key := range []string{"candidates", "variants"} {
+				items := diagnosticEvidenceMaps(sources[sourceIndex][key])
+				for len(items) > 1 {
+					bestIndex := bestDiagnosticEvidenceIndex(items)
+					removeIndex := len(items) - 1
+					if removeIndex == bestIndex {
+						removeIndex--
+					}
+					items = append(items[:removeIndex], items[removeIndex+1:]...)
+					sources[sourceIndex][key] = items
+					payload, err = marshal()
+					if err != nil {
+						return "", err
+					}
+					if len(payload) <= maxBytes {
+						return payload, nil
+					}
+				}
+			}
+		}
+
+		// If the single retained nested candidate is the most precise package,
+		// promote that whole package. Never combine fields from different IP or
+		// STUN identities merely to squeeze under the byte limit.
+		for sourceIndex := range sources {
+			promoted := promoteBestDiagnosticPackage(sources[sourceIndex])
+			if promoted == nil {
+				continue
+			}
+			sources[sourceIndex] = promoted
+			payload, err = marshal()
+			if err != nil {
+				return "", err
+			}
+			if len(payload) <= maxBytes {
+				return payload, nil
+			}
+		}
+	}
+
+	return "", httpx.Unprocessable("位置诊断数据过大，请缩减后重试。")
+}
+
+func cloneAddressDiagnosticValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(typed))
+		for key, nested := range typed {
+			cloned[key] = cloneAddressDiagnosticValue(nested)
+		}
+		return cloned
+	case []map[string]any:
+		cloned := make([]map[string]any, len(typed))
+		for index := range typed {
+			cloned[index] = cloneAddressDiagnosticValue(typed[index]).(map[string]any)
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(typed))
+		for index := range typed {
+			cloned[index] = cloneAddressDiagnosticValue(typed[index])
+		}
+		return cloned
+	default:
+		return value
+	}
+}
+
+func diagnosticEvidenceMaps(value any) []map[string]any {
+	switch typed := value.(type) {
+	case []map[string]any:
+		return typed
+	case []any:
+		items := make([]map[string]any, 0, len(typed))
+		for _, rawItem := range typed {
+			if item, ok := rawItem.(map[string]any); ok {
+				items = append(items, item)
+			}
+		}
+		return items
+	default:
+		return nil
+	}
+}
+
+func bestDiagnosticEvidenceIndex(items []map[string]any) int {
+	bestIndex := 0
+	for index := 1; index < len(items); index++ {
+		if !handlerDiagnosticPackageBetter(items[bestIndex], items[index]) {
+			bestIndex = index
+		}
+	}
+	return bestIndex
+}
+
+func promoteBestDiagnosticPackage(source map[string]any) map[string]any {
+	root := cloneAddressDiagnosticValue(source).(map[string]any)
+	delete(root, "variants")
+	delete(root, "candidates")
+	best := root
+	rootIdentity := handlerDiagnosticNetworkIdentity(root)
+	rootSTUN := handlerDiagnosticIdentityText(root["stun_server"])
+
+	for _, key := range []string{"variants", "candidates"} {
+		items := diagnosticEvidenceMaps(source[key])
+		if len(items) == 0 {
+			continue
+		}
+		candidate := cloneAddressDiagnosticValue(items[bestDiagnosticEvidenceIndex(items)]).(map[string]any)
+		candidateIdentity := handlerDiagnosticNetworkIdentity(candidate)
+		candidateSTUN := handlerDiagnosticIdentityText(candidate["stun_server"])
+		if candidateIdentity == "" {
+			return nil
+		}
+		if rootIdentity != "" && candidateIdentity != rootIdentity {
+			// A child with another address is a distinct identity. It remains as
+			// nested evidence; silently folding it into the parent is forbidden.
+			return nil
+		}
+		if rootSTUN != "" && candidateSTUN != "" && rootSTUN != candidateSTUN {
+			return nil
+		}
+		candidate["type"] = root["type"]
+		if !handlerDiagnosticPackageBetter(best, candidate) {
+			best = candidate
+		}
+	}
+	return best
+}
+
+func handlerDiagnosticNetworkIdentity(value map[string]any) string {
+	for _, key := range []string{"ip", "server_ip", "ipv4", "ipv6"} {
+		if text := handlerDiagnosticIdentityText(value[key]); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func handlerDiagnosticIdentityText(value any) string {
+	text := strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
+	if text == "<nil>" {
+		return ""
+	}
+	return text
+}
+
+func handlerDiagnosticPackageBetter(candidate, selected map[string]any) bool {
+	candidatePrecision := handlerDiagnosticPlacePrecision(candidate)
+	selectedPrecision := handlerDiagnosticPlacePrecision(selected)
+	if candidatePrecision != selectedPrecision {
+		return candidatePrecision > selectedPrecision
+	}
+	candidateFields := handlerDiagnosticPlaceFieldCount(candidate)
+	selectedFields := handlerDiagnosticPlaceFieldCount(selected)
+	if candidateFields != selectedFields {
+		return candidateFields > selectedFields
+	}
+	candidateCoordinates := handlerDiagnosticCoordinatesPresent(candidate)
+	selectedCoordinates := handlerDiagnosticCoordinatesPresent(selected)
+	if candidateCoordinates != selectedCoordinates {
+		return candidateCoordinates
+	}
+	candidateAccuracy, candidateAccuracyOK := validDiagnosticAccuracy(candidate["accuracy"])
+	selectedAccuracy, selectedAccuracyOK := validDiagnosticAccuracy(selected["accuracy"])
+	if candidateAccuracyOK != selectedAccuracyOK {
+		return candidateAccuracyOK
+	}
+	if candidateAccuracyOK && candidateAccuracy != selectedAccuracy {
+		return candidateAccuracy < selectedAccuracy
+	}
+	candidateLength := handlerDiagnosticPlaceTextLength(candidate)
+	selectedLength := handlerDiagnosticPlaceTextLength(selected)
+	return candidateLength > selectedLength
+}
+
+func handlerDiagnosticPlacePrecision(value map[string]any) int {
+	precision := 0
+	for level, keys := range [][]string{
+		{"country", "region"},
+		{"city"},
+		{"district"},
+		{"address"},
+		{"detail", "poi", "street", "postal_code"},
+	} {
+		for _, key := range keys {
+			if strings.TrimSpace(fmt.Sprint(value[key])) != "" && fmt.Sprint(value[key]) != "<nil>" && level+1 > precision {
+				precision = level + 1
+			}
+		}
+	}
+	return precision
+}
+
+func handlerDiagnosticPlaceFieldCount(value map[string]any) int {
+	count := 0
+	for _, key := range []string{"country", "region", "city", "district", "address", "detail", "poi", "street", "postal_code"} {
+		text := strings.TrimSpace(fmt.Sprint(value[key]))
+		if text != "" && text != "<nil>" {
+			count++
+		}
+	}
+	return count
+}
+
+func handlerDiagnosticPlaceTextLength(value map[string]any) int {
+	length := 0
+	for _, key := range []string{"country", "region", "city", "district", "address", "detail", "poi", "street", "postal_code"} {
+		text := strings.TrimSpace(fmt.Sprint(value[key]))
+		if text != "<nil>" {
+			length += len([]rune(text))
+		}
+	}
+	return length
+}
+
+func handlerDiagnosticCoordinatesPresent(value map[string]any) bool {
+	latitude, latitudeOK := numericAny(value["latitude"])
+	longitude, longitudeOK := numericAny(value["longitude"])
+	return latitudeOK && longitudeOK && !math.IsNaN(latitude) && !math.IsInf(latitude, 0) &&
+		!math.IsNaN(longitude) && !math.IsInf(longitude, 0) &&
+		latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180 &&
+		(latitude != 0 || longitude != 0)
 }
 
 func diagnosticsPlaceMismatch(sources []map[string]any) bool {

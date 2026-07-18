@@ -8,6 +8,13 @@ v3 是独立的 Go 后端目录，当前目标是承接线上全部 API，并让
 - `/api/` 应直接反向代理到 Go 服务。
 - 后台管理走 `android-admin-client` 原生界面；遗留网页后台路径应在 Nginx 上显式返回 `410 Gone`。
 - `POST /api/share` 创建带分享码和有效期的位置分享；公开 `/share?token=...` 页面只有在分享码验证通过后才返回所选地图与历史位置数据。
+- 明文历史按成员以首次坐标为锚点合并 25 米内的连续上报，并返回首次/末次上报时间、停留时长和上报次数；总数、分页与地图条数均以合并结果计算。
+- App 可请求保留窗口内完整的原始历史快照，在客户端解密 P2P 记录后重算停留；大组通过 `/api/history-members` 分页选择成员，超出快照护栏时返回明确错误而不是静默截断。
+- 新家庭组号和默认邀请码均为 8 位小写字母数字；旧 32 位十六进制组号继续作为唯一别名兼容读取，自定义邀请码支持 4 至 64 位字母数字。
+
+## 公开隐私边界
+
+登录后的私有历史会保留 IP/WebRTC 探测来源中可用的精确地址、坐标和候选证据，以便 App 展示诊断标记。公开分享则由服务端重新投影到严格白名单，只保留成员显示名、时间、公开地图坐标、城市、地址和必要的坐标系信息；`sources`、`variants`、`candidates`、IP 地址、WebRTC/STUN 与其他网络诊断字段不会进入公开分享响应，纯 IP 文本也不会作为地址回退公开。
 
 ## 目录定位
 
@@ -26,6 +33,7 @@ v3 是独立的 Go 后端目录，当前目标是承接线上全部 API，并让
 - `LOC_DB_NAME`
 - `LOC_DB_USER`
 - `LOC_DB_PASS`
+- `LOC_GROUP_CODE_BACKFILL_ENABLED`
 - `LOC_APP_SIGNING_SECRET`
 - `LOC_PUBLIC_BASE_DIR`
 - `LOC_ANDROID_VERSION_CODE`
@@ -66,6 +74,7 @@ go run .\cmd\server
 当前 v3 已覆盖当前线上所需 API。
 当前会话也已由 Go 自己管理，不再依赖旧文件式 session 目录。
 数据库首次启动使用 `schema_core.sql` 建立基础表，后续结构变化按 `internal/database/migrations/` 中的版本文件顺序执行并记录到 `schema_migrations`。
+`LOC_GROUP_CODE_BACKFILL_ENABLED` 默认启用：启动时会在数据库命名锁内把旧组号迁移为 8 位新组号，并保留旧值作为唯一别名；分阶段回滚准备期间可暂时设为 `false`，此时新写入仍使用旧 32 位格式。
 
 ## 验证
 

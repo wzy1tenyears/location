@@ -107,12 +107,13 @@ type LocationConfig struct {
 }
 
 type DatabaseConfig struct {
-	Host    string
-	Port    int
-	Name    string
-	User    string
-	Pass    string
-	Charset string
+	Host                     string
+	Port                     int
+	Name                     string
+	User                     string
+	Pass                     string
+	Charset                  string
+	GroupCodeBackfillEnabled bool
 }
 
 func Load() Config {
@@ -173,12 +174,13 @@ func Load() Config {
 			MaxDiagnosticsBytes:      envInt("LOC_MAX_ADDRESS_DIAGNOSTICS_BYTES", 12000),
 		},
 		Database: DatabaseConfig{
-			Host:    env("LOC_DB_HOST", "127.0.0.1"),
-			Port:    envInt("LOC_DB_PORT", 3306),
-			Name:    env("LOC_DB_NAME", "family_loc"),
-			User:    env("LOC_DB_USER", "family_loc"),
-			Pass:    env("LOC_DB_PASS", ""),
-			Charset: env("LOC_DB_CHARSET", "utf8mb4"),
+			Host:                     env("LOC_DB_HOST", "127.0.0.1"),
+			Port:                     envInt("LOC_DB_PORT", 3306),
+			Name:                     env("LOC_DB_NAME", "family_loc"),
+			User:                     env("LOC_DB_USER", "family_loc"),
+			Pass:                     env("LOC_DB_PASS", ""),
+			Charset:                  env("LOC_DB_CHARSET", "utf8mb4"),
+			GroupCodeBackfillEnabled: envBool("LOC_GROUP_CODE_BACKFILL_ENABLED", true),
 		},
 	}
 }

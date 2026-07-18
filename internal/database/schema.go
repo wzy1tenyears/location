@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -15,19 +16,42 @@ import (
 var schemaFiles embed.FS
 
 func EnsureSchema(ctx context.Context, db *sql.DB) error {
-	if err := execEmbeddedSQL(ctx, db, "schema_core.sql"); err != nil {
+	return prepareSchema(ctx, db, false)
+}
+
+func prepareSchema(ctx context.Context, db *sql.DB, backfillGroupCodes bool) error {
+	return withMySQLNamedLock(ctx, db, schemaPreparationLockName, schemaPreparationLockWait, func(conn *sql.Conn) error {
+		if err := ensureSchemaOnConn(ctx, conn); err != nil {
+			return err
+		}
+		if backfillGroupCodes {
+			if err := backfillLegacyGroupCodes(ctx, conn); err != nil {
+				return fmt.Errorf("backfill legacy group codes: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+func ensureSchemaOnConn(ctx context.Context, conn *sql.Conn) error {
+	if err := execEmbeddedSQL(ctx, conn, "schema_core.sql"); err != nil {
 		return fmt.Errorf("apply core schema: %w", err)
 	}
-	if err := applyMigrations(ctx, db); err != nil {
+	if err := applyMigrations(ctx, conn); err != nil {
 		return fmt.Errorf("apply migrations: %w", err)
 	}
-	if err := ensureChinaRegions(ctx, db); err != nil {
+	if err := ensureChinaRegions(ctx, conn); err != nil {
 		return fmt.Errorf("apply china regions seed: %w", err)
 	}
 	return nil
 }
 
-func ensureChinaRegions(ctx context.Context, db *sql.DB) error {
+type schemaExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func ensureChinaRegions(ctx context.Context, executor schemaExecutor) error {
 	raw, err := schemaFiles.ReadFile("china_regions_seed.sql")
 	if err != nil {
 		return err
@@ -43,18 +67,18 @@ func ensureChinaRegions(ctx context.Context, db *sql.DB) error {
 	}
 
 	var count int
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM china_regions").Scan(&count)
+	err = executor.QueryRowContext(ctx, "SELECT COUNT(*) FROM china_regions").Scan(&count)
 	if err == nil && count >= expected {
 		return nil
 	}
 	if err != nil && !missingTableError(err) {
 		return err
 	}
-	return execEmbeddedSQL(ctx, db, "china_regions_seed.sql")
+	return execEmbeddedSQL(ctx, executor, "china_regions_seed.sql")
 }
 
-func applyMigrations(ctx context.Context, db *sql.DB) error {
-	if _, err := db.ExecContext(ctx, `
+func applyMigrations(ctx context.Context, executor schemaExecutor) error {
+	if _, err := executor.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS schema_migrations (
 	version VARCHAR(120) NOT NULL PRIMARY KEY,
 	applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -73,26 +97,17 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		}
 		version := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 		var applied int
-		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = ?", version).Scan(&applied); err != nil {
+		if err := executor.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = ?", version).Scan(&applied); err != nil {
 			return err
 		}
 		if applied > 0 {
 			continue
 		}
-		conn, err := db.Conn(ctx)
-		if err != nil {
-			return fmt.Errorf("migration %s connection: %w", version, err)
-		}
-		if err := execEmbeddedSQL(ctx, conn, "migrations/"+entry.Name()); err != nil {
-			_ = conn.Close()
+		if err := execEmbeddedSQL(ctx, executor, "migrations/"+entry.Name()); err != nil {
 			return fmt.Errorf("migration %s: %w", version, err)
 		}
-		if _, err := conn.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", version); err != nil {
-			_ = conn.Close()
+		if _, err := executor.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", version); err != nil {
 			return fmt.Errorf("record migration %s: %w", version, err)
-		}
-		if err := conn.Close(); err != nil {
-			return fmt.Errorf("close migration %s connection: %w", version, err)
 		}
 	}
 	return nil
@@ -158,5 +173,9 @@ func missingTableError(err error) bool {
 func EnsureSchemaWithTimeout(db *sql.DB) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	return EnsureSchema(ctx, db)
+	err := EnsureSchema(ctx, db)
+	if err != nil && errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("prepare schema timed out: %w", err)
+	}
+	return err
 }

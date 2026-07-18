@@ -80,14 +80,73 @@ func (repo GroupRepository) MembershipForUser(ctx context.Context, userID int64,
 }
 
 func (repo GroupRepository) Members(ctx context.Context, groupName string) ([]models.GroupMember, error) {
-	const query = `
+	return repo.membersQuery(ctx, `
 SELECT u.id AS user_id, u.username, u.display_name, ug.role
 FROM user_groups ug
 INNER JOIN users u ON u.id = ug.user_id
 WHERE ug.group_name = ? AND u.is_active = 1
-ORDER BY ug.role ASC, u.username ASC`
+		ORDER BY ug.role ASC, u.username ASC`, groupName)
+}
 
-	rows, err := repo.db.QueryContext(ctx, query, groupName)
+// MembersBounded reads one extra row when callers need an exact limit/overflow
+// decision without materializing an unbounded group membership list.
+func (repo GroupRepository) MembersBounded(ctx context.Context, groupName string, limit int) ([]models.GroupMember, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	return repo.membersQuery(ctx, `
+SELECT u.id AS user_id, u.username, u.display_name, ug.role
+FROM user_groups ug
+INNER JOIN users u ON u.id = ug.user_id
+WHERE ug.group_name = ? AND u.is_active = 1
+ORDER BY ug.role ASC, u.username ASC
+LIMIT ?`, groupName, limit)
+}
+
+func (repo GroupRepository) MembersPage(ctx context.Context, groupName string, limit int, offset int) ([]models.GroupMember, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return repo.membersQuery(ctx, `
+SELECT u.id AS user_id, u.username, u.display_name, ug.role
+FROM user_groups ug
+INNER JOIN users u ON u.id = ug.user_id
+WHERE ug.group_name = ? AND u.is_active = 1
+ORDER BY ug.role ASC, u.username ASC
+LIMIT ? OFFSET ?`, groupName, limit, offset)
+}
+
+func (repo GroupRepository) CountMembers(ctx context.Context, groupName string) (int, error) {
+	var count int
+	err := repo.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM user_groups ug
+INNER JOIN users u ON u.id = ug.user_id
+WHERE ug.group_name = ? AND u.is_active = 1`, groupName).Scan(&count)
+	return count, err
+}
+
+func (repo GroupRepository) Member(ctx context.Context, groupName string, userID int64) (*models.GroupMember, error) {
+	rows, err := repo.membersQuery(ctx, `
+SELECT u.id AS user_id, u.username, u.display_name, ug.role
+FROM user_groups ug
+INNER JOIN users u ON u.id = ug.user_id
+WHERE ug.group_name = ? AND ug.user_id = ? AND u.is_active = 1
+LIMIT 1`, groupName, userID)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return &rows[0], nil
+}
+
+func (repo GroupRepository) membersQuery(ctx context.Context, query string, args ...any) ([]models.GroupMember, error) {
+	rows, err := repo.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

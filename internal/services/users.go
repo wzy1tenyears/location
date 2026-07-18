@@ -106,6 +106,12 @@ func LocationPayload(location models.Location, staleSeconds int) map[string]any 
 		payload["id"] = location.ID
 		payload["created_at"] = FormatDatetime(location.CreatedAt)
 	}
+	if !location.FirstReportedAt.IsZero() {
+		payload["first_reported_at"] = FormatDatetime(location.FirstReportedAt)
+		payload["last_reported_at"] = FormatDatetime(location.LastReportedAt)
+		payload["stay_duration_seconds"] = location.StayDurationSeconds
+		payload["report_count"] = location.ReportCount
+	}
 	return payload
 }
 

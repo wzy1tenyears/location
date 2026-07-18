@@ -269,7 +269,7 @@ func TestAdministratorPasswordResetRevokesAllTargetSessions(t *testing.T) {
 
 	db, reader, closeDB := openPasswordSessionDB(t, state)
 	defer closeDB()
-	handler := NewAdminManageHandler(db, reader)
+	handler := NewAdminManageHandler(db, reader, true)
 	request := httptest.NewRequest(http.MethodPost, "/api/admin/manage", nil)
 	message, err := handler.resetPassword(request, map[string]any{
 		"user_id":      userID,

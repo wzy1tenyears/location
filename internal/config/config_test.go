@@ -62,6 +62,31 @@ func TestLoadPreservesPositiveLocationHistoryLimit(t *testing.T) {
 	}
 }
 
+func TestLoadEnablesGroupCodeBackfillByDefault(t *testing.T) {
+	t.Setenv("LOC_GROUP_CODE_BACKFILL_ENABLED", "")
+	if !Load().Database.GroupCodeBackfillEnabled {
+		t.Fatal("group-code backfill is disabled by default")
+	}
+}
+
+func TestLoadAllowsGroupCodeBackfillToBeDisabledForStagedDeployment(t *testing.T) {
+	for _, value := range []string{"0", "false", "no", "off"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("LOC_GROUP_CODE_BACKFILL_ENABLED", value)
+			if Load().Database.GroupCodeBackfillEnabled {
+				t.Fatalf("group-code backfill remained enabled for %q", value)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsAmbiguousGroupCodeBackfillToggleByUsingSafeDefault(t *testing.T) {
+	t.Setenv("LOC_GROUP_CODE_BACKFILL_ENABLED", "maybe")
+	if !Load().Database.GroupCodeBackfillEnabled {
+		t.Fatal("invalid group-code backfill toggle disabled the default migration")
+	}
+}
+
 func validIPGeoProviderQuota() IPGeoProviderQuota {
 	return IPGeoProviderQuota{
 		MaxRequests:     1000,

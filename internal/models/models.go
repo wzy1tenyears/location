@@ -95,4 +95,11 @@ type Location struct {
 	P2PKeyVersion      int
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
+	// History stay metadata is serialized for Android as first_reported_at,
+	// last_reported_at, stay_duration_seconds, and report_count. CreatedAt
+	// remains the latest raw report time for backward compatibility.
+	FirstReportedAt     time.Time
+	LastReportedAt      time.Time
+	StayDurationSeconds int64
+	ReportCount         int
 }

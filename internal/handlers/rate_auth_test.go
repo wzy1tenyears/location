@@ -185,25 +185,59 @@ func TestInviteCheckAppliesSharedQuota(t *testing.T) {
 	}
 }
 
-func TestRandomGroupCodeCarries128Bits(t *testing.T) {
+func TestRandomGroupCodeUsesEightUnbiasedLowerAlphaNumericCharacters(t *testing.T) {
 	code, err := randomGroupCode(bytes.NewReader([]byte{
-		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+		0xfc, 0xfd, 0xfe, 0xff,
+		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x23,
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code != "000102030405060708090a0b0c0d0e0f" {
+	if code != "0123456z" {
 		t.Fatalf("randomGroupCode() = %q", code)
 	}
-	if len(code) != 32 || !groupCodePattern.MatchString(code) {
-		t.Fatalf("generated code %q does not encode 128 bits as 32 hex characters", code)
+	if len(code) != groupCodeLength || !groupCodePattern.MatchString(code) {
+		t.Fatalf("generated code %q is not an 8-character group code", code)
 	}
 }
 
 func TestRandomGroupCodePropagatesEntropySourceFailure(t *testing.T) {
-	if _, err := randomGroupCode(bytes.NewReader(make([]byte, groupCodeBytes-1))); err == nil {
+	if _, err := randomGroupCode(bytes.NewReader(make([]byte, groupCodeLength-1))); err == nil {
 		t.Fatal("short entropy source was silently accepted")
+	}
+}
+
+func TestStagedGroupCodeWriteModeKeepsRollbackCompatibility(t *testing.T) {
+	legacy, err := randomGroupCodeForMode(bytes.NewReader(make([]byte, legacyGroupCodeByteLength)), groupCodeModeForBackfill(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy != strings.Repeat("0", 32) || len(legacy) != 32 || !groupCodePattern.MatchString(legacy) {
+		t.Fatalf("stage-one group code = %q, want 32-character lowercase hex", legacy)
+	}
+
+	current, err := randomGroupCodeForMode(bytes.NewReader(make([]byte, groupCodeLength)), groupCodeModeForBackfill(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current != "00000000" || len(current) != groupCodeLength || !groupCodePattern.MatchString(current) {
+		t.Fatalf("stage-two group code = %q, want 8-character lowercase alphanumeric", current)
+	}
+	if groupCodeModeForBackfill(false) != legacyGroupCodeWriteMode || groupCodeModeForBackfill(true) != currentGroupCodeWriteMode {
+		t.Fatal("group-code write mode does not follow the staged backfill switch")
+	}
+}
+
+func TestGroupCodeValidationAcceptsCurrentAndLegacyAliases(t *testing.T) {
+	for _, code := range []string{"0a1b2c3d", "000102030405060708090a0b0c0d0e0f"} {
+		if !groupCodePattern.MatchString(code) {
+			t.Fatalf("compatible group code %q was rejected", code)
+		}
+	}
+	for _, code := range []string{"ABC12345", "abc123", "000102030405060708090A0B0C0D0E0F"} {
+		if groupCodePattern.MatchString(code) {
+			t.Fatalf("invalid non-normalized group code %q was accepted", code)
+		}
 	}
 }
 

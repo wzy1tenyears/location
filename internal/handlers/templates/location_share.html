@@ -62,7 +62,31 @@
     function transformLng(x, y) { let r=300+x+2*y+.1*x*x+.1*x*y+.1*Math.sqrt(Math.abs(x));r+=(20*Math.sin(6*x*Math.PI)+20*Math.sin(2*x*Math.PI))*2/3;r+=(20*Math.sin(x*Math.PI)+40*Math.sin(x/3*Math.PI))*2/3;r+=(150*Math.sin(x/12*Math.PI)+300*Math.sin(x/30*Math.PI))*2/3;return r; }
     function wgsToGcj(lng,lat){if(outOfChina(lng,lat))return{lng,lat};const a=6378245,ee=.00669342162296594323,rad=lat/180*Math.PI;let dLat=transformLat(lng-105,lat-35),dLng=transformLng(lng-105,lat-35),magic=Math.sin(rad);magic=1-ee*magic*magic;const root=Math.sqrt(magic);dLat=dLat*180/((a*(1-ee))/(magic*root)*Math.PI);dLng=dLng*180/(a/root*Math.cos(rad)*Math.PI);return{lat:lat+dLat,lng:lng+dLng};}
     function bdToGcj(lng,lat){const x=lng-.0065,y=lat-.006,z=Math.sqrt(x*x+y*y)-.00002*Math.sin(y*Math.PI*3000/180),theta=Math.atan2(y,x)-.000003*Math.cos(x*Math.PI*3000/180);return{lng:z*Math.cos(theta),lat:z*Math.sin(theta)};}
-    function coordinate(record){const meta=record.location_meta||{},diag=record.address_diagnostics||{};let system=text(diag.preferred_coordinate_system,meta.coordinate_system).toLowerCase().replace(/[^a-z0-9]/g,'');const lat=Number(record.latitude),lng=Number(record.longitude);if(system==='gcj02'||system==='amap'||system==='gaode')return{lng,lat};if(system==='bd09'||system==='baidu'||meta.mock_provider===true)return bdToGcj(lng,lat);return wgsToGcj(lng,lat);}
+    function normalizedCoordinateSystem(value) {
+      const system = text(value).toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (system === 'gcj02' || system === 'gcj' || system === 'amap' || system === 'gaode') return 'gcj02';
+      if (system === 'bd09' || system === 'baidu') return 'bd09';
+      if (system === 'wgs84' || system === 'gps') return 'wgs84';
+      return '';
+    }
+    function firstGpsSource(diagnostics) {
+      const sources = diagnostics && Array.isArray(diagnostics.sources) ? diagnostics.sources : [];
+      for (const source of sources) {
+        if (source && text(source.type).toLowerCase() === 'gps') return source;
+      }
+      return null;
+    }
+    function coordinateSystemFor(record) {
+      const meta = record && record.location_meta && typeof record.location_meta === 'object' ? record.location_meta : {};
+      const diagnostics = record && record.address_diagnostics && typeof record.address_diagnostics === 'object' ? record.address_diagnostics : {};
+      let system = normalizedCoordinateSystem(meta.coordinate_system);
+      if (system) return system;
+      const gps = firstGpsSource(diagnostics);
+      system = normalizedCoordinateSystem(gps && gps.coordinate_system);
+      if (system) return system;
+      return 'wgs84';
+    }
+    function coordinate(record){const system=coordinateSystemFor(record),lat=Number(record.latitude),lng=Number(record.longitude);if(system==='gcj02')return{lng,lat};if(system==='bd09')return bdToGcj(lng,lat);return wgsToGcj(lng,lat);}
     function address(record){return text(record.address,record.address_diagnostics&&record.address_diagnostics.preferred_address,'位置地址暂未解析');}
     function city(record){return text(record.city,record.address_diagnostics&&record.address_diagnostics.preferred_city,'暂未识别');}
     function state(message){let node=document.querySelector('.map-state');if(!message){if(node)node.remove();return;}if(!node){node=document.createElement('div');node.className='map-state';document.querySelector('#map').appendChild(node);}node.textContent=message;}

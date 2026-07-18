@@ -9,6 +9,8 @@ import (
 type APIError struct {
 	Status  int
 	Message string
+	Code    string
+	Details map[string]any
 }
 
 func (e APIError) Error() string {
@@ -29,10 +31,17 @@ func OK(w http.ResponseWriter, payload any) {
 func Error(w http.ResponseWriter, err error) {
 	var apiErr APIError
 	if errors.As(err, &apiErr) {
-		JSON(w, apiErr.Status, map[string]any{
+		payload := map[string]any{
 			"ok":      false,
 			"message": apiErr.Message,
-		})
+		}
+		if apiErr.Code != "" {
+			payload["code"] = apiErr.Code
+		}
+		if len(apiErr.Details) > 0 {
+			payload["details"] = apiErr.Details
+		}
+		JSON(w, apiErr.Status, payload)
 		return
 	}
 

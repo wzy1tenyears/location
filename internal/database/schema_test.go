@@ -54,6 +54,7 @@ func TestLocationShareQuotaIndexMigrationsAreOrderedAndIdempotent(t *testing.T) 
 		"008_app_sessions_user_id_index.sql",
 		"009_location_retention_index.sql",
 		"010_environment_report_retention_index.sql",
+		"011_group_code_alias.sql",
 	}
 	if len(names) < len(wantOrder) {
 		t.Fatalf("migration files = %#v, want at least %#v", names, wantOrder)

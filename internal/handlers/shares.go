@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
+	"math"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -376,19 +378,22 @@ func publicShareSnapshot(rows []models.Location, coordinates map[int64]locationS
 		diagnostics := coordinate.AddressDiagnostics
 		meta := coordinate.LocationMeta
 		minimalDiagnostics := map[string]any{}
-		for _, key := range []string{"preferred_address", "preferred_city", "preferred_coordinate_system"} {
-			if value, ok := diagnostics[key]; ok {
-				minimalDiagnostics[key] = value
-			}
+		if address := publicShareAddressText(diagnostics["preferred_address"], 600); address != "" {
+			minimalDiagnostics["preferred_address"] = address
+		}
+		if city, ok := diagnostics["preferred_city"].(string); ok {
+			minimalDiagnostics["preferred_city"] = truncateString(city, 80)
+		}
+		if coordinateSystem := normalizedPublicShareCoordinateSystem(diagnostics["preferred_coordinate_system"]); coordinateSystem != "" {
+			minimalDiagnostics["preferred_coordinate_system"] = coordinateSystem
 		}
 		minimalMeta := map[string]any{}
-		for _, key := range []string{"coordinate_system", "mock_provider"} {
-			if value, ok := meta[key]; ok {
-				minimalMeta[key] = value
-			}
+		if value, ok := meta["mock_provider"]; ok {
+			minimalMeta["mock_provider"] = value
 		}
-		if strings.TrimSpace(coordinate.Address) != "" {
-			minimalDiagnostics["preferred_address"] = strings.TrimSpace(coordinate.Address)
+		minimalMeta["coordinate_system"] = publicShareRawCoordinateSystem(meta, diagnostics)
+		if address := publicShareAddressText(coordinate.Address, 600); address != "" {
+			minimalDiagnostics["preferred_address"] = address
 		}
 		if strings.TrimSpace(coordinate.City) != "" {
 			minimalDiagnostics["preferred_city"] = strings.TrimSpace(coordinate.City)
@@ -420,16 +425,117 @@ func publicShareSnapshot(rows []models.Location, coordinates map[int64]locationS
 	return result
 }
 
+func publicShareRawCoordinateSystem(meta map[string]any, diagnostics map[string]any) string {
+	if system := normalizedPublicShareCoordinateSystem(meta["coordinate_system"]); system != "" {
+		return system
+	}
+	if sources, ok := diagnostics["sources"].([]any); ok {
+		for _, rawSource := range sources {
+			source, ok := rawSource.(map[string]any)
+			if !ok || !strings.EqualFold(shareTextValue(source["type"]), "gps") {
+				continue
+			}
+			if system := normalizedPublicShareCoordinateSystem(source["coordinate_system"]); system != "" {
+				return system
+			}
+		}
+	}
+	return "wgs84"
+}
+
+func normalizedPublicShareCoordinateSystem(value any) string {
+	cleaned := strings.ToLower(shareTextValue(value))
+	cleaned = strings.NewReplacer("-", "", "_", "", " ", "").Replace(cleaned)
+	switch cleaned {
+	case "wgs84", "gps":
+		return "wgs84"
+	case "gcj02", "gcj", "amap", "gaode":
+		return "gcj02"
+	case "bd09", "baidu":
+		return "bd09"
+	default:
+		return ""
+	}
+}
+
 func consumeTrustedPublicShareSnapshot(locations []map[string]any) bool {
 	for _, location := range locations {
 		if location["_snapshot_provenance"] != publicShareSnapshotProvenance {
 			return false
 		}
 	}
-	for _, location := range locations {
-		delete(location, "_snapshot_provenance")
+	for index, location := range locations {
+		locations[index] = projectTrustedPublicShareLocation(location)
 	}
 	return true
+}
+
+func projectTrustedPublicShareLocation(location map[string]any) map[string]any {
+	projected := map[string]any{}
+	for _, key := range []string{"id", "latitude", "longitude"} {
+		if number, ok := numericAny(location[key]); ok && !math.IsNaN(number) && !math.IsInf(number, 0) {
+			projected[key] = number
+		}
+	}
+	for key, limit := range map[string]int{
+		"display_name": 120,
+		"role_label":   40,
+		"member_key":   80,
+		"created_at":   40,
+		"city":         80,
+	} {
+		if text, ok := location[key].(string); ok {
+			projected[key] = truncateString(text, limit)
+		}
+	}
+	if address := publicShareAddressText(location["address"], 600); address != "" {
+		projected["address"] = address
+	}
+
+	minimalDiagnostics := map[string]any{}
+	if diagnostics, ok := location["address_diagnostics"].(map[string]any); ok {
+		if address := publicShareAddressText(diagnostics["preferred_address"], 600); address != "" {
+			minimalDiagnostics["preferred_address"] = address
+		}
+		if text, ok := diagnostics["preferred_city"].(string); ok {
+			minimalDiagnostics["preferred_city"] = truncateString(text, 80)
+		}
+		if coordinateSystem := normalizedPublicShareCoordinateSystem(diagnostics["preferred_coordinate_system"]); coordinateSystem != "" {
+			minimalDiagnostics["preferred_coordinate_system"] = coordinateSystem
+		}
+	}
+	projected["address_diagnostics"] = minimalDiagnostics
+
+	minimalMeta := map[string]any{}
+	if meta, ok := location["location_meta"].(map[string]any); ok {
+		if mockProvider, ok := meta["mock_provider"].(bool); ok {
+			minimalMeta["mock_provider"] = mockProvider
+		}
+		if coordinateSystem := normalizedPublicShareCoordinateSystem(meta["coordinate_system"]); coordinateSystem != "" {
+			minimalMeta["coordinate_system"] = coordinateSystem
+		}
+	}
+	projected["location_meta"] = minimalMeta
+	return projected
+}
+
+func publicShareAddressText(value any, limit int) string {
+	text, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	text = truncateString(text, limit)
+	if text == "" {
+		return ""
+	}
+	ipText := strings.Trim(text, "[]")
+	if zoneIndex := strings.LastIndex(ipText, "%"); zoneIndex > 0 {
+		ipText = ipText[:zoneIndex]
+	}
+	if net.ParseIP(ipText) != nil {
+		return ""
+	}
+	return text
 }
 
 func (handler ShareHandler) verifiedStoredShareLocations(r *http.Request, share repositories.LocationShare) ([]map[string]any, error) {

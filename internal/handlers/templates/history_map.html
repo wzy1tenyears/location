@@ -128,15 +128,11 @@
       const source = firstGpsSource(diagnostics);
       const system = normalizedCoordinateSystem(
         firstText(
-          diagnostics && diagnostics.preferred_coordinate_system,
-          source && source.coordinate_system,
-          meta.coordinate_system
+          meta.coordinate_system,
+          source && source.coordinate_system
         )
       );
       if (system) return system;
-      if (meta.mock_provider === true || meta.mock_provider === 'true' || meta.mock_provider === 1 || meta.mock_provider === '1') {
-        return 'bd09';
-      }
       return 'wgs84';
     }
 
@@ -150,6 +146,13 @@
 
     function mapCoordinateFor(record, lng, lat, diagnostics) {
       const system = coordinateSystemFor(record, diagnostics);
+      if (system === 'bd09') return bd09ToGcj02(lng, lat);
+      if (system === 'gcj02') return { lng, lat };
+      return wgs84ToGcj02(lng, lat);
+    }
+
+    function mapCoordinateForDiagnosticSource(source, lng, lat) {
+      const system = normalizedCoordinateSystem(source && source.coordinate_system) || 'wgs84';
       if (system === 'bd09') return bd09ToGcj02(lng, lat);
       if (system === 'gcj02') return { lng, lat };
       return wgs84ToGcj02(lng, lat);
@@ -181,7 +184,12 @@
       if (item.city || item.region || item.country) lines.push([item.country, item.region, item.city].filter(Boolean).join(' '));
       if (item.provider) lines.push(`来源：${item.provider}`);
       if (item.ip) lines.push(`IP：${item.ip}`);
-      if (item.time) lines.push(`时间：${item.time}`);
+      const firstReportedAt = firstText(item.firstReportedAt, item.time);
+      const lastReportedAt = firstText(item.lastReportedAt, item.time, firstReportedAt);
+      if (firstReportedAt || lastReportedAt) {
+        const reportCount = Math.max(1, Math.floor(Number(item.reportCount) || 1));
+        lines.push(`停留时间：${firstText(firstReportedAt, lastReportedAt)} 至 ${firstText(lastReportedAt, firstReportedAt)}（${formatStayDuration(item.stayDurationSeconds)}，${reportCount}次上报）`);
+      }
       const content = document.createElement('div');
       lines.forEach((line) => {
         const row = document.createElement('div');
@@ -189,6 +197,22 @@
         content.appendChild(row);
       });
       return content;
+    }
+
+    function formatStayDuration(value) {
+      let remaining = Math.max(0, Math.round(Number(value) || 0));
+      const days = Math.floor(remaining / 86400);
+      remaining %= 86400;
+      const hours = Math.floor(remaining / 3600);
+      remaining %= 3600;
+      const minutes = Math.floor(remaining / 60);
+      const seconds = remaining % 60;
+      const parts = [];
+      if (days) parts.push(`${days}天`);
+      if (hours) parts.push(`${hours}小时`);
+      if (minutes) parts.push(`${minutes}分钟`);
+      if (seconds || !parts.length) parts.push(`${seconds}秒`);
+      return parts.join('');
     }
 
     function normalizeRecord(record, index) {
@@ -199,6 +223,9 @@
       const diagnostics = record.address_diagnostics || {};
       const mapCoordinate = mapCoordinateFor(record, lng, lat, diagnostics);
       const name = nameOf(record);
+      const gpsSource = firstGpsSource(diagnostics);
+      const firstReportedAt = firstText(record.first_reported_at, record.created_at, record.updated_at);
+      const lastReportedAt = firstText(record.last_reported_at, record.updated_at, record.created_at, firstReportedAt);
       return {
         type: 'gps',
         name,
@@ -208,15 +235,220 @@
         rawLat: lat,
         rawLng: lng,
         address: firstText(diagnostics.preferred_address, record.address, record.location_address),
-        city: firstText(record.city),
+        city: firstText(diagnostics.preferred_city, record.city, gpsSource && gpsSource.city),
         region: firstText(record.region),
         country: firstText(record.country),
         provider: 'GPS',
-        time: firstText(record.created_at, record.updated_at),
+        time: lastReportedAt,
+        firstReportedAt,
+        lastReportedAt,
+        stayDurationSeconds: Math.max(0, Number(record.stay_duration_seconds) || 0),
+        reportCount: Math.max(1, Math.floor(Number(record.report_count) || 1)),
         accuracy: Number(record.accuracy),
         userKey: firstText(record.user_id, record.username, String(index)),
         sourceIndex: 0,
       };
+    }
+
+    function diagnosticSourceAddress(source) {
+      const ip = firstText(source && source.ip, source && source.server_ip, source && source.ipv4, source && source.ipv6);
+      const parts = [];
+      const appendPart = (value) => {
+        const text = firstText(value);
+        if (!text || text === ip || parts.some((part) => part.includes(text))) return;
+        for (let index = parts.length - 1; index >= 0; index -= 1) {
+          if (text.includes(parts[index])) parts.splice(index, 1);
+        }
+        parts.push(text);
+      };
+      [
+        source && source.country,
+        source && source.region,
+        source && source.city,
+        source && source.district,
+        source && source.street,
+        source && source.address,
+        source && source.detail,
+        source && source.poi,
+      ].forEach(appendPart);
+      const address = parts.join(' ');
+      const postalCode = firstText(source && source.postal_code);
+      return address && postalCode && !address.includes(postalCode) ? `${address} ${postalCode}` : address;
+    }
+
+    function diagnosticAddressPrecision(source) {
+      const fields = [
+        ['country', 1],
+        ['region', 2],
+        ['city', 4],
+        ['postal_code', 8],
+        ['district', 16],
+        ['address', 32],
+        ['street', 64],
+        ['detail', 128],
+        ['poi', 128],
+      ];
+      const ip = firstText(source && source.ip, source && source.server_ip, source && source.ipv4, source && source.ipv6);
+      let score = 0;
+      let populated = 0;
+      fields.forEach(([field, weight]) => {
+        const value = firstText(source && source[field]);
+        if (!value || (field === 'address' && value === ip)) return;
+        score += weight;
+        populated += 1;
+      });
+      return {
+        score,
+        populated,
+        addressLength: diagnosticSourceAddress(source).length,
+      };
+    }
+
+    function hasDiagnosticCoordinate(source) {
+      if (!source || typeof source !== 'object') return false;
+      if (source.latitude === null || source.latitude === undefined || source.longitude === null || source.longitude === undefined) return false;
+      return validCoordinate(Number(source.latitude), Number(source.longitude));
+    }
+
+    function meaningfulDiagnosticValue(value) {
+      if (value === null || value === undefined) return false;
+      return typeof value !== 'string' || value.trim() !== '';
+    }
+
+    function diagnosticSourceIdentity(source) {
+      return firstText(source && source.ip, source && source.server_ip, source && source.ipv4, source && source.ipv6).toLowerCase();
+    }
+
+    function diagnosticIdentitiesCompatible(parent, nested) {
+      const parentIdentity = diagnosticSourceIdentity(parent);
+      const nestedIdentity = diagnosticSourceIdentity(nested);
+      if (parentIdentity && nestedIdentity) return parentIdentity === nestedIdentity;
+      if (!parentIdentity && nestedIdentity) return false;
+      return true;
+    }
+
+    function sameDiagnosticCoordinate(left, right) {
+      return hasDiagnosticCoordinate(left)
+        && hasDiagnosticCoordinate(right)
+        && Number(left.latitude) === Number(right.latitude)
+        && Number(left.longitude) === Number(right.longitude);
+    }
+
+    function inheritDiagnosticSource(parent, nested, type) {
+      const effective = {};
+      const coordinateFields = new Set(['latitude', 'longitude', 'coordinate_system', 'accuracy']);
+      const candidate = nested && typeof nested === 'object' ? nested : parent;
+      const inheritParent = candidate !== parent && diagnosticIdentitiesCompatible(parent, candidate);
+      const copyFields = (source) => {
+        if (!source || typeof source !== 'object') return;
+        Object.keys(source).forEach((key) => {
+          if (key === 'type' || key === 'variants' || key === 'candidates' || coordinateFields.has(key)) return;
+          if (meaningfulDiagnosticValue(source[key])) effective[key] = source[key];
+        });
+      };
+      if (inheritParent) copyFields(parent);
+      copyFields(candidate);
+
+      const coordinateSource = hasDiagnosticCoordinate(candidate)
+        ? candidate
+        : (inheritParent && hasDiagnosticCoordinate(parent) ? parent : null);
+      if (coordinateSource) {
+        effective.latitude = Number(coordinateSource.latitude);
+        effective.longitude = Number(coordinateSource.longitude);
+        const mayUseParentSystem = coordinateSource === parent || (inheritParent && sameDiagnosticCoordinate(parent, coordinateSource));
+        const coordinateSystem = firstText(
+          coordinateSource.coordinate_system,
+          mayUseParentSystem && parent && parent.coordinate_system
+        );
+        if (coordinateSystem) {
+          effective.coordinate_system = coordinateSystem;
+        }
+        if (meaningfulDiagnosticValue(coordinateSource.accuracy)) {
+          effective.accuracy = coordinateSource.accuracy;
+        }
+      }
+      effective.type = type;
+      return effective;
+    }
+
+    function betterDiagnosticRank(candidate, selected) {
+      if (!selected) return true;
+      if (candidate.address.score !== selected.address.score) return candidate.address.score > selected.address.score;
+      if (candidate.address.populated !== selected.address.populated) return candidate.address.populated > selected.address.populated;
+      if (candidate.ownCoordinate !== selected.ownCoordinate) return candidate.ownCoordinate;
+      if (candidate.accuracy !== selected.accuracy) return candidate.accuracy < selected.accuracy;
+      return candidate.address.addressLength > selected.address.addressLength;
+    }
+
+    function bestDiagnosticSource(source, type) {
+      const candidates = [source];
+      const nestedField = type === 'ip' ? 'variants' : 'candidates';
+      const nested = source && Array.isArray(source[nestedField]) ? source[nestedField] : [];
+      nested.forEach((candidate) => {
+        if (candidate && typeof candidate === 'object') candidates.push(candidate);
+      });
+
+      let selected = null;
+      let selectedRank = null;
+      candidates.forEach((candidate) => {
+        const effective = inheritDiagnosticSource(source, candidate, type);
+        if (!hasDiagnosticCoordinate(effective)) return;
+        const accuracy = Number(effective.accuracy);
+        const rank = {
+          address: diagnosticAddressPrecision(effective),
+          ownCoordinate: hasDiagnosticCoordinate(candidate),
+          accuracy: Number.isFinite(accuracy) && accuracy >= 0 ? accuracy : Number.POSITIVE_INFINITY,
+        };
+        if (betterDiagnosticRank(rank, selectedRank)) {
+          selected = effective;
+          selectedRank = rank;
+        }
+      });
+      return selected;
+    }
+
+    function normalizeDiagnosticSource(record, source, sourceIndex, recordIndex) {
+      if (!source || typeof source !== 'object') return null;
+      const type = firstText(source.type).toLowerCase();
+      if (type !== 'ip' && type !== 'webrtc') return null;
+      const selected = bestDiagnosticSource(source, type);
+      if (!selected) return null;
+      const lat = Number(selected.latitude);
+      const lng = Number(selected.longitude);
+      const mapCoordinate = mapCoordinateForDiagnosticSource(selected, lng, lat);
+      const name = nameOf(record);
+      const firstReportedAt = firstText(record && record.first_reported_at, record && record.created_at, record && record.updated_at);
+      const lastReportedAt = firstText(record && record.last_reported_at, record && record.updated_at, record && record.created_at, firstReportedAt);
+      return {
+        type,
+        name,
+        label: type === 'ip' ? 'IP' : 'W',
+        lat: mapCoordinate.lat,
+        lng: mapCoordinate.lng,
+        rawLat: lat,
+        rawLng: lng,
+        address: diagnosticSourceAddress(selected),
+        city: firstText(selected.city),
+        region: firstText(selected.region),
+        country: firstText(selected.country),
+        provider: firstText(selected.provider, selected.name, selected.source, sourceLabel(type)),
+        ip: firstText(selected.ip, selected.server_ip, selected.ipv4, selected.ipv6),
+        time: lastReportedAt,
+        firstReportedAt,
+        lastReportedAt,
+        stayDurationSeconds: Math.max(0, Number(record && record.stay_duration_seconds) || 0),
+        reportCount: Math.max(1, Math.floor(Number(record && record.report_count) || 1)),
+        accuracy: Number(selected.accuracy),
+        userKey: firstText(record && record.user_id, record && record.username, String(recordIndex)),
+        sourceIndex: sourceIndex + 1,
+      };
+    }
+
+    function stableMarkerKey(item) {
+      const rawLat = Number.isFinite(Number(item.rawLat)) ? Number(item.rawLat) : Number(item.lat);
+      const rawLng = Number.isFinite(Number(item.rawLng)) ? Number(item.rawLng) : Number(item.lng);
+      const diagnosticIdentity = item.type === 'gps' ? '' : firstText(item.ip, item.address, item.provider).toLowerCase();
+      return [item.type, item.userKey, item.time, rawLat.toFixed(6), rawLng.toFixed(6), diagnosticIdentity].join('|');
     }
 
     function expandRecords(records) {
@@ -225,9 +457,17 @@
       (Array.isArray(records) ? records : []).forEach((record, index) => {
         const gps = normalizeRecord(record, index);
         if (gps) items.push(gps);
+        const diagnostics = record && record.address_diagnostics && typeof record.address_diagnostics === 'object'
+          ? record.address_diagnostics
+          : {};
+        const sources = Array.isArray(diagnostics.sources) ? diagnostics.sources : [];
+        sources.forEach((source, sourceIndex) => {
+          const diagnostic = normalizeDiagnosticSource(record, source, sourceIndex, index);
+          if (diagnostic) items.push(diagnostic);
+        });
       });
       return items.filter((item) => {
-        const key = [item.type, item.userKey, item.time, item.lat.toFixed(6), item.lng.toFixed(6), item.sourceIndex].join('|');
+        const key = stableMarkerKey(item);
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -299,6 +539,11 @@
       } else {
         map.setFitView(currentMarkers, false, [34, 28, 34, 28], 17);
       }
+      window.setTimeout(() => {
+        if (window.LocMapCapture && typeof window.LocMapCapture.ready === 'function') {
+          window.LocMapCapture.ready();
+        }
+      }, 900);
     }
 
     function initMap() {

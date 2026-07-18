@@ -99,7 +99,7 @@ func (handler GroupsHandler) joinByCode(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	var groupName string
-	err = handler.db.QueryRowContext(r.Context(), "SELECT group_name FROM family_groups WHERE group_code = ? LIMIT 1", groupCode).Scan(&groupName)
+	err = handler.db.QueryRowContext(r.Context(), "SELECT group_name FROM family_groups WHERE group_code = ? OR legacy_group_code = ? LIMIT 1", groupCode, groupCode).Scan(&groupName)
 	if err == sql.ErrNoRows {
 		if exhausted {
 			httpx.Error(w, httpx.APIError{Status: 423, Message: "组号尝试过多，请 30 分钟后再试。"})

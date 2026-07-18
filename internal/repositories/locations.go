@@ -3,9 +3,13 @@ package repositories
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"familylocation/location-v3/internal/models"
 )
+
+var ErrLocationHistorySnapshotTooLarge = errors.New("location history snapshot exceeds the total row limit")
+var ErrLocationHistorySnapshotBytesTooLarge = errors.New("location history snapshot exceeds the source byte limit")
 
 const (
 	defaultLocationHistoryLimit = 5000
@@ -137,11 +141,87 @@ LIMIT ? OFFSET ?`
 }
 
 func (repo LocationRepository) HistoryForUser(ctx context.Context, groupName string, userID int64, limit int) ([]models.Location, error) {
+	if limit <= 0 {
+		limit = defaultLocationHistoryLimit
+	}
 	query := historySelect() + `
 WHERE l.group_name = ? AND l.user_id = ? AND u.is_active = 1
 ORDER BY l.created_at DESC, l.id DESC
 LIMIT ?`
 	return repo.queryLocations(ctx, query, groupName, userID, limit)
+}
+
+// RetainedHistoryForUsers reads at most the configured retention window for
+// each requested member. This keeps the read used for in-memory stay merging
+// finite without allowing a busy member to crowd out another member's rows.
+func (repo LocationRepository) RetainedHistoryForUsers(ctx context.Context, groupName string, userIDs []int64, perUserLimit int) ([]models.Location, error) {
+	return repo.RetainedHistoryForUsersBounded(ctx, groupName, userIDs, perUserLimit, 0, 0)
+}
+
+// RetainedHistoryForUsersBounded applies both the per-member retention window
+// and an optional total scan budget. It returns an explicit error instead of a
+// partial snapshot when the total budget would be exceeded.
+func (repo LocationRepository) RetainedHistoryForUsersBounded(ctx context.Context, groupName string, userIDs []int64, perUserLimit int, totalLimit int, totalSourceBytesLimit int) ([]models.Location, error) {
+	if perUserLimit <= 0 {
+		perUserLimit = defaultLocationHistoryLimit
+	}
+	seen := make(map[int64]struct{}, len(userIDs))
+	locations := make([]models.Location, 0)
+	loadedSourceBytes := 0
+	for _, userID := range userIDs {
+		if userID <= 0 {
+			continue
+		}
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
+		fetchLimit := retainedHistoryFetchLimit(perUserLimit, totalLimit, len(locations))
+		remainingSourceBytes := -1
+		if totalSourceBytesLimit > 0 {
+			remainingSourceBytes = totalSourceBytesLimit - loadedSourceBytes
+		}
+		rows, sourceBytes, err := repo.historyForUserBounded(ctx, groupName, userID, fetchLimit, remainingSourceBytes)
+		if err != nil {
+			return nil, err
+		}
+		if retainedHistoryExceedsTotalLimit(totalLimit, len(locations), len(rows)) {
+			return nil, ErrLocationHistorySnapshotTooLarge
+		}
+		locations = append(locations, rows...)
+		loadedSourceBytes += sourceBytes
+	}
+	return locations, nil
+}
+
+func (repo LocationRepository) historyForUserBounded(ctx context.Context, groupName string, userID int64, limit int, sourceBytesLimit int) ([]models.Location, int, error) {
+	if limit <= 0 {
+		limit = defaultLocationHistoryLimit
+	}
+	query := historySelect() + `
+WHERE l.group_name = ? AND l.user_id = ? AND u.is_active = 1
+ORDER BY l.created_at DESC, l.id DESC
+LIMIT ?`
+	return repo.queryLocationsBounded(ctx, sourceBytesLimit, query, groupName, userID, limit)
+}
+
+func retainedHistoryFetchLimit(perUserLimit int, totalLimit int, loaded int) int {
+	if totalLimit <= 0 {
+		return perUserLimit
+	}
+	remaining := totalLimit - loaded
+	if remaining >= perUserLimit {
+		return perUserLimit
+	}
+	fetchLimit := remaining + 1
+	if fetchLimit < 1 {
+		return 1
+	}
+	return fetchLimit
+}
+
+func retainedHistoryExceedsTotalLimit(totalLimit int, loaded int, fetched int) bool {
+	return totalLimit > 0 && fetched > totalLimit-loaded
 }
 
 func historySelect() string {
@@ -174,13 +254,19 @@ INNER JOIN user_groups ug ON ug.user_id = l.user_id AND ug.group_name = l.group_
 }
 
 func (repo LocationRepository) queryLocations(ctx context.Context, query string, args ...any) ([]models.Location, error) {
+	locations, _, err := repo.queryLocationsBounded(ctx, -1, query, args...)
+	return locations, err
+}
+
+func (repo LocationRepository) queryLocationsBounded(ctx context.Context, sourceBytesLimit int, query string, args ...any) ([]models.Location, int, error) {
 	rows, err := repo.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
 	var locations []models.Location
+	loadedSourceBytes := 0
 	for rows.Next() {
 		var location models.Location
 		if err := rows.Scan(
@@ -205,9 +291,30 @@ func (repo LocationRepository) queryLocations(ctx context.Context, query string,
 			&location.CreatedAt,
 			&location.UpdatedAt,
 		); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
+		rowSourceBytes := locationHistorySourceBytes(location)
+		if sourceBytesLimit >= 0 && rowSourceBytes > sourceBytesLimit-loadedSourceBytes {
+			return nil, 0, ErrLocationHistorySnapshotBytesTooLarge
+		}
+		loadedSourceBytes += rowSourceBytes
 		locations = append(locations, location)
 	}
-	return locations, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return locations, loadedSourceBytes, nil
+}
+
+func locationHistorySourceBytes(location models.Location) int {
+	const fixedModelBytes = 512
+	return fixedModelBytes +
+		len(location.Username) +
+		len(location.DisplayName) +
+		len(location.GroupName) +
+		len(location.Role) +
+		len(location.LocationMeta.String) +
+		len(location.AddressDiagnostics.String) +
+		len(location.EncryptionMode) +
+		len(location.EncryptedPayload)
 }

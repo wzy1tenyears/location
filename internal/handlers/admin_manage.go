@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -19,18 +20,20 @@ import (
 var adminCodePattern = regexp.MustCompile(`^[0-9a-z]{4,64}$`)
 
 type AdminManageHandler struct {
-	db       *sql.DB
-	sessions session.Reader
-	users    repositories.UserRepository
-	settings repositories.SettingRepository
+	db                 *sql.DB
+	sessions           session.Reader
+	users              repositories.UserRepository
+	settings           repositories.SettingRepository
+	groupCodeWriteMode groupCodeWriteMode
 }
 
-func NewAdminManageHandler(db *sql.DB, sessions session.Reader) AdminManageHandler {
+func NewAdminManageHandler(db *sql.DB, sessions session.Reader, groupCodeBackfillEnabled bool) AdminManageHandler {
 	return AdminManageHandler{
-		db:       db,
-		sessions: sessions,
-		users:    repositories.NewUserRepository(db),
-		settings: repositories.NewSettingRepository(db),
+		db:                 db,
+		sessions:           sessions,
+		users:              repositories.NewUserRepository(db),
+		settings:           repositories.NewSettingRepository(db),
+		groupCodeWriteMode: groupCodeModeForBackfill(groupCodeBackfillEnabled),
 	}
 }
 
@@ -77,7 +80,7 @@ func (handler AdminManageHandler) execute(r *http.Request, action string, data m
 			return "", err
 		}
 		defer func() { _ = tx.Rollback() }()
-		if _, err := createFamilyGroupRecordTx(r.Context(), tx, name, nil); err != nil {
+		if _, err := createFamilyGroupRecordTx(r.Context(), tx, name, nil, handler.groupCodeWriteMode); err != nil {
 			return "", err
 		}
 		return "家庭组已添加。", tx.Commit()
@@ -317,12 +320,17 @@ func (handler AdminManageHandler) deleteUser(r *http.Request, userID int64) (str
 }
 
 func (handler AdminManageHandler) addInvite(r *http.Request, data map[string]any) (string, error) {
-	code := strings.ToLower(adminString(data, "code", 64))
-	if code == "" {
-		code = randomCode(6)
+	return handler.addInviteWithReader(r.Context(), data, rand.Reader)
+}
+
+func (handler AdminManageHandler) addInviteWithReader(ctx context.Context, data map[string]any, reader io.Reader) (string, error) {
+	code := ""
+	if value, ok := data["code"]; ok && value != nil {
+		code = strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
 	}
-	if !adminCodePattern.MatchString(code) {
-		return "", httpx.Unprocessable("邀请码只能包含小写字母和数字。")
+	customCode := code != ""
+	if customCode && !adminCodePattern.MatchString(code) {
+		return "", httpx.Unprocessable("自定义邀请码需为 4 至 64 位英文字母或数字。")
 	}
 	inviteType := adminString(data, "invite_type", 32)
 	if inviteType != "invite" && inviteType != "group_create" {
@@ -335,9 +343,36 @@ func (handler AdminManageHandler) addInvite(r *http.Request, data map[string]any
 	if maxUses > 9999 {
 		maxUses = 9999
 	}
-	_, err := handler.db.ExecContext(r.Context(), "INSERT INTO invite_codes (code, note, invite_type, allow_group_owner, max_uses) VALUES (?, ?, ?, ?, ?)",
-		code, adminString(data, "note", 120), inviteType, truthyAny(data["allow_group_owner"]), maxUses)
-	return "邀请码已添加：" + code, err
+	note := adminString(data, "note", 120)
+	allowGroupOwner := truthyAny(data["allow_group_owner"])
+	if customCode {
+		_, err := handler.db.ExecContext(ctx, "INSERT INTO invite_codes (code, note, invite_type, allow_group_owner, max_uses) VALUES (?, ?, ?, ?, ?)",
+			code, note, inviteType, allowGroupOwner, maxUses)
+		if isDuplicateKeyFor(err, "code") {
+			return "", httpx.APIError{Status: http.StatusConflict, Message: "邀请码已存在。"}
+		}
+		if err != nil {
+			return "", err
+		}
+		return "邀请码已添加：" + code, nil
+	}
+
+	for attempt := 0; attempt < groupCodeWriteMaxAttempts; attempt++ {
+		generated, err := randomLowerAlphaNumeric(reader, 8)
+		if err != nil {
+			return "", fmt.Errorf("generate invite code: %w", err)
+		}
+		_, err = handler.db.ExecContext(ctx, "INSERT INTO invite_codes (code, note, invite_type, allow_group_owner, max_uses) VALUES (?, ?, ?, ?, ?)",
+			generated, note, inviteType, allowGroupOwner, maxUses)
+		if err == nil {
+			return "邀请码已添加：" + generated, nil
+		}
+		if isDuplicateKeyFor(err, "code") {
+			continue
+		}
+		return "", err
+	}
+	return "", fmt.Errorf("failed to allocate a unique invite code after %d attempts", groupCodeWriteMaxAttempts)
 }
 
 func (handler AdminManageHandler) addUser(r *http.Request, data map[string]any) (string, error) {
@@ -366,7 +401,7 @@ func (handler AdminManageHandler) addUser(r *http.Request, data map[string]any) 
 		return "", err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := ensureFamilyGroupRecordTx(r.Context(), tx, groupName, nil); err != nil {
+	if err := ensureFamilyGroupRecordTx(r.Context(), tx, groupName, nil, handler.groupCodeWriteMode); err != nil {
 		return "", err
 	}
 	interval := services.NormalizeReportIntervalSeconds(intFromMap(data, "report_interval_seconds", 300))
@@ -376,7 +411,7 @@ func (handler AdminManageHandler) addUser(r *http.Request, data map[string]any) 
 		return "", err
 	}
 	userID, _ := result.LastInsertId()
-	if err := ensureFamilyGroupRecordTx(r.Context(), tx, groupName, &userID); err != nil {
+	if err := ensureFamilyGroupRecordTx(r.Context(), tx, groupName, &userID, handler.groupCodeWriteMode); err != nil {
 		return "", err
 	}
 	if _, err := tx.ExecContext(r.Context(), "INSERT INTO user_groups (user_id, group_name, role) VALUES (?, ?, ?)", userID, groupName, role); err != nil {
@@ -400,7 +435,7 @@ func (handler AdminManageHandler) addMembership(r *http.Request, data map[string
 		return "", err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := ensureFamilyGroupRecordTx(r.Context(), tx, groupName, &userID); err != nil {
+	if err := ensureFamilyGroupRecordTx(r.Context(), tx, groupName, &userID, handler.groupCodeWriteMode); err != nil {
 		return "", err
 	}
 	var existing int64
@@ -446,7 +481,7 @@ func (handler AdminManageHandler) updateMembership(r *http.Request, data map[str
 		return "", err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := ensureFamilyGroupRecordTx(r.Context(), tx, groupName, &userID); err != nil {
+	if err := ensureFamilyGroupRecordTx(r.Context(), tx, groupName, &userID, handler.groupCodeWriteMode); err != nil {
 		return "", err
 	}
 	if oldGroup != groupName {
@@ -709,18 +744,6 @@ func adminRole(role string) (string, error) {
 		return "", httpx.Unprocessable("家庭组身份不正确。")
 	}
 	return role, nil
-}
-
-func randomCode(length int) string {
-	const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
-	buffer := make([]byte, length)
-	if _, err := rand.Read(buffer); err != nil {
-		return strings.Repeat("0", length)
-	}
-	for i := range buffer {
-		buffer[i] = alphabet[int(buffer[i])%len(alphabet)]
-	}
-	return string(buffer)
 }
 
 func nullFloat(value sql.NullFloat64) any {

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,13 +19,27 @@ import (
 	"familylocation/location-v3/internal/repositories"
 	"familylocation/location-v3/internal/services"
 	"familylocation/location-v3/internal/session"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 var registerUsernamePattern = regexp.MustCompile(`^[A-Za-z0-9_]{6,64}$`)
 var registerInviteCodePattern = regexp.MustCompile(`^[0-9a-zA-Z]{1,255}$`)
-var groupCodePattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+var groupCodePattern = regexp.MustCompile(`^(?:[0-9a-z]{8}|[0-9a-f]{32})$`)
+var mysqlDuplicateKeyPattern = regexp.MustCompile("(?i)for key ['\"\x60](?:[^.'\"\x60]+\\.)?([^'\"\x60]+)['\"\x60]")
 
-const groupCodeBytes = 16
+const (
+	groupCodeLength           = 8
+	legacyGroupCodeByteLength = 16
+	groupCodeWriteMaxAttempts = 32
+)
+
+type groupCodeWriteMode uint8
+
+const (
+	currentGroupCodeWriteMode groupCodeWriteMode = iota
+	legacyGroupCodeWriteMode
+)
 
 type RegisterHandler struct {
 	cfg        config.Config
@@ -82,7 +97,7 @@ func (handler RegisterHandler) Register(w http.ResponseWriter, r *http.Request) 
 	}
 	req.Username = strings.TrimSpace(req.Username)
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
-	req.InviteCode = strings.TrimSpace(req.InviteCode)
+	req.InviteCode = strings.ToLower(strings.TrimSpace(req.InviteCode))
 	req.GroupName = strings.TrimSpace(req.GroupName)
 	req.GroupCode = strings.ToLower(strings.TrimSpace(req.GroupCode))
 	req.TurnstileToken = strings.TrimSpace(req.TurnstileToken)
@@ -170,20 +185,20 @@ func (handler RegisterHandler) Register(w http.ResponseWriter, r *http.Request) 
 				httpx.Error(w, httpx.Unprocessable("请填写要创建的家庭组名称。"))
 				return
 			}
-			groupName, err := createFamilyGroupRecordTx(r.Context(), tx, req.GroupName, nil)
+			groupName, err := createFamilyGroupRecordTx(r.Context(), tx, req.GroupName, nil, groupCodeModeForBackfill(handler.cfg.Database.GroupCodeBackfillEnabled))
 			if err != nil {
 				httpx.Error(w, err)
 				return
 			}
 			assignedGroupName = groupName
 		}
-		if err := ensureFamilyGroupRecordTx(r.Context(), tx, assignedGroupName, nil); err != nil {
+		if err := ensureFamilyGroupRecordTx(r.Context(), tx, assignedGroupName, nil, groupCodeModeForBackfill(handler.cfg.Database.GroupCodeBackfillEnabled)); err != nil {
 			httpx.Error(w, err)
 			return
 		}
 	} else {
 		if !groupCodePattern.MatchString(req.GroupCode) {
-			httpx.Error(w, httpx.Unprocessable("请填写 32 位家庭组号。"))
+			httpx.Error(w, httpx.Unprocessable("请填写 8 位家庭组号。"))
 			return
 		}
 		groupName, err := findGroupNameByCodeTx(r.Context(), tx, req.GroupCode)
@@ -362,61 +377,88 @@ VALUES
 
 func findGroupNameByCodeTx(ctx context.Context, tx *sql.Tx, groupCode string) (string, error) {
 	var groupName string
-	err := tx.QueryRowContext(ctx, "SELECT group_name FROM family_groups WHERE group_code = ? LIMIT 1", groupCode).Scan(&groupName)
+	err := tx.QueryRowContext(ctx, "SELECT group_name FROM family_groups WHERE group_code = ? OR legacy_group_code = ? LIMIT 1", groupCode, groupCode).Scan(&groupName)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
 	return groupName, err
 }
 
-func createFamilyGroupRecordTx(ctx context.Context, tx *sql.Tx, displayName string, ownerUserID *int64) (string, error) {
+func createFamilyGroupRecordTx(ctx context.Context, tx *sql.Tx, displayName string, ownerUserID *int64, mode groupCodeWriteMode) (string, error) {
+	return createFamilyGroupRecordTxWithReader(ctx, tx, displayName, ownerUserID, mode, rand.Reader)
+}
+
+func createFamilyGroupRecordTxWithReader(ctx context.Context, tx *sql.Tx, displayName string, ownerUserID *int64, mode groupCodeWriteMode, reader io.Reader) (string, error) {
 	displayName = strings.TrimSpace(displayName)
 	if displayName == "" {
 		return "", httpx.Unprocessable("请填写要创建的家庭组名称。")
 	}
-	code, err := generateGroupCodeTx(ctx, tx)
-	if err != nil {
+	for attempt := 0; attempt < groupCodeWriteMaxAttempts; attempt++ {
+		code, err := randomGroupCodeForMode(reader, mode)
+		if err != nil {
+			return "", fmt.Errorf("generate group code: %w", err)
+		}
+		groupName, err := familyGroupInternalNameTx(ctx, tx, displayName, code)
+		if err != nil {
+			return "", err
+		}
+		_, err = tx.ExecContext(ctx, "INSERT INTO family_groups (group_name, display_name, group_code, owner_user_id) VALUES (?, ?, ?, ?)", groupName, displayName, code, ownerUserID)
+		if err == nil {
+			return groupName, nil
+		}
+		if isDuplicateKeyFor(err, "group_code") || isDuplicateKeyFor(err, "group_name") {
+			continue
+		}
 		return "", err
 	}
-	groupName, err := familyGroupInternalNameTx(ctx, tx, displayName, code)
-	if err != nil {
-		return "", err
-	}
-	_, err = tx.ExecContext(ctx, "INSERT INTO family_groups (group_name, display_name, group_code, owner_user_id) VALUES (?, ?, ?, ?)", groupName, displayName, code, ownerUserID)
-	if err != nil {
-		return "", err
-	}
-	return groupName, nil
+	return "", fmt.Errorf("failed to allocate a unique group code after %d attempts", groupCodeWriteMaxAttempts)
 }
 
-func ensureFamilyGroupRecordTx(ctx context.Context, tx *sql.Tx, groupName string, ownerUserID *int64) error {
+func ensureFamilyGroupRecordTx(ctx context.Context, tx *sql.Tx, groupName string, ownerUserID *int64, mode groupCodeWriteMode) error {
 	groupName = strings.TrimSpace(groupName)
 	if groupName == "" {
 		return httpx.Unprocessable("家庭组名称不能为空。")
 	}
-	code, err := generateGroupCodeTx(ctx, tx)
-	if err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, "INSERT IGNORE INTO family_groups (group_name, display_name, group_code, owner_user_id) VALUES (?, ?, ?, ?)", groupName, groupName, code, ownerUserID)
-	if err != nil {
-		return err
-	}
+
 	var id int64
 	var displayName string
 	var groupCode string
 	var owner sql.NullInt64
-	err = tx.QueryRowContext(ctx, "SELECT id, display_name, group_code, owner_user_id FROM family_groups WHERE group_name = ? LIMIT 1", groupName).Scan(&id, &displayName, &groupCode, &owner)
+	found, err := loadFamilyGroupForUpdateTx(ctx, tx, groupName, &id, &displayName, &groupCode, &owner)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(groupCode) == "" {
-		code, err = generateGroupCodeTx(ctx, tx)
-		if err != nil {
-			return err
+	if !found {
+		for attempt := 0; attempt < groupCodeWriteMaxAttempts; attempt++ {
+			code, err := randomGroupCodeForMode(rand.Reader, mode)
+			if err != nil {
+				return fmt.Errorf("generate group code: %w", err)
+			}
+			_, err = tx.ExecContext(ctx, "INSERT INTO family_groups (group_name, display_name, group_code, owner_user_id) VALUES (?, ?, ?, ?)", groupName, groupName, code, ownerUserID)
+			if err == nil {
+				return nil
+			}
+			if isDuplicateKeyFor(err, "group_code") {
+				continue
+			}
+			if !isDuplicateKeyFor(err, "group_name") {
+				return err
+			}
+			found, err = loadFamilyGroupForUpdateTx(ctx, tx, groupName, &id, &displayName, &groupCode, &owner)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return fmt.Errorf("family group appeared concurrently but could not be loaded")
+			}
+			break
 		}
-		_, err = tx.ExecContext(ctx, "UPDATE family_groups SET group_code = ? WHERE id = ?", code, id)
-		if err != nil {
+		if !found {
+			return fmt.Errorf("failed to allocate a unique group code after %d attempts", groupCodeWriteMaxAttempts)
+		}
+	}
+	if strings.TrimSpace(groupCode) == "" {
+		if err := assignGroupCodeTx(ctx, tx, id, mode); err != nil {
 			return err
 		}
 	}
@@ -435,30 +477,75 @@ func ensureFamilyGroupRecordTx(ctx context.Context, tx *sql.Tx, groupName string
 	return nil
 }
 
-func generateGroupCodeTx(ctx context.Context, tx *sql.Tx) (string, error) {
-	for attempt := 0; attempt < 80; attempt++ {
-		code, err := randomGroupCode(rand.Reader)
-		if err != nil {
-			return "", err
-		}
-		var exists int
-		err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM family_groups WHERE group_code = ? LIMIT 1", code).Scan(&exists)
-		if err != nil {
-			return "", err
-		}
-		if exists == 0 {
-			return code, nil
-		}
+func loadFamilyGroupForUpdateTx(ctx context.Context, tx *sql.Tx, groupName string, id *int64, displayName *string, groupCode *string, owner *sql.NullInt64) (bool, error) {
+	err := tx.QueryRowContext(ctx, "SELECT id, display_name, COALESCE(group_code, ''), owner_user_id FROM family_groups WHERE group_name = ? LIMIT 1 FOR UPDATE", groupName).Scan(id, displayName, groupCode, owner)
+	if err == sql.ErrNoRows {
+		return false, nil
 	}
-	return "", fmt.Errorf("failed to generate group code")
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func assignGroupCodeTx(ctx context.Context, tx *sql.Tx, groupID int64, mode groupCodeWriteMode) error {
+	for attempt := 0; attempt < groupCodeWriteMaxAttempts; attempt++ {
+		code, err := randomGroupCodeForMode(rand.Reader, mode)
+		if err != nil {
+			return fmt.Errorf("generate group code: %w", err)
+		}
+		result, err := tx.ExecContext(ctx, "UPDATE family_groups SET group_code = ? WHERE id = ? AND (group_code IS NULL OR group_code = '')", code, groupID)
+		if err == nil {
+			rows, rowsErr := result.RowsAffected()
+			if rowsErr != nil {
+				return rowsErr
+			}
+			if rows != 1 {
+				return fmt.Errorf("family group %d no longer needs a group code", groupID)
+			}
+			return nil
+		}
+		if isDuplicateKeyFor(err, "group_code") {
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to allocate a unique group code after %d attempts", groupCodeWriteMaxAttempts)
 }
 
 func randomGroupCode(reader io.Reader) (string, error) {
-	raw := make([]byte, groupCodeBytes)
+	return randomGroupCodeForMode(reader, currentGroupCodeWriteMode)
+}
+
+func randomGroupCodeForMode(reader io.Reader, mode groupCodeWriteMode) (string, error) {
+	if mode != legacyGroupCodeWriteMode {
+		return randomLowerAlphaNumeric(reader, groupCodeLength)
+	}
+	raw := make([]byte, legacyGroupCodeByteLength)
 	if _, err := io.ReadFull(reader, raw); err != nil {
-		return "", err
+		return "", fmt.Errorf("read group-code entropy: %w", err)
 	}
 	return hex.EncodeToString(raw), nil
+}
+
+func groupCodeModeForBackfill(enabled bool) groupCodeWriteMode {
+	if enabled {
+		return currentGroupCodeWriteMode
+	}
+	return legacyGroupCodeWriteMode
+}
+
+func randomLowerAlphaNumeric(reader io.Reader, length int) (string, error) {
+	return services.RandomLowerAlphaNumeric(reader, length)
+}
+
+func isDuplicateKeyFor(err error, keyName string) bool {
+	var mysqlErr *mysql.MySQLError
+	if !errors.As(err, &mysqlErr) || mysqlErr.Number != 1062 {
+		return false
+	}
+	match := mysqlDuplicateKeyPattern.FindStringSubmatch(mysqlErr.Message)
+	return len(match) == 2 && strings.EqualFold(match[1], keyName)
 }
 
 func familyGroupInternalNameTx(ctx context.Context, tx *sql.Tx, displayName string, code string) (string, error) {

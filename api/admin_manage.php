@@ -178,25 +178,12 @@ try {
         }
         $message = '公告已保存。';
     } elseif ($action === 'add_invite_code') {
-        $code = strtolower(admin_manage_string($data, 'code', 64));
+        $code = (string) ($data['code'] ?? '');
         $note = admin_manage_string($data, 'note', 120);
         $inviteType = admin_manage_string($data, 'invite_type', 32);
         $allowGroupOwner = !empty($data['allow_group_owner']) ? 1 : 0;
         $maxUses = max(1, min(9999, (int) ($data['max_uses'] ?? 1)));
-        if ($code === '') {
-            $alphabet = '0123456789abcdefghijklmnopqrstuvwxyz';
-            for ($index = 0; $index < 6; $index += 1) {
-                $code .= $alphabet[random_int(0, strlen($alphabet) - 1)];
-            }
-        }
-        if (!preg_match('/^[0-9a-z]{4,64}$/', $code)) {
-            throw new RuntimeException('邀请码只能包含小写字母和数字。');
-        }
-        if (!in_array($inviteType, ['invite', 'group_create'], true)) {
-            throw new RuntimeException('邀请码类型不正确。');
-        }
-        $stmt = $pdo->prepare('INSERT INTO invite_codes (code, note, invite_type, allow_group_owner, max_uses) VALUES (?, ?, ?, ?, ?)');
-        $stmt->execute([$code, $note, $inviteType, $allowGroupOwner, $maxUses]);
+        $code = create_invite_code_record($pdo, $code, $note, $inviteType, $allowGroupOwner, $maxUses);
         $message = '邀请码已添加：' . $code;
     } elseif ($action === 'update_invite_note') {
         $inviteId = (int) ($data['invite_id'] ?? 0);
@@ -422,6 +409,17 @@ try {
 } catch (Throwable $th) {
     if (isset($pdo) && $pdo instanceof PDO && $pdo->inTransaction()) {
         $pdo->rollBack();
+    }
+    if (($action ?? '') === 'add_invite_code' && $th instanceof RuntimeException) {
+        $inviteErrorStatuses = [
+            '自定义邀请码需为 4 至 64 位英文字母或数字。' => 422,
+            '邀请码类型不正确。' => 422,
+            '邀请码已存在。' => 409,
+        ];
+        $inviteError = $th->getMessage();
+        if (isset($inviteErrorStatuses[$inviteError])) {
+            json_response(['ok' => false, 'message' => $inviteError], $inviteErrorStatuses[$inviteError]);
+        }
     }
     json_response(['ok' => false, 'message' => api_error_message($th)], 500);
 }

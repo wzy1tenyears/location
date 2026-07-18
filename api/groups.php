@@ -23,16 +23,14 @@ try {
             json_response(['ok' => false, 'message' => '组号尝试过多，请 30 分钟后再试。'], 423);
         }
 
-        if (!preg_match('/^[0-9a-f]{32}$/', $groupCode)) {
+        if (!is_valid_family_group_code($groupCode)) {
             if (record_failed_group_join($pdo, (int) $user['id'], $joinIp)) {
                 json_response(['ok' => false, 'message' => '组号尝试过多，请 30 分钟后再试。'], 423);
             }
             json_response(['ok' => false, 'message' => '组号格式不正确。'], 422);
         }
 
-        $stmt = $pdo->prepare('SELECT * FROM family_groups WHERE group_code = ? LIMIT 1');
-        $stmt->execute([$groupCode]);
-        $group = $stmt->fetch();
+        $group = find_family_group_by_code($pdo, $groupCode);
         if (!$group) {
             if (record_failed_group_join($pdo, (int) $user['id'], $joinIp)) {
                 json_response(['ok' => false, 'message' => '组号尝试过多，请 30 分钟后再试。'], 423);

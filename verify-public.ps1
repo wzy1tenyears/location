@@ -1,4 +1,4 @@
-param()
+﻿param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -80,14 +80,52 @@ function Text-BetweenMarkers {
     return $Text.Substring($start, $end - $start)
 }
 
+function Test-RoutableIpv4Literal {
+    param([string]$Value)
+
+    $address = $null
+    if (-not [System.Net.IPAddress]::TryParse($Value, [ref]$address)) {
+        return $false
+    }
+    if ($address.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        return $false
+    }
+
+    $bytes = $address.GetAddressBytes()
+    if ($bytes[0] -in @(0, 10, 127) -or $bytes[0] -ge 224) {
+        return $false
+    }
+    if ($bytes[0] -eq 100 -and $bytes[1] -ge 64 -and $bytes[1] -le 127) {
+        return $false
+    }
+    if ($bytes[0] -eq 169 -and $bytes[1] -eq 254) {
+        return $false
+    }
+    if ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) {
+        return $false
+    }
+    if ($bytes[0] -eq 192 -and $bytes[1] -eq 168) {
+        return $false
+    }
+    if (($bytes[0] -eq 192 -and $bytes[1] -eq 0 -and $bytes[2] -eq 2) -or
+        ($bytes[0] -eq 198 -and $bytes[1] -eq 51 -and $bytes[2] -eq 100) -or
+        ($bytes[0] -eq 203 -and $bytes[1] -eq 0 -and $bytes[2] -eq 113)) {
+        return $false
+    }
+    return $true
+}
+
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ScriptPath = (Resolve-Path -LiteralPath $MyInvocation.MyCommand.Path).Path
 & (Join-Path $Root 'verify-invite-check.ps1')
 $UserMain = Resolve-RequiredFile (Join-Path $Root "android-client\src\com\familylocation\client\MainActivity.java") "user MainActivity.java"
 $UserManifest = Resolve-RequiredFile (Join-Path $Root "android-client\AndroidManifest.xml") "user AndroidManifest.xml"
 $P2PCrypto = Resolve-RequiredFile (Join-Path $Root "android-client\src\com\familylocation\client\P2PCryptoSupport.java") "P2PCryptoSupport.java"
 $P2PPolicy = Resolve-RequiredFile (Join-Path $Root "android-client\src\com\familylocation\client\P2PRecordMergePolicy.java") "P2PRecordMergePolicy.java"
 $P2PPolicyTest = Resolve-RequiredFile (Join-Path $Root "android-client\tests\com\familylocation\client\P2PRecordMergePolicyTest.java") "P2PRecordMergePolicyTest.java"
+$ReportAttemptGate = Resolve-RequiredFile (Join-Path $Root "android-client\src\com\familylocation\client\ReportAttemptGate.java") "ReportAttemptGate.java"
+$ReportAttemptGateTest = Resolve-RequiredFile (Join-Path $Root "android-client\tests\com\familylocation\client\ReportAttemptGateTest.java") "ReportAttemptGateTest.java"
+$DiagnosticSourcePolicy = Resolve-RequiredFile (Join-Path $Root "android-client\src\com\familylocation\client\DiagnosticSourcePolicy.java") "DiagnosticSourcePolicy.java"
+$DiagnosticSourcePolicyTest = Resolve-RequiredFile (Join-Path $Root "android-client\tests\com\familylocation\client\DiagnosticSourcePolicyTest.java") "DiagnosticSourcePolicyTest.java"
 $UserBuild = Resolve-RequiredFile (Join-Path $Root "android-client\build.ps1") "user build.ps1"
 $AdminBuild = Resolve-RequiredFile (Join-Path $Root "android-admin-client\build.ps1") "admin build.ps1"
 $UserServerUrl = Resolve-RequiredFile (Join-Path $Root "android-client\assets\server-url.txt") "user server-url.txt"
@@ -99,6 +137,17 @@ $InstallSql = Resolve-RequiredFile (Join-Path $Root "private\install.sql") "PHP 
 $RegisterApi = Resolve-RequiredFile (Join-Path $Root "api\register.php") "registration API"
 $GroupsApi = Resolve-RequiredFile (Join-Path $Root "api\groups.php") "groups API"
 $InviteCheckApi = Resolve-RequiredFile (Join-Path $Root "api\invite_check.php") "invite-check API"
+$HistoryApi = Resolve-RequiredFile (Join-Path $Root "api\history.php") "history API"
+$HistoryMap = Resolve-RequiredFile (Join-Path $Root "api\history_map_webview.php") "history map WebView"
+$ReportLocationApi = Resolve-RequiredFile (Join-Path $Root "api\report_location.php") "location report API"
+$HistoryStayPolicy = Resolve-RequiredFile (Join-Path $Root "private\lib\history_stays.php") "history stay policy"
+$HistoryStayTest = Resolve-RequiredFile (Join-Path $Root "tests\php\history_stays_test.php") "history stay regression test"
+$HistoryPayloadPolicyTest = Resolve-RequiredFile (Join-Path $Root "tests\php\history_payload_policy_test.php") "history payload policy regression test"
+$AddressDiagnosticsTest = Resolve-RequiredFile (Join-Path $Root "tests\php\address_diagnostics_test.php") "address diagnostics regression test"
+$GroupBackfillConfigTest = Resolve-RequiredFile (Join-Path $Root "tests\php\group_backfill_config_test.php") "group backfill config regression test"
+$AdminIndex = Resolve-RequiredFile (Join-Path $Root "admin\index.php") "admin index"
+$Readme = Resolve-RequiredFile (Join-Path $Root "README.md") "README"
+$Agents = Resolve-RequiredFile (Join-Path $Root "AGENTS.md") "AGENTS"
 $AdminUpdateApi = Resolve-RequiredFile (Join-Path $Root "api\admin_app_update.php") "admin update API"
 $AdminApkApi = Resolve-RequiredFile (Join-Path $Root "api\admin_apk.php") "admin APK API"
 
@@ -107,6 +156,10 @@ $UserManifestText = Get-Content -Raw -Encoding UTF8 -LiteralPath $UserManifest
 $P2PCryptoText = Get-Content -Raw -Encoding UTF8 -LiteralPath $P2PCrypto
 $P2PPolicyText = Get-Content -Raw -Encoding UTF8 -LiteralPath $P2PPolicy
 $P2PPolicyTestText = Get-Content -Raw -Encoding UTF8 -LiteralPath $P2PPolicyTest
+$ReportAttemptGateText = Get-Content -Raw -Encoding UTF8 -LiteralPath $ReportAttemptGate
+$ReportAttemptGateTestText = Get-Content -Raw -Encoding UTF8 -LiteralPath $ReportAttemptGateTest
+$DiagnosticSourcePolicyText = Get-Content -Raw -Encoding UTF8 -LiteralPath $DiagnosticSourcePolicy
+$DiagnosticSourcePolicyTestText = Get-Content -Raw -Encoding UTF8 -LiteralPath $DiagnosticSourcePolicyTest
 $UserBuildText = Get-Content -Raw -Encoding UTF8 -LiteralPath $UserBuild
 $AdminBuildText = Get-Content -Raw -Encoding UTF8 -LiteralPath $AdminBuild
 $NginxText = Get-Content -Raw -Encoding UTF8 -LiteralPath $NginxConfig
@@ -116,6 +169,14 @@ $InstallSqlText = Get-Content -Raw -Encoding UTF8 -LiteralPath $InstallSql
 $RegisterApiText = Get-Content -Raw -Encoding UTF8 -LiteralPath $RegisterApi
 $GroupsApiText = Get-Content -Raw -Encoding UTF8 -LiteralPath $GroupsApi
 $InviteCheckApiText = Get-Content -Raw -Encoding UTF8 -LiteralPath $InviteCheckApi
+$HistoryApiText = Get-Content -Raw -Encoding UTF8 -LiteralPath $HistoryApi
+$HistoryMapText = Get-Content -Raw -Encoding UTF8 -LiteralPath $HistoryMap
+$ReportLocationApiText = Get-Content -Raw -Encoding UTF8 -LiteralPath $ReportLocationApi
+$HistoryStayPolicyText = Get-Content -Raw -Encoding UTF8 -LiteralPath $HistoryStayPolicy
+$HistoryStayTestText = Get-Content -Raw -Encoding UTF8 -LiteralPath $HistoryStayTest
+$AdminIndexText = Get-Content -Raw -Encoding UTF8 -LiteralPath $AdminIndex
+$ReadmeText = Get-Content -Raw -Encoding UTF8 -LiteralPath $Readme
+$AgentsText = Get-Content -Raw -Encoding UTF8 -LiteralPath $Agents
 $AdminUpdateApiText = Get-Content -Raw -Encoding UTF8 -LiteralPath $AdminUpdateApi
 $AdminApkApiText = Get-Content -Raw -Encoding UTF8 -LiteralPath $AdminApkApi
 
@@ -132,16 +193,35 @@ if ($UserMainText -match 'app\.put\("package_name"') {
     Fail "public user app must not serialize installed app package_name values."
 }
 
-$forbiddenPatterns = @(
-    'loc\.mtmt\.top',
-    '82\.158\.231\.148',
-    '162\.141\.136\.28',
-    'command0block'
-)
+$allowedLiteralHosts = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($hostName in @(
+    'example.com',
+    'schemas.android.com',
+    'challenges.cloudflare.com',
+    'ipinfo.io',
+    'api.ipinfo.io',
+    'www.ip2location.io',
+    'api.ip2location.io',
+    'ipdata.co',
+    'api.ipdata.co',
+    'ipregistry.co',
+    'api.ipregistry.co',
+    'ip-api.com',
+    'lbs.amap.com',
+    'webapi.amap.com',
+    'webrd01.is.autonavi.com',
+    'fmap01.amap.com',
+    'restapi.amap.com',
+    'apimobile.meituan.com',
+    'api.bigdatacloud.net',
+    'fsf.org',
+    'www.gnu.org'
+)) {
+    [void] $allowedLiteralHosts.Add($hostName)
+}
 $textExtensions = @('', '.conf', '.css', '.env', '.gradle', '.java', '.js', '.json', '.md', '.php', '.pro', '.properties', '.ps1', '.sql', '.txt', '.xml', '.yaml', '.yml')
 $textFiles = Get-ChildItem -LiteralPath $Root -Recurse -File | Where-Object {
     $_.FullName -notmatch '\\.git(?:\\|$)' -and
-    $_.FullName -ne $ScriptPath -and
     $_.FullName -notmatch '\\build\\' -and
     $_.FullName -notmatch '\\bin\\' -and
     ($textExtensions -contains $_.Extension.ToLowerInvariant())
@@ -151,9 +231,17 @@ foreach ($file in $textFiles) {
     if ($null -eq $content) {
         continue
     }
-    foreach ($pattern in $forbiddenPatterns) {
-        if ($content -match $pattern) {
-            Fail "public repository contains private token or endpoint in $($file.FullName)"
+
+    foreach ($urlMatch in [regex]::Matches($content, '(?i)https?://[a-z0-9.-]+(?::[0-9]+)?')) {
+        $literalUri = $null
+        if ([System.Uri]::TryCreate($urlMatch.Value, [System.UriKind]::Absolute, [ref]$literalUri) -and
+            -not $allowedLiteralHosts.Contains($literalUri.DnsSafeHost)) {
+            Fail "public repository contains a non-allowlisted literal URL host in $($file.FullName)"
+        }
+    }
+    foreach ($ipMatch in [regex]::Matches($content, '(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])')) {
+        if (Test-RoutableIpv4Literal $ipMatch.Value) {
+            Fail "public repository contains a routable IPv4 literal in $($file.FullName)"
         }
     }
 }
@@ -163,6 +251,28 @@ if ((Get-Content -Raw -Encoding UTF8 -LiteralPath $UserServerUrl).Trim() -ne "")
 }
 if ((Get-Content -Raw -Encoding UTF8 -LiteralPath $AdminServerUrl).Trim() -ne "") {
     Fail "public admin server-url.txt must be empty by default."
+}
+foreach ($credentialName in @('DB_PASS', 'ADMIN_PASSWORD', 'APP_USER_AGENT_TOKEN')) {
+    Assert-Contains 'PHP public config' $PrivateConfigText ("(?m)^const[ \t]+" + [regex]::Escape($credentialName) + "[ \t]*=[ \t]*'';[ \t]*$") "public default must be empty: $credentialName"
+}
+Assert-MatchCount 'PHP app-token guard' $BootstrapText '\$token === ''''' 2 'both API and WebView app-token guards must fail closed when the token is empty.'
+Assert-Contains 'PHP app-token guard' $BootstrapText 'App client token is not configured\.' 'an empty app token must return a configuration error.'
+Assert-Contains 'README' $ReadmeText 'App 令牌留空时接口会以 503 拒绝服务' 'the fail-closed empty-token behavior must be documented.'
+
+foreach ($docContract in @(
+    @{ Name = 'README'; Text = $ReadmeText; Value = '8 位小写英文字母或数字组号' },
+    @{ Name = 'README'; Text = $ReadmeText; Value = '32 位小写十六进制组号' },
+    @{ Name = 'README'; Text = $ReadmeText; Value = '默认是 `true`' },
+    @{ Name = 'README'; Text = $ReadmeText; Value = '显式设置为 `false`' },
+    @{ Name = 'README'; Text = $ReadmeText; Value = '不超过 25 米' },
+    @{ Name = 'README'; Text = $ReadmeText; Value = 'client_merge_snapshot' },
+    @{ Name = 'README'; Text = $ReadmeText; Value = 'IP 和 WebRTC' },
+    @{ Name = 'AGENTS'; Text = $AgentsText; Value = 'server-url.txt' },
+    @{ Name = 'AGENTS'; Text = $AgentsText; Value = 'homeMapWebView' },
+    @{ Name = 'AGENTS'; Text = $AgentsText; Value = 'ReportAttemptGate' },
+    @{ Name = 'AGENTS'; Text = $AgentsText; Value = 'legacy_group_code' }
+)) {
+    Assert-Contains $docContract.Name $docContract.Text ([regex]::Escape([string] $docContract.Value)) "missing documented contract: $($docContract.Value)"
 }
 
 foreach ($forbiddenEndpoint in @(
@@ -227,8 +337,49 @@ Assert-NotContains 'Local invite guidance' $InviteGuidanceText 'getJson\(|postJs
 Assert-Contains 'Local invite guidance' $InviteGuidanceText 'groupName\.setEnabled\(true\)' 'local guidance must keep group-name entry available.'
 Assert-Contains 'Local invite guidance' $InviteGuidanceText 'groupCode\.setEnabled\(true\)' 'local guidance must keep group-code entry available.'
 Assert-Contains 'User app source' $UserMainText 'postJson\("api/register\.php", payload\)' 'registration submission must remain the server-side invite validation boundary.'
-Assert-MatchCount 'User app source' $UserMainText '\^\[0-9a-f\]\{32\}\$' 2 'registration and join flows must enforce 32-character lowercase hexadecimal group codes.'
+$AcceptedGroupCodeText = Text-BetweenMarkers $UserMainText 'private boolean isAcceptedGroupCode' 'private void confirmLeaveCurrentGroup' 'client group-code policy'
+Assert-Contains 'Client group-code policy' $AcceptedGroupCodeText 'normalizeGroupCode\(groupCode\)' 'group codes must be normalized consistently.'
+Assert-Contains 'Client group-code policy' $AcceptedGroupCodeText '\^\[0-9a-z\]\{8\}\$' 'new group codes must be eight lowercase alphanumeric characters.'
+Assert-Contains 'Client group-code policy' $AcceptedGroupCodeText '\^\[0-9a-f\]\{32\}\$' 'existing 32-character hexadecimal aliases must remain accepted.'
+Assert-MatchCount 'User app source' $UserMainText 'isAcceptedGroupCode\(' 3 'registration, authenticated join, and the policy declaration must share one group-code validator.'
 Assert-NotContains 'User app source' $UserMainText '\^\[0-9a-z\]\{6\}\$' 'legacy six-character group-code validation must be absent.'
+
+# Plaintext history is merged server-side; P2P history is merged only from a declared complete snapshot.
+foreach ($field in @('first_reported_at', 'last_reported_at', 'stay_duration_seconds', 'report_count')) {
+    Assert-Contains 'History API' $HistoryApiText ([regex]::Escape("'$field'")) "history response is missing stay field: $field"
+}
+Assert-Contains 'History API' $HistoryApiText 'history_compose_view\(' 'server history must merge before pagination.'
+Assert-Contains 'History API' $HistoryApiText 'client_merge_snapshot' 'the server must accept an explicit complete-snapshot request.'
+Assert-Contains 'History API' $HistoryApiText 'client_merge_complete' 'the server must declare whether a client-merge snapshot is complete.'
+Assert-Contains 'History API' $HistoryApiText 'client_merge_history' 'the server must return the complete client-merge history under a distinct field.'
+Assert-Contains 'History stay policy' $HistoryStayPolicyText 'HISTORY_STAY_RADIUS_METERS = 25\.0' 'the server stay radius must be 25 metres.'
+Assert-Contains 'History stay policy' $HistoryStayPolicyText 'history_locations_share_stay\(\$anchor, \$candidate' 'stay drift must be checked against the first anchor.'
+Assert-Contains 'History stay policy' $HistoryStayPolicyText '\. "\\0" \. history_location_coordinate_system\(\$row\)' 'coordinate systems must form independent stay partitions.'
+Assert-Contains 'History diagnostic identity policy' $HistoryStayPolicyText 'history_diagnostic_source_identity\(' 'stay diagnostics must be grouped by source identity rather than type alone.'
+Assert-Contains 'History diagnostic identity policy' $HistoryStayPolicyText 'history_merge_diagnostic_evidence\(' 'nested variants and candidates must be merged by evidence identity.'
+Assert-NotContains 'History diagnostic identity policy' $HistoryStayPolicyText '\$bestSources\[\$type\]' 'different provider and STUN identities must not collapse into one source type bucket.'
+Assert-Contains 'History stay regression test' $HistoryStayTestText 'source packages were mixed instead of selecting the precise package' 'the PHP harness must reject cross-provider field mixing.'
+Assert-Contains 'History stay regression test' $HistoryStayTestText 'distinct STUN identities were collapsed' 'the PHP harness must retain separate STUN identities.'
+Assert-Contains 'Location report API' $ReportLocationApiText 'encode_address_diagnostics_or_fail\(' 'address diagnostics must pass through the bounded encoder.'
+Assert-Contains 'Location report API' $ReportLocationApiText "unset\(\`$source\['variants'\], \`$source\['candidates'\]\)" 'oversized nested probe evidence must be removed structurally.'
+Assert-NotContains 'Location report API' $ReportLocationApiText 'substr\(\$addressDiagnosticsJson' 'address diagnostics JSON must never be byte-truncated.'
+Assert-Contains 'Location report API' $ReportLocationApiText 'MAX_P2P_ENCRYPTED_PAYLOAD_BYTES' 'P2P report acceptance must use the shared payload byte limit.'
+Assert-NotContains 'Location report API' $ReportLocationApiText 'strlen\(\$json\) > 500000' 'the obsolete P2P payload limit must not remain.'
+Assert-Contains 'PHP config' $PrivateConfigText 'const MAX_P2P_ENCRYPTED_PAYLOAD_BYTES = 128 \* 1024;' 'the shared P2P payload limit must remain 128 KiB.'
+$HistoryRequestText = Text-BetweenMarkers $UserMainText 'private void loadHomeHistorySummary' 'private void appendHomeHistoryLoading' 'history snapshot request'
+$HistoryDecryptText = Text-BetweenMarkers $UserMainText 'private void decryptHistoryResponse' 'private void applyClientMergeHistorySnapshot' 'history snapshot acceptance'
+Assert-Contains 'History snapshot request' $HistoryRequestText '\.put\("client_merge_snapshot", true\)' 'the client must explicitly request a complete snapshot.'
+Assert-Contains 'History snapshot acceptance' $HistoryDecryptText 'client_merge_complete' 'the client must require the complete-snapshot marker.'
+Assert-Contains 'History snapshot acceptance' $HistoryDecryptText 'client_merge_history' 'the client must use the distinct complete snapshot.'
+Assert-Contains 'History snapshot acceptance' $HistoryDecryptText 'client_merge_applied' 'the client must expose the local-merge result state.'
+Assert-Contains 'History diagnostic merge' $UserMainText 'DiagnosticSourcePolicy\.sourceMergeKey' 'merged stays must keep distinct provider, IP, and STUN identities.'
+Assert-Contains 'History diagnostic merge' $UserMainText 'mergeDiagnosticNestedEvidence\(' 'merged stays must retain variants and candidates as structured evidence.'
+Assert-Contains 'Home diagnostic display' $UserMainText 'mostPreciseDiagnosticSource\(' 'the home screen must select the most precise nested diagnostic source.'
+Assert-Contains 'Diagnostic source policy test' $DiagnosticSourcePolicyTestText 'different WebRTC identities stay distinct' 'the Java regression test must cover WebRTC identity separation.'
+Assert-Contains 'Diagnostic source policy test' $DiagnosticSourcePolicyTestText 'provider variants remain independently selectable' 'the Java regression test must cover provider evidence separation.'
+Assert-Contains 'Report attempt lifecycle' $UserMainText 'onProviderDisabled\(String providerName\)[\s\S]*finishReport\(attemptToken' 'a disabled location provider must immediately release the report attempt.'
+Assert-Contains 'Report attempt lifecycle' $UserMainText 'LocationProvider\.TEMPORARILY_UNAVAILABLE[\s\S]*finishReport\(attemptToken' 'an unavailable location provider must immediately release the report attempt.'
+Assert-Contains 'Report attempt lifecycle' $UserMainText 'location = bestLastKnownLocation\(manager\);[\s\S]*catch \(Throwable throwable\)[\s\S]*finishReport\(attemptToken' 'last-known location failures must release the report attempt.'
 
 # Decrypted P2P data may update location payload fields, never authoritative identity fields.
 Assert-Contains 'P2P decryption' $P2PCryptoText 'if \(P2PRecordMergePolicy\.isAllowedLocationPayloadField\(key\)\)' 'decrypted fields must pass through the explicit merge allowlist.'
@@ -252,16 +403,86 @@ foreach ($field in $authoritativeFields) {
 }
 Assert-Contains 'P2P merge policy test' $P2PPolicyTestText 'assertAllowed\(field\)' 'the harness must exercise every allowed field.'
 Assert-Contains 'P2P merge policy test' $P2PPolicyTestText 'assertRejected\(field\)' 'the harness must exercise every authoritative field.'
+Assert-Contains 'P2P merge policy' $P2PPolicyText 'coordinatePartitionKey\(point\)' 'coordinate systems must form independent client-side stay partitions.'
+Assert-Contains 'P2P merge policy test' $P2PPolicyTestText 'WGS points merge across an interleaved GCJ point' 'the Java harness must cover interleaved coordinate-system records.'
+Assert-Contains 'History stay regression test' $HistoryStayTestText 'WGS points did not merge across an interleaved GCJ point' 'the PHP harness must cover interleaved coordinate-system records.'
+
+$phpSource = ''
+if (-not [string]::IsNullOrWhiteSpace($env:LOC_PHP)) {
+    $phpSource = Resolve-RequiredFile $env:LOC_PHP 'PHP interpreter from LOC_PHP'
+} else {
+    $phpCommand = Get-Command 'php.exe' -ErrorAction SilentlyContinue
+    if (-not $phpCommand) {
+        $phpCommand = Get-Command 'php' -ErrorAction SilentlyContinue
+    }
+    if ($phpCommand) {
+        $phpSource = $phpCommand.Source
+    }
+}
+if ([string]::IsNullOrWhiteSpace($phpSource)) {
+    Fail 'php is required to run the address diagnostics regression test; set LOC_PHP or add php to PATH.'
+}
+$phpSessionRoot = Join-Path $Root ('private\runtime\verify-public-php-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $phpSessionRoot -Force | Out-Null
+try {
+    $phpSessionArgument = 'session.save_path=' + $phpSessionRoot
+    $addressDiagnosticsTestOutput = & $phpSource '-n' '-d' $phpSessionArgument $AddressDiagnosticsTest 2>&1
+    if ($LASTEXITCODE -ne 0 -or ($addressDiagnosticsTestOutput -join "`n") -notmatch 'address_diagnostics_test OK') {
+        Fail "address diagnostics regression test failed: $($addressDiagnosticsTestOutput -join ' ')"
+    }
+    $historyPayloadPolicyOutput = & $phpSource '-n' '-d' $phpSessionArgument $HistoryPayloadPolicyTest 2>&1
+    if ($LASTEXITCODE -ne 0 -or ($historyPayloadPolicyOutput -join "`n") -notmatch 'history_payload_policy_test: OK') {
+        Fail "history payload policy regression test failed: $($historyPayloadPolicyOutput -join ' ')"
+    }
+    $historyStayTestOutput = & $phpSource '-n' '-d' $phpSessionArgument $HistoryStayTest 2>&1
+    if ($LASTEXITCODE -ne 0 -or ($historyStayTestOutput -join "`n") -notmatch 'history_stays_test: OK') {
+        Fail "history stay regression test failed: $($historyStayTestOutput -join ' ')"
+    }
+    $originalBackfillEnvironment = [Environment]::GetEnvironmentVariable('LOC_GROUP_CODE_BACKFILL_ENABLED', 'Process')
+    try {
+        Remove-Item Env:LOC_GROUP_CODE_BACKFILL_ENABLED -ErrorAction SilentlyContinue
+        $backfillDefaultOutput = & $phpSource '-n' '-d' $phpSessionArgument $GroupBackfillConfigTest 'true' 2>&1
+        if ($LASTEXITCODE -ne 0 -or ($backfillDefaultOutput -join "`n") -notmatch 'group_backfill_config_test: OK \(true\)') {
+            Fail "default group backfill config regression test failed: $($backfillDefaultOutput -join ' ')"
+        }
+        $env:LOC_GROUP_CODE_BACKFILL_ENABLED = 'false'
+        $backfillFalseOutput = & $phpSource '-n' '-d' $phpSessionArgument $GroupBackfillConfigTest 'false' 2>&1
+        if ($LASTEXITCODE -ne 0 -or ($backfillFalseOutput -join "`n") -notmatch 'group_backfill_config_test: OK \(false\)') {
+            Fail "explicit-false group backfill config regression test failed: $($backfillFalseOutput -join ' ')"
+        }
+        $env:LOC_GROUP_CODE_BACKFILL_ENABLED = 'true'
+        $backfillTrueOutput = & $phpSource '-n' '-d' $phpSessionArgument $GroupBackfillConfigTest 'true' 2>&1
+        if ($LASTEXITCODE -ne 0 -or ($backfillTrueOutput -join "`n") -notmatch 'group_backfill_config_test: OK \(true\)') {
+            Fail "explicit-true group backfill config regression test failed: $($backfillTrueOutput -join ' ')"
+        }
+    } finally {
+        if ($null -eq $originalBackfillEnvironment) {
+            Remove-Item Env:LOC_GROUP_CODE_BACKFILL_ENABLED -ErrorAction SilentlyContinue
+        } else {
+            $env:LOC_GROUP_CODE_BACKFILL_ENABLED = $originalBackfillEnvironment
+        }
+    }
+} finally {
+    $resolvedPhpSessionRoot = [System.IO.Path]::GetFullPath($phpSessionRoot)
+    $resolvedPrivateRuntime = [System.IO.Path]::GetFullPath((Join-Path $Root 'private\runtime')).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    if ($resolvedPhpSessionRoot.StartsWith($resolvedPrivateRuntime, [System.StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $resolvedPhpSessionRoot)) {
+        Remove-Item -LiteralPath $resolvedPhpSessionRoot -Recurse -Force
+    }
+}
 
 $javac = Get-Command 'javac.exe' -ErrorAction SilentlyContinue
 $java = Get-Command 'java.exe' -ErrorAction SilentlyContinue
 if (-not $javac -or -not $java) {
     Fail 'javac.exe and java.exe are required to run the P2P merge policy regression test.'
 }
-$testOutputRoot = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), 'family-location-p2p-policy-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $testOutputRoot | Out-Null
+$testRuntimeRoot = Join-Path $Root 'private\runtime'
+$testOutputRoot = Join-Path $testRuntimeRoot ('verify-public-jvm-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $testOutputRoot -Force | Out-Null
 try {
-    & $javac.Source '-encoding' 'UTF-8' '-Xlint:-options' '--release' '8' '-d' $testOutputRoot $P2PPolicy $P2PPolicyTest
+    & $javac.Source '-encoding' 'UTF-8' '-Xlint:-options' '--release' '8' '-d' $testOutputRoot `
+        $P2PPolicy $P2PPolicyTest `
+        $ReportAttemptGate $ReportAttemptGateTest `
+        $DiagnosticSourcePolicy $DiagnosticSourcePolicyTest
     if ($LASTEXITCODE -ne 0) {
         Fail 'P2P merge policy regression test did not compile.'
     }
@@ -269,11 +490,23 @@ try {
     if ($LASTEXITCODE -ne 0) {
         Fail "P2P merge policy regression test failed: $($policyTestOutput -join ' ')"
     }
+    $reportGateTestOutput = & $java.Source '-cp' $testOutputRoot 'com.familylocation.client.ReportAttemptGateTest' 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Fail "Report-attempt gate regression test failed: $($reportGateTestOutput -join ' ')"
+    }
+    $diagnosticSourcePolicyOutput = & $java.Source '-cp' $testOutputRoot 'com.familylocation.client.DiagnosticSourcePolicyTest' 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Fail "Diagnostic-source policy regression test failed: $($diagnosticSourcePolicyOutput -join ' ')"
+    }
 } finally {
     $resolvedTestOutput = [System.IO.Path]::GetFullPath($testOutputRoot)
-    $resolvedTemp = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
-    if ($resolvedTestOutput.StartsWith($resolvedTemp, [System.StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $resolvedTestOutput)) {
+    $resolvedRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    if ($resolvedTestOutput.StartsWith($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $resolvedTestOutput)) {
         Remove-Item -LiteralPath $resolvedTestOutput -Recurse -Force
+    }
+    if ((Test-Path -LiteralPath $testRuntimeRoot -PathType Container) -and
+        @(Get-ChildItem -LiteralPath $testRuntimeRoot -Force).Count -eq 0) {
+        Remove-Item -LiteralPath $testRuntimeRoot -Force
     }
 }
 
@@ -364,17 +597,33 @@ Assert-MatchCount 'Nginx AMap proxy' $NginxText 'if \(\$loc_amap_security_jscode
 Assert-MatchCount 'Nginx AMap proxy' $NginxText 'set \$args "\$args&jscode=\$loc_amap_security_jscode";' 3 'only credentialed endpoints may append the external secret.'
 Assert-Contains 'Nginx AMap proxy' $NginxText 'location @amap_upstream_redirect_blocked' 'redirect interception must terminate at a local error handler.'
 
-# The PHP backend must store and validate 128-bit lowercase hexadecimal group codes, including existing databases.
-$generatorText = Text-BetweenMarkers $BootstrapText 'function generate_group_code' 'function ensure_family_group_codes' 'PHP group-code generator'
-Assert-Contains 'PHP group-code generator' $generatorText 'bin2hex\(random_bytes\(16\)\)' 'group codes must use 128 bits of cryptographic randomness.'
-Assert-NotContains 'PHP group-code generator' $generatorText 'random_int\(|strlen\(\$alphabet\)|\$index < 6' 'the legacy six-character generator must be removed.'
-Assert-Contains 'PHP install schema' $InstallSqlText 'group_code[ \t]+VARCHAR\(32\)[ \t]+NULL[ \t]+UNIQUE' 'fresh databases must allocate 32 characters for group codes.'
-Assert-Contains 'PHP runtime schema' $BootstrapText 'group_code[ \t]+VARCHAR\(32\)[ \t]+NULL[ \t]+UNIQUE' 'runtime schema creation must allocate 32 characters for group codes.'
-Assert-Contains 'PHP runtime schema' $BootstrapText 'add_column_if_missing\(\$pdo, ''family_groups'', ''group_code'', ''VARCHAR\(32\) NULL UNIQUE''\)' 'runtime schema additions must allocate 32 characters for group codes.'
-Assert-Contains 'PHP runtime schema' $BootstrapText 'ALTER[ \t]+TABLE[ \t]+family_groups[ \t]+MODIFY(?:[ \t]+COLUMN)?[ \t]+group_code[ \t]+VARCHAR\(32\)' 'existing databases must widen the group_code column before rotation.'
-Assert-Contains 'PHP runtime migration' $BootstrapText '\^\[0-9a-f\]\{32\}\$' 'legacy or malformed group codes must be detected and rotated.'
-Assert-Contains 'Registration API' $RegisterApiText '\^\[0-9a-f\]\{32\}\$' 'registration joins must validate 32-character lowercase hexadecimal group codes.'
-Assert-Contains 'Groups API' $GroupsApiText '\^\[0-9a-f\]\{32\}\$' 'authenticated joins must validate 32-character lowercase hexadecimal group codes.'
+# New group codes are eight lowercase alphanumeric characters; old 32-hex values remain unique aliases.
+$generatorText = Text-BetweenMarkers $BootstrapText 'function generate_legacy_group_code_candidate' 'function ensure_family_group_codes' 'PHP group-code generator'
+Assert-Contains 'PHP group-code generator' $generatorText 'generate_lower_alphanumeric_code\(8\)' 'new group codes must be eight lowercase alphanumeric characters.'
+Assert-Contains 'PHP group-code generator' $generatorText 'bin2hex\(random_bytes\(16\)\)' 'the compatibility stage must continue writing 32-hex codes.'
+Assert-Contains 'PHP group-code generator' $generatorText 'LOC_GROUP_CODE_BACKFILL_ENABLED' 'eight-character writes must be gated by the rollout state.'
+Assert-Contains 'PHP group-code generator' $generatorText 'group_code_backfill_is_current\(\$pdo\)' 'a completed migration marker must keep all compatible workers on eight-character writes.'
+Assert-Contains 'PHP group-code generator' $generatorText 'group_code = \? OR legacy_group_code = \?' 'generated codes must not collide with current or legacy codes.'
+Assert-NotContains 'PHP group-code generator' $generatorText '\$index < 6' 'the obsolete six-character generator must be absent.'
+Assert-Contains 'PHP staged rollout config' $PrivateConfigText '\$locGroupCodeBackfillEnabled = true;' 'group-code backfill must default to current eight-character codes.'
+Assert-Contains 'PHP staged rollout config' $PrivateConfigText "getenv\('LOC_GROUP_CODE_BACKFILL_ENABLED'\)" 'operators must be able to opt into the first compatibility stage explicitly.'
+Assert-Contains 'PHP staged rollout config' $PrivateConfigText '\$locGroupCodeBackfillEnabled = \$locGroupCodeBackfillParsed;' 'an explicit false environment value must override the default.'
+Assert-NotContains 'PHP staged rollout config' $PrivateConfigText '\$locGroupCodeBackfillEnabled = false;' 'the public default must not create new 32-character group codes.'
+Assert-Contains 'PHP schema fast path' $BootstrapText 'schema_runtime_state_is_current\(\$pdo\)' 'normal requests must skip the migration lock after the schema marker is current.'
+Assert-Contains 'PHP schema lock' $BootstrapText 'SELECT GET_LOCK\(\?, \?\)' 'schema changes must be serialized across PHP workers.'
+Assert-Contains 'PHP schema lock' $BootstrapText 'SELECT RELEASE_LOCK\(\?\)' 'the schema advisory lock must be released.'
+foreach ($schemaText in @($InstallSqlText, $BootstrapText)) {
+    Assert-Contains 'PHP group-code schema' $schemaText 'group_code[ \t]+VARCHAR\(32\)[ \t]+NULL[ \t]+UNIQUE' 'the current-code column must remain wide enough for migration compatibility.'
+    Assert-Contains 'PHP group-code schema' $schemaText 'legacy_group_code[ \t]+VARCHAR\(32\)[ \t]+NULL' 'the legacy alias column is required.'
+    Assert-Contains 'PHP group-code schema' $schemaText 'uniq_family_groups_legacy_group_code' 'legacy aliases must be unique.'
+}
+Assert-Contains 'PHP runtime migration' $BootstrapText 'SET[ \t]+legacy_group_code = \?, group_code = \?' 'existing 32-hex codes must move atomically into the alias column.'
+Assert-Contains 'PHP runtime migration' $BootstrapText '\^\[0-9a-z\]\{8\}\$' 'current eight-character codes must be recognized.'
+Assert-Contains 'PHP runtime migration' $BootstrapText '\^\[0-9a-f\]\{32\}\$' 'legacy 32-hex aliases must be recognized.'
+foreach ($apiText in @($RegisterApiText, $GroupsApiText)) {
+    Assert-Contains 'Group join API' $apiText 'is_valid_family_group_code' 'group joins must share the compatibility validator.'
+    Assert-Contains 'Group join API' $apiText 'find_family_group_by_code' 'group joins must resolve current and legacy codes.'
+}
 Assert-NotContains 'PHP group-code paths' ($GeneratorText + $RegisterApiText + $GroupsApiText) '\^\[0-9a-z\]\{6\}\$' 'legacy six-character validation must be absent.';
 
 Write-Host "verify-public OK"

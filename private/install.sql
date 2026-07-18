@@ -61,12 +61,14 @@ CREATE TABLE IF NOT EXISTS family_groups (
     group_name VARCHAR(100) NOT NULL UNIQUE,
     display_name VARCHAR(100) NOT NULL DEFAULT '',
     group_code VARCHAR(32) NULL UNIQUE,
+    legacy_group_code VARCHAR(32) NULL,
     owner_user_id INT UNSIGNED NULL,
     p2p_enabled_at DATETIME NULL,
     p2p_enabled_by INT UNSIGNED NULL,
     p2p_key_version INT UNSIGNED NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_family_groups_legacy_group_code (legacy_group_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS user_groups (

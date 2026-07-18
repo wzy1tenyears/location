@@ -74,11 +74,27 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.WeakHashMap;
+import java.util.function.BooleanSupplier;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletionService;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -113,6 +129,10 @@ public class MainActivity extends Activity {
     private static final String TAG = "FamilyLocationNative";
     private static final String UPDATE_APK_NAME = "location-release.apk";
     private static final long MAX_CACHE_BYTES = 50L * 1024L * 1024L;
+    private static final long REPORT_WATCHDOG_MS = 35_000L;
+    private static final long ADDRESS_DIAGNOSTICS_BUDGET_MS = 10_000L;
+    private static final long ADDRESS_WEBVIEW_TIMEOUT_MS = 6_000L;
+    private static final long ADDRESS_PROBE_COMPLETION_MARGIN_MS = 250L;
     private static final String VIEW_TAG_DYNAMIC = "dynamic";
     private static final String VIEW_TAG_HOME_HISTORY = "home_history";
     private static final int TAB_POSITION = 0;
@@ -132,13 +152,27 @@ public class MainActivity extends Activity {
     private int historyUserId = 0;
     private int currentTab = TAB_POSITION;
     private boolean reporting;
+    private final ReportAttemptGate reportAttemptGate = new ReportAttemptGate();
+    private android.location.LocationManager reportLocationManager;
+    private android.location.LocationListener reportLocationListener;
+    private long reportLocationListenerToken;
+    private Runnable reportWatchdog;
+    private final Object reportConnectionLock = new Object();
+    private HttpURLConnection activeReportConnection;
+    private long activeReportConnectionToken;
+    private volatile long reportAttemptDeadlineNanos;
+    private volatile long reportAttemptIdToken;
+    private volatile String reportAttemptId = "";
     private long updateDownloadId = -1L;
     private long pendingInstallDownloadId = -1L;
     private long installingDownloadId = -1L;
     private BroadcastReceiver updateReceiver;
     private final List<WebView> managedWebViews = new ArrayList<>();
+    private final Map<WebView, String> pendingMapRecords = new WeakHashMap<>();
     private WebView homeMapWebView;
     private JSONArray homeMapBaseRecords = new JSONArray();
+    private volatile long homeRefreshGeneration;
+    private volatile long homeHistoryGeneration;
     private volatile boolean activityForeground;
     private boolean batteryOptimizationPromptShown;
     private boolean exactAlarmPromptShown;
@@ -242,8 +276,10 @@ public class MainActivity extends Activity {
 
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
-                runUi(this::showHome);
-                refreshLocations();
+                runUi(() -> {
+                    showHome();
+                    refreshLocations();
+                });
             } catch (Exception exception) {
                 runUi(this::showLogin);
             }
@@ -310,7 +346,7 @@ public class MainActivity extends Activity {
         passwordConfirm.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         EditText inviteCode = input("邀请码");
         EditText groupName = input("家庭组名称：创建型邀请码需要填写");
-        EditText groupCode = input("家庭组号：加入型邀请码需要填写 32 位小写十六进制组号");
+        EditText groupCode = input("家庭组号：加入型邀请码填写 8 位字母或数字；已有 32 位旧组号仍可使用");
         groupCode.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         CheckBox terms = termsCheckBox();
 
@@ -512,19 +548,19 @@ public class MainActivity extends Activity {
         }
         groupName.setEnabled(true);
         groupCode.setEnabled(true);
-        setStatus("邀请码将在提交注册时验证。创建家庭组可填写名称，加入已有家庭组可填写 32 位组号。");
+        setStatus("邀请码将在提交注册时验证。创建家庭组可填写名称，加入已有家庭组请填写 8 位字母或数字组号。");
     }
 
     private void register(String username, String displayName, String password, String passwordConfirm, String inviteCode, String groupName, String groupCode, boolean termsAccepted) {
         String usernameValue = username.trim();
         String inviteCodeValue = inviteCode.trim();
-        String groupCodeValue = groupCode.trim().toLowerCase(Locale.ROOT);
+        String groupCodeValue = normalizeGroupCode(groupCode);
         if (usernameValue.isEmpty() || password.isEmpty() || passwordConfirm.isEmpty() || inviteCodeValue.isEmpty()) {
             setStatus("请填写账号、密码、确认密码和邀请码。");
             return;
         }
-        if (!groupCodeValue.isEmpty() && !groupCodeValue.matches("^[0-9a-f]{32}$")) {
-            setStatus("家庭组号必须是 32 位小写十六进制字符。");
+        if (!groupCodeValue.isEmpty() && !isAcceptedGroupCode(groupCodeValue)) {
+            setStatus("家庭组号必须是 8 位字母或数字；已有的 32 位旧组号仍可加入。");
             return;
         }
         if (!termsAccepted) {
@@ -556,8 +592,10 @@ public class MainActivity extends Activity {
 
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
-                runUi(this::showHome);
-                refreshLocations();
+                runUi(() -> {
+                    showHome();
+                    refreshLocations();
+                });
             } catch (Exception exception) {
                 runUi(() -> setStatus(exception.getMessage()));
             }
@@ -596,8 +634,10 @@ public class MainActivity extends Activity {
 
                 currentUser = user;
                 persistUserSession(user, response.optInt("report_interval_seconds", 300));
-                runUi(this::showHome);
-                refreshLocations();
+                runUi(() -> {
+                    showHome();
+                    refreshLocations();
+                });
             } catch (ChallengeCancelledException exception) {
                 runUi(() -> setStatus(""));
             } catch (Exception exception) {
@@ -725,13 +765,17 @@ public class MainActivity extends Activity {
 
 
     private void showHome() {
+        homeRefreshGeneration += 1L;
+        homeHistoryGeneration += 1L;
         currentTab = TAB_POSITION;
         LinearLayout card = screenWithAction("位置", announcementIconButton());
         TextView userLine = compactInfoPanel(compactUserDisplayName(currentUser), false);
         reportButton = null;
         refreshButton = null;
         card.addView(userLine, blockParams(10));
+        attachRetainedHomeMap(card);
         setScreen(card, false);
+        appendHomeActionPanel();
         requestStartupPermissions();
         syncKeepAliveService();
         maybeAutoShowAnnouncement();
@@ -1022,11 +1066,14 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             cookieManager.flush();
         }
-        String recordsJson = records.toString();
+        pendingMapRecords.put(map, records.toString());
         map.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
-                renderMapRecords(view, recordsJson);
+                String latestRecords = pendingMapRecords.get(view);
+                if (latestRecords != null) {
+                    renderMapRecords(view, latestRecords);
+                }
             }
 
             @Override
@@ -1065,6 +1112,7 @@ public class MainActivity extends Activity {
         if (view == null || recordsJson == null) {
             return;
         }
+        pendingMapRecords.put(view, recordsJson);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
             view.evaluateJavascript("window.renderLocHistoryMap(" + recordsJson + ")", null);
         } else {
@@ -1073,6 +1121,7 @@ public class MainActivity extends Activity {
     }
 
     private void showMapWebViewError(WebView view, String message) {
+        pendingMapRecords.remove(view);
         String safeMessage = htmlEscape(message == null || message.trim().isEmpty() ? "地图加载失败，请稍后重试。" : message.trim());
         String html = "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>html,body{margin:0;height:100%;background:#eef3f1;font-family:sans-serif;color:#5c6f6a}.empty{height:100%;display:grid;place-items:center;text-align:center;padding:18px;box-sizing:border-box}</style></head><body><div class=\"empty\">" + safeMessage + "</div></body></html>";
         view.loadDataWithBaseURL(serverUrl(), html, "text/html", "UTF-8", null);
@@ -1117,7 +1166,10 @@ public class MainActivity extends Activity {
         if (!role.isEmpty()) {
             builder.append(" / ").append(role);
         }
-        builder.append("\n时间：").append(location.optString("created_at", ""));
+        builder.append("\n").append(historyTimeLabel(location)).append("：").append(historyTimeText(location));
+        if (hasStayAggregation(location)) {
+            builder.append("\n上报次数：").append(Math.max(1, location.optInt("report_count", 1))).append(" 次");
+        }
         String groupName = location.optString("group_name", "");
         if (!groupName.isEmpty()) {
             builder.append("\n家庭组：").append(groupName);
@@ -1172,6 +1224,58 @@ public class MainActivity extends Activity {
         builder.append("\n").append(label).append("：").append(formatted).append(suffix);
     }
 
+    private boolean hasStayAggregation(JSONObject location) {
+        return location != null
+            && (location.has("first_reported_at")
+                || location.has("last_reported_at")
+                || location.has("stay_duration_seconds")
+                || location.optInt("report_count", 1) > 1);
+    }
+
+    private String historyTimeLabel(JSONObject location) {
+        return hasStayAggregation(location) ? "停留时间" : "上报时间";
+    }
+
+    private String historyTimeText(JSONObject location) {
+        if (location == null) {
+            return "暂无";
+        }
+        if (!hasStayAggregation(location)) {
+            return firstText(location.optString("created_at", ""), location.optString("updated_at", ""), "暂无");
+        }
+        String first = firstText(
+            location.optString("first_reported_at", ""),
+            location.optString("created_at", ""),
+            location.optString("updated_at", ""),
+            "暂无"
+        );
+        String last = firstText(
+            location.optString("last_reported_at", ""),
+            location.optString("updated_at", ""),
+            location.optString("created_at", ""),
+            first
+        );
+        return first + " 至 " + last + "（" + formatStayDuration(Math.max(0L, location.optLong("stay_duration_seconds", 0L))) + "）";
+    }
+
+    private String formatStayDuration(long seconds) {
+        long safeSeconds = Math.max(0L, seconds);
+        long days = safeSeconds / 86400L;
+        long hours = (safeSeconds % 86400L) / 3600L;
+        long minutes = (safeSeconds % 3600L) / 60L;
+        long remainingSeconds = safeSeconds % 60L;
+        if (days > 0L) {
+            return days + " 天 " + hours + " 小时";
+        }
+        if (hours > 0L) {
+            return hours + " 小时 " + minutes + " 分钟";
+        }
+        if (minutes > 0L) {
+            return minutes + " 分钟 " + remainingSeconds + " 秒";
+        }
+        return remainingSeconds + " 秒";
+    }
+
     private String historyAddressStatus(JSONObject location, JSONObject diagnostics) {
         if (diagnostics == null || diagnostics.optJSONArray("sources") == null) {
             return location != null && location.optBoolean("address_mismatch", false)
@@ -1195,17 +1299,30 @@ public class MainActivity extends Activity {
         if (sources == null || sources.length() == 0) {
             return;
         }
-        builder.append("\n地址来源：");
+        Map<String, JSONObject> rows = new LinkedHashMap<>();
         for (int index = 0; index < sources.length(); index += 1) {
             JSONObject source = sources.optJSONObject(index);
             if (source == null) {
                 continue;
             }
+            String key = diagnosticSourceMergeKey(source, index);
+            JSONObject precise = mostPreciseDiagnosticSource(source);
+            JSONObject selected = rows.get(key);
+            if (diagnosticCandidateIsMorePrecise(precise, selected)) {
+                rows.put(key, precise);
+            }
+        }
+        builder.append("\n地址来源：");
+        for (JSONObject source : rows.values()) {
             String label = source.optString("name", source.optString("type", "地址"));
-            String sourceAddress = source.optString("address", source.optString("ip", "未知"));
+            String sourceAddress = diagnosticSourceAddress(source);
             String city = source.optString("city", "");
             builder.append("\n- ").append(label).append("：").append(sourceAddress);
-            if (!city.isEmpty()) {
+            String provider = source.optString("provider", "").trim();
+            if (!provider.isEmpty()) {
+                builder.append(" / 来源：").append(provider);
+            }
+            if (!city.isEmpty() && !sourceAddress.contains(city)) {
                 builder.append(" / 城市：").append(city);
             }
             if (source.optBoolean("mobile_network_uncertain", false)) {
@@ -1539,7 +1656,7 @@ public class MainActivity extends Activity {
     private void showGroups() {
         currentTab = TAB_GROUPS;
         LinearLayout card = screen("家庭组管理");
-        EditText joinCode = input("输入 32 位小写十六进制家庭组号");
+        EditText joinCode = input("输入 8 位字母或数字家庭组号");
         Button join = primaryButton("加入家庭组");
         Button refresh = secondaryButton("刷新家庭组");
         Button leave = secondaryButton("退出当前家庭组");
@@ -1660,9 +1777,9 @@ public class MainActivity extends Activity {
         setStatus("正在管理：" + displayName);
     }
     private void joinGroupByCode(String groupCode) {
-        String code = groupCode.trim().toLowerCase(java.util.Locale.US);
-        if (!code.matches("^[0-9a-f]{32}$")) {
-            setStatus("请输入 32 位小写十六进制家庭组号。");
+        String code = normalizeGroupCode(groupCode);
+        if (!isAcceptedGroupCode(code)) {
+            setStatus("请输入 8 位字母或数字家庭组号；已有的 32 位旧组号仍可使用。");
             return;
         }
 
@@ -1681,6 +1798,15 @@ public class MainActivity extends Activity {
                 runUi(() -> setStatus(exception.getMessage()));
             }
         });
+    }
+
+    private String normalizeGroupCode(String groupCode) {
+        return groupCode == null ? "" : groupCode.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private boolean isAcceptedGroupCode(String groupCode) {
+        String code = normalizeGroupCode(groupCode);
+        return code.matches("^[0-9a-z]{8}$") || code.matches("^[0-9a-f]{32}$");
     }
 
     private void confirmLeaveCurrentGroup() {
@@ -2058,7 +2184,6 @@ public class MainActivity extends Activity {
     }
 
     private void showSettings() {
-        destroyManagedWebViews();
         currentTab = TAB_MINE;
         LinearLayout card = screen("我的");
         TextView account = infoPanel(userDisplayName(currentUser), false);
@@ -2207,34 +2332,64 @@ public class MainActivity extends Activity {
     }
 
     private void refreshLocations() {
-        if (refreshButton != null) {
-            refreshButton.setEnabled(false);
+        if (content == null || currentTab != TAB_POSITION) {
+            return;
+        }
+        final long refreshGeneration = ++homeRefreshGeneration;
+        final LinearLayout targetContent = content;
+        final int targetTab = currentTab;
+        final String targetGroupName = currentGroupName();
+        final Button targetRefreshButton = refreshButton;
+        if (targetRefreshButton != null) {
+            targetRefreshButton.setEnabled(false);
         }
         setStatus("正在刷新位置");
         runBackground(() -> {
             try {
                 String endpoint = "api/locations.php";
-                if (!selectedGroupName.isEmpty()) {
-                    endpoint += "?group_name=" + urlEncode(selectedGroupName);
+                if (!targetGroupName.isEmpty()) {
+                    endpoint += "?group_name=" + urlEncode(targetGroupName);
                 }
                 JSONObject response = getJson(endpoint);
                 JSONObject user = response.optJSONObject("user");
-                if (user != null) {
-                    currentUser = user;
-                    persistUserSession(user, response.optInt("report_interval_seconds", 300));
+                if (!isCurrentHomeRequest(refreshGeneration, targetContent, targetTab, targetGroupName)) {
+                    return;
                 }
-                decryptLocationsResponse(response);
-                runUi(() -> renderLocations(response));
+                decryptLocationsResponse(response, targetGroupName,
+                    () -> isCurrentHomeRequest(refreshGeneration, targetContent, targetTab, targetGroupName));
+                runUi(() -> {
+                    if (!isCurrentHomeRequest(refreshGeneration, targetContent, targetTab, targetGroupName)) {
+                        return;
+                    }
+                    if (user != null) {
+                        currentUser = user;
+                        persistUserSession(user, response.optInt("report_interval_seconds", 300));
+                    }
+                    renderLocations(response);
+                });
             } catch (Exception exception) {
-                runUi(() -> setStatus(exception.getMessage()));
+                runUi(() -> {
+                    if (isCurrentHomeRequest(refreshGeneration, targetContent, targetTab, targetGroupName)) {
+                        setStatus(exception.getMessage());
+                    }
+                });
             } finally {
                 runUi(() -> {
-                    if (refreshButton != null) {
-                        refreshButton.setEnabled(true);
+                    if (isCurrentHomeRequest(refreshGeneration, targetContent, targetTab, targetGroupName)
+                        && targetRefreshButton != null) {
+                        targetRefreshButton.setEnabled(true);
                     }
                 });
             }
         });
+    }
+
+    private boolean isCurrentHomeRequest(long generation, LinearLayout targetContent, int targetTab, String targetGroupName) {
+        return generation == homeRefreshGeneration
+            && targetTab == TAB_POSITION
+            && currentTab == targetTab
+            && content == targetContent
+            && targetGroupName.equals(currentGroupName());
     }
 
     private void renderLocations(JSONObject response) {
@@ -2243,7 +2398,6 @@ public class MainActivity extends Activity {
         }
 
         removeDynamicRows();
-        homeMapWebView = null;
         homeMapBaseRecords = new JSONArray();
         JSONArray groups = currentUser == null ? new JSONArray() : currentUser.optJSONArray("groups");
         if (groups != null && groups.length() > 1) {
@@ -2295,6 +2449,7 @@ public class MainActivity extends Activity {
         continuousReportButton.setTag("dynamic");
 
         reportButton.setOnClickListener(view -> reportCurrentLocation());
+        syncReportButtonState();
         refreshButton.setOnClickListener(view -> refreshLocations());
         crossGroupSyncButton.setOnClickListener(view -> showCrossGroupSync());
         continuousReportButton.setOnClickListener(view -> toggleGuardianContinuousReport());
@@ -2335,31 +2490,39 @@ public class MainActivity extends Activity {
         if (content == null || currentTab != TAB_POSITION) {
             return;
         }
+        final long historyGeneration = ++homeHistoryGeneration;
         final int page = Math.max(1, historyPage);
         final int perPage = normalizedHistoryPageSize(historyPageSize);
         final int userId = Math.max(0, historyUserId);
         final LinearLayout targetContent = content;
-        final String targetGroupName = selectedGroupName;
+        final int targetTab = currentTab;
+        final String targetGroupName = currentGroupName();
         appendHomeHistoryLoading();
         runBackground(() -> {
             try {
-                String endpoint = "api/history.php?page=" + page + "&per_page=" + perPage + "&map_per_user=20";
-                if (userId > 0) {
-                    endpoint += "&user_id=" + userId;
+                final int mapPerUser = 20;
+                JSONObject request = new JSONObject()
+                    .put("group_name", targetGroupName)
+                    .put("page", page)
+                    .put("per_page", perPage)
+                    .put("map_per_user", mapPerUser)
+                    .put("user_id", userId)
+                    .put("client_merge_snapshot", true);
+                JSONObject response = postJson("api/history.php", request);
+                BooleanSupplier requestActive = () -> isCurrentHomeHistoryRequest(
+                    historyGeneration, targetContent, targetTab, targetGroupName, page, perPage, userId);
+                if (!requestActive.getAsBoolean()) {
+                    return;
                 }
-                if (!targetGroupName.isEmpty()) {
-                    endpoint += "&group_name=" + urlEncode(targetGroupName);
-                }
-                JSONObject response = getJson(endpoint);
-                decryptHistoryResponse(response);
+                decryptHistoryResponse(response, targetGroupName, page, perPage, mapPerUser, userId, requestActive);
                 runUi(() -> {
-                    if (content == targetContent && targetGroupName.equals(selectedGroupName)) {
+                    if (isCurrentHomeHistoryRequest(historyGeneration, targetContent, targetTab, targetGroupName, page, perPage, userId)) {
                         renderHomeHistorySummary(response);
                     }
                 });
             } catch (Exception exception) {
                 runUi(() -> {
-                    if (content != targetContent || !targetGroupName.equals(selectedGroupName)) {
+                    if (!isCurrentHomeHistoryRequest(historyGeneration, targetContent, targetTab, targetGroupName, page, perPage, userId)) {
                         return;
                     }
                     removeHomeHistoryRows();
@@ -2372,6 +2535,18 @@ public class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    private boolean isCurrentHomeHistoryRequest(long generation, LinearLayout targetContent, int targetTab,
+        String targetGroupName, int page, int perPage, int userId) {
+        return generation == homeHistoryGeneration
+            && targetTab == TAB_POSITION
+            && currentTab == targetTab
+            && content == targetContent
+            && targetGroupName.equals(currentGroupName())
+            && page == Math.max(1, historyPage)
+            && perPage == normalizedHistoryPageSize(historyPageSize)
+            && userId == Math.max(0, historyUserId);
     }
 
     private void appendHomeHistoryLoading() {
@@ -2404,6 +2579,11 @@ public class MainActivity extends Activity {
         content.addView(title, blockParams(8));
 
         renderHomeHistoryControls(response, total, totalPages);
+        if (!response.optBoolean("client_merge_applied", false)) {
+            TextView warning = compactInfoPanel("完整历史窗口不可用；本次按服务器返回记录显示，未执行客户端 25 米精确停留合并。", true);
+            warning.setTag(VIEW_TAG_HOME_HISTORY);
+            content.addView(warning, blockParams(8));
+        }
         updateHomeMapWithHistory(response.optJSONArray("map_history"));
         if (history == null || history.length() == 0) {
             TextView empty = compactInfoPanel("暂无历史定位记录。", true);
@@ -2472,12 +2652,40 @@ public class MainActivity extends Activity {
             content.addView(placeholder, blockParams(12));
             return;
         }
-        WebView map = locationMapWebView(records);
-        homeMapWebView = map;
+        WebView map = homeMapWebView;
+        if (map == null) {
+            map = locationMapWebView(records);
+            homeMapWebView = map;
+        } else {
+            ViewGroup parent = map.getParent() instanceof ViewGroup ? (ViewGroup) map.getParent() : null;
+            if (parent != null) {
+                parent.removeView(map);
+            }
+            map.setTag(VIEW_TAG_DYNAMIC);
+            renderMapRecords(map, records);
+        }
         homeMapBaseRecords = records;
         LinearLayout.LayoutParams params = blockParams(12);
         params.height = dp(260);
         content.addView(map, params);
+    }
+
+    private void attachRetainedHomeMap(LinearLayout targetContent) {
+        WebView map = homeMapWebView;
+        if (targetContent == null || map == null || !canLoadForegroundWebView()) {
+            return;
+        }
+        ViewGroup parent = map.getParent() instanceof ViewGroup ? (ViewGroup) map.getParent() : null;
+        if (parent != null) {
+            parent.removeView(map);
+        }
+        TextView title = dynamicSectionTitle("位置地图");
+        title.setTag(VIEW_TAG_DYNAMIC);
+        targetContent.addView(title, blockParams(8));
+        map.setTag(VIEW_TAG_DYNAMIC);
+        LinearLayout.LayoutParams params = blockParams(12);
+        params.height = dp(260);
+        targetContent.addView(map, params);
     }
 
     private void updateHomeMapWithHistory(JSONArray mapHistory) {
@@ -2530,10 +2738,10 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void decryptLocationsResponse(JSONObject response) {
-        String groupName = selectedGroupName.isEmpty() && currentUser != null
-            ? currentUser.optString("group_name", "")
-            : selectedGroupName;
+    private void decryptLocationsResponse(JSONObject response, String groupName, BooleanSupplier requestActive) {
+        if (!requestActive.getAsBoolean()) {
+            return;
+        }
         JSONObject mine = response.optJSONObject("mine");
         if (mine != null) {
             try {
@@ -2542,22 +2750,88 @@ public class MainActivity extends Activity {
                 Log.w(TAG, "P2P latest decrypt failed: " + exception.getMessage());
             }
         }
-        decryptLocationArray(response.optJSONArray("monitors"), groupName);
-        decryptLocationArray(response.optJSONArray("guardians"), groupName);
+        decryptLocationArray(response.optJSONArray("monitors"), groupName, requestActive);
+        decryptLocationArray(response.optJSONArray("guardians"), groupName, requestActive);
     }
 
-    private void decryptHistoryResponse(JSONObject response) {
+    private void decryptHistoryResponse(JSONObject response, String targetGroupName, int requestedPage,
+        int perPage, int mapPerUser, int userId, BooleanSupplier requestActive) {
         JSONObject selectedGroup = response.optJSONObject("selected_group");
-        String groupName = selectedGroup == null ? selectedGroupName : selectedGroup.optString("group_name", selectedGroupName);
-        decryptLocationArray(response.optJSONArray("history"), groupName);
-        decryptLocationArray(response.optJSONArray("map_history"), groupName);
+        String groupName = selectedGroup == null ? targetGroupName : selectedGroup.optString("group_name", targetGroupName);
+        JSONArray clientMergeHistory = response.optJSONArray("client_merge_history");
+        if (response.optBoolean("client_merge_complete", false) && clientMergeHistory != null) {
+            decryptLocationArray(clientMergeHistory, groupName, requestActive);
+            if (!requestActive.getAsBoolean()) {
+                return;
+            }
+            JSONArray merged = mergeCompleteHistorySnapshot(clientMergeHistory);
+            applyClientMergeHistorySnapshot(response, merged, requestedPage, perPage, mapPerUser, userId);
+            return;
+        }
+        decryptLocationArray(response.optJSONArray("history"), groupName, requestActive);
+        decryptLocationArray(response.optJSONArray("map_history"), groupName, requestActive);
+        try {
+            response.put("client_merge_applied", false);
+            response.remove("client_merge_history");
+        } catch (Exception exception) {
+            Log.w(TAG, "P2P snapshot fallback marker failed: " + exception.getMessage());
+        }
+    }
+
+    private void applyClientMergeHistorySnapshot(JSONObject response, JSONArray merged, int requestedPage, int perPage, int mapPerUser, int userId) {
+        int total = merged == null ? 0 : merged.length();
+        P2PRecordMergePolicy.PageWindow window = P2PRecordMergePolicy.pageWindow(total, requestedPage, perPage);
+        JSONArray pageHistory = new JSONArray();
+        List<String> partitionKeys = new ArrayList<>();
+        for (int index = 0; index < total; index += 1) {
+            JSONObject location = merged.optJSONObject(index);
+            partitionKeys.add(location == null ? "record:" + index : firstText(stayPartitionKey(location), "record:" + index));
+            if (location != null && index >= window.startIndex() && index < window.endIndex()) {
+                pageHistory.put(location);
+            }
+        }
+
+        JSONArray mapHistory = new JSONArray();
+        for (int index : P2PRecordMergePolicy.mapIndices(partitionKeys, mapPerUser)) {
+            JSONObject location = merged.optJSONObject(index);
+            if (location != null) {
+                mapHistory.put(location);
+            }
+        }
+
+        try {
+            JSONObject pagination = response.optJSONObject("pagination");
+            if (pagination == null) {
+                pagination = new JSONObject();
+            }
+            pagination.put("page", window.page())
+                .put("per_page", window.perPage())
+                .put("map_per_user", Math.max(0, mapPerUser))
+                .put("total", window.total())
+                .put("total_pages", window.totalPages())
+                .put("user_id", Math.max(0, userId));
+            response.put("history", pageHistory)
+                .put("map_history", mapHistory)
+                .put("pagination", pagination)
+                .put("client_merge_applied", true);
+            response.remove("client_merge_history");
+        } catch (Exception exception) {
+            throw new IllegalStateException("无法整理完整历史快照。", exception);
+        }
     }
 
     private void decryptLocationArray(JSONArray locations, String groupName) {
+        decryptLocationArray(locations, groupName, () -> true);
+    }
+
+    private void decryptLocationArray(JSONArray locations, String groupName, BooleanSupplier requestActive) {
         if (locations == null) {
             return;
         }
         for (int index = 0; index < locations.length(); index += 1) {
+            if (requestActive != null && !requestActive.getAsBoolean()) {
+                return;
+            }
             JSONObject location = locations.optJSONObject(index);
             if (location == null) {
                 continue;
@@ -2567,6 +2841,672 @@ public class MainActivity extends Activity {
             } catch (Exception exception) {
                 Log.w(TAG, "P2P row decrypt failed: " + exception.getMessage());
             }
+        }
+    }
+
+    private JSONArray mergeCompleteHistorySnapshot(JSONArray locations) {
+        if (locations == null || locations.length() == 0) {
+            return locations == null ? new JSONArray() : locations;
+        }
+        List<P2PRecordMergePolicy.Point> points = new ArrayList<>();
+        for (int index = 0; index < locations.length(); index += 1) {
+            JSONObject location = locations.optJSONObject(index);
+            if (location == null) {
+                continue;
+            }
+            String partitionKey = stayPartitionKey(location);
+            String coordinateSystem = locationCoordinateSystem(location);
+            long reportedAt = parseReportTimeMillis(firstText(
+                location.optString("created_at", ""),
+                location.optString("updated_at", "")
+            ));
+            if (partitionKey.isEmpty() || reportedAt <= 0L) {
+                continue;
+            }
+            boolean mergeable = P2PRecordMergePolicy.isMergeableSnapshotRecord(
+                location.optString("encryption_mode", ""),
+                location.optBoolean("p2p_decrypted", false),
+                location.optBoolean("encrypted_unreadable", false)
+            );
+            points.add(new P2PRecordMergePolicy.Point(
+                index,
+                partitionKey,
+                coordinateSystem,
+                location.optDouble("latitude", Double.NaN),
+                location.optDouble("longitude", Double.NaN),
+                reportedAt,
+                mergeable
+            ));
+        }
+
+        final class OrderedRecord {
+            final JSONObject record;
+            final long reportedAtMillis;
+            final int sourceIndex;
+
+            OrderedRecord(JSONObject record, long reportedAtMillis, int sourceIndex) {
+                this.record = record;
+                this.reportedAtMillis = reportedAtMillis;
+                this.sourceIndex = sourceIndex;
+            }
+        }
+
+        boolean[] consumed = new boolean[locations.length()];
+        List<OrderedRecord> output = new ArrayList<>();
+        for (P2PRecordMergePolicy.Cluster cluster : P2PRecordMergePolicy.merge(points)) {
+            for (P2PRecordMergePolicy.Point point : cluster.points()) {
+                consumed[point.sourceIndex] = true;
+            }
+            JSONObject latest = locations.optJSONObject(cluster.last().sourceIndex);
+            if (latest == null) {
+                continue;
+            }
+            JSONObject merged;
+            try {
+                merged = new JSONObject(latest.toString());
+                JSONObject first = locations.optJSONObject(cluster.first().sourceIndex);
+                String firstReportedAt = first == null ? "" : firstText(first.optString("created_at", ""), first.optString("updated_at", ""));
+                String lastReportedAt = firstText(latest.optString("created_at", ""), latest.optString("updated_at", ""), firstReportedAt);
+                merged.put("first_reported_at", firstReportedAt)
+                    .put("last_reported_at", lastReportedAt)
+                    .put("stay_duration_seconds", cluster.durationSeconds())
+                    .put("report_count", cluster.reportCount());
+                mergeClusterAddressDiagnostics(locations, cluster, merged);
+            } catch (Exception exception) {
+                merged = latest;
+            }
+            output.add(new OrderedRecord(merged, cluster.last().reportedAtMillis, cluster.last().sourceIndex));
+        }
+
+        for (int index = 0; index < locations.length(); index += 1) {
+            if (consumed[index]) {
+                continue;
+            }
+            JSONObject location = locations.optJSONObject(index);
+            if (location != null) {
+                output.add(new OrderedRecord(location, effectiveReportTimeMillis(location), index));
+            }
+        }
+        output.sort((left, right) -> {
+            int timeOrder = Long.compare(right.reportedAtMillis, left.reportedAtMillis);
+            return timeOrder != 0 ? timeOrder : Integer.compare(right.sourceIndex, left.sourceIndex);
+        });
+        JSONArray mergedLocations = new JSONArray();
+        for (OrderedRecord item : output) {
+            mergedLocations.put(item.record);
+        }
+        return mergedLocations;
+    }
+
+    private void mergeClusterAddressDiagnostics(JSONArray locations, P2PRecordMergePolicy.Cluster cluster, JSONObject target) throws Exception {
+        List<P2PRecordMergePolicy.Point> points = cluster.points();
+        JSONObject latestDiagnostics = target.optJSONObject("address_diagnostics");
+        JSONObject mergedDiagnostics = latestDiagnostics == null ? null : new JSONObject(latestDiagnostics.toString());
+        if (mergedDiagnostics == null || mergedDiagnostics.length() == 0) {
+            mergedDiagnostics = null;
+            for (int index = points.size() - 1; index >= 0; index -= 1) {
+                JSONObject sourceRecord = locations.optJSONObject(points.get(index).sourceIndex);
+                JSONObject diagnostics = sourceRecord == null ? null : sourceRecord.optJSONObject("address_diagnostics");
+                if (diagnostics != null && diagnostics.length() > 0) {
+                    mergedDiagnostics = new JSONObject(diagnostics.toString());
+                    break;
+                }
+            }
+        }
+
+        Map<String, JSONObject> bestSources = new LinkedHashMap<>();
+        for (P2PRecordMergePolicy.Point point : points) {
+            JSONObject sourceRecord = locations.optJSONObject(point.sourceIndex);
+            JSONObject diagnostics = sourceRecord == null ? null : sourceRecord.optJSONObject("address_diagnostics");
+            JSONArray sources = diagnostics == null ? null : diagnostics.optJSONArray("sources");
+            if (sources == null) {
+                continue;
+            }
+            for (int sourceIndex = 0; sourceIndex < sources.length(); sourceIndex += 1) {
+                JSONObject source = sources.optJSONObject(sourceIndex);
+                if (source == null) {
+                    continue;
+                }
+                String key = diagnosticSourceMergeKey(source, sourceIndex);
+                bestSources.put(key, mergeDiagnosticSourceEvidence(bestSources.get(key), source));
+            }
+        }
+
+        if (mergedDiagnostics == null && bestSources.isEmpty()) {
+            return;
+        }
+        if (mergedDiagnostics == null) {
+            mergedDiagnostics = new JSONObject();
+        }
+        JSONArray mergedSources = new JSONArray();
+        for (JSONObject source : bestSources.values()) {
+            mergedSources.put(source);
+        }
+        if (mergedSources.length() > 0) {
+            mergedDiagnostics.put("sources", mergedSources);
+        }
+        target.put("address_diagnostics", mergedDiagnostics);
+    }
+
+    private String diagnosticSourceType(JSONObject source) {
+        String type = source == null ? "" : source.optString("type", "").trim().toLowerCase(Locale.ROOT);
+        if ("gps".equals(type) || "ip".equals(type) || "webrtc".equals(type)) {
+            return type;
+        }
+        String hint = ((source == null ? "" : source.optString("name", "")) + " "
+            + (source == null ? "" : source.optString("source", "")) + " "
+            + (source == null ? "" : source.optString("provider", ""))).toLowerCase(Locale.ROOT);
+        if (hint.contains("webrtc") || hint.contains("stun")) {
+            return "webrtc";
+        }
+        if (hint.contains("ip")) {
+            return "ip";
+        }
+        if (hint.contains("定位") || hint.contains("gps") || hint.contains("amap") || hint.contains("高德")) {
+            return "gps";
+        }
+        return type.isEmpty() ? "other" : type;
+    }
+
+    private String diagnosticSourceAddress(JSONObject source) {
+        if (source == null) {
+            return "未知";
+        }
+        return diagnosticSourceAddressDirect(mostPreciseDiagnosticSource(source));
+    }
+
+    private String diagnosticSourceAddressDirect(JSONObject source) {
+        if (source == null) {
+            return "未知";
+        }
+        String explicit = cleanupComposedAddress(source.optString("address", ""));
+        String structured = composeAddress(
+            source.optString("country", ""),
+            source.optString("region", ""),
+            source.optString("city", ""),
+            source.optString("district", ""),
+            source.optString("street", ""),
+            firstText(source.optString("detail", ""), source.optString("poi", ""))
+        );
+        String address = structured.length() > explicit.length() ? structured : explicit;
+        return firstText(
+            address,
+            source.optString("ip", ""),
+            source.optString("server_ip", ""),
+            source.optString("ipv4", ""),
+            source.optString("ipv6", ""),
+            "未知"
+        );
+    }
+
+    private int diagnosticAddressScore(JSONObject source) {
+        if (source == null) {
+            return -1;
+        }
+        int score = Math.max(0, addressPrecisionScore(source)) * 100;
+        if (!source.optString("country", "").isEmpty()) score += 1;
+        if (!source.optString("region", "").isEmpty()) score += 2;
+        if (!source.optString("city", "").isEmpty()) score += 8;
+        if (!source.optString("district", "").isEmpty()) score += 12;
+        if (!source.optString("street", "").isEmpty()) score += 16;
+        if (!source.optString("detail", "").isEmpty() || !source.optString("poi", "").isEmpty()) score += 20;
+        score += Math.min(99, cleanupComposedAddress(source.optString("address", "")).length());
+        return score;
+    }
+
+    private String diagnosticSourceMergeKey(JSONObject source, int fallbackIndex) {
+        return DiagnosticSourcePolicy.sourceMergeKey(
+            diagnosticSourceType(source),
+            source == null ? "" : source.optString("ip", ""),
+            source == null ? "" : source.optString("server_ip", ""),
+            source == null ? "" : source.optString("ipv4", ""),
+            source == null ? "" : source.optString("ipv6", ""),
+            source == null ? "" : source.optString("provider", ""),
+            source == null ? "" : source.optString("source", ""),
+            source == null ? "" : source.optString("name", ""),
+            source == null ? "" : source.optString("stun_server", ""),
+            diagnosticCoordinateIdentity(source),
+            fallbackIndex
+        );
+    }
+
+    private JSONObject mergeDiagnosticSourceEvidence(JSONObject selected, JSONObject candidate) {
+        if (selected == null) {
+            return cloneDiagnosticObject(candidate);
+        }
+        if (candidate == null) {
+            return cloneDiagnosticObject(selected);
+        }
+        boolean candidateIsPrimary = diagnosticCandidateIsMorePrecise(candidate, selected);
+        JSONObject primary = cloneDiagnosticObject(candidateIsPrimary ? candidate : selected);
+        if (primary == null) {
+            return cloneDiagnosticObject(candidateIsPrimary ? selected : candidate);
+        }
+        String sourceType = diagnosticSourceType(primary);
+        for (String nestedKey : new String[] {"variants", "candidates"}) {
+            JSONArray merged = mergeDiagnosticNestedEvidence(
+                selected.optJSONArray(nestedKey),
+                candidate.optJSONArray(nestedKey),
+                primary,
+                ("ip".equals(sourceType) && "variants".equals(nestedKey))
+                    || ("webrtc".equals(sourceType) && "candidates".equals(nestedKey))
+                    ? new JSONObject[] {selected, candidate}
+                    : new JSONObject[0]
+            );
+            if (merged.length() > 0) {
+                try {
+                    primary.put(nestedKey, merged);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        return primary;
+    }
+
+    private JSONObject cloneDiagnosticObject(JSONObject source) {
+        if (source == null) {
+            return null;
+        }
+        try {
+            return new JSONObject(source.toString());
+        } catch (Exception ignored) {
+            return source;
+        }
+    }
+
+    private JSONObject diagnosticSourceSnapshot(JSONObject source) {
+        JSONObject snapshot = new JSONObject();
+        if (source == null) {
+            return snapshot;
+        }
+        for (String field : new String[] {
+            "type", "name", "label", "provider", "source", "source_region", "address", "country", "region", "city",
+            "district", "street", "detail", "poi", "postal_code", "ip", "server_ip", "ipv4", "ipv6",
+            "stun_server", "stun_label", "stun_scope", "candidate_type", "asn", "isp", "org", "carrier"
+        }) {
+            if (source.has(field) && !source.isNull(field)) {
+                try {
+                    snapshot.put(field, source.opt(field));
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        for (String field : new String[] {"domestic_source", "mobile_network", "mobile_network_uncertain"}) {
+            if (source.has(field) && !source.isNull(field)) {
+                try {
+                    snapshot.put(field, source.opt(field));
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        if (hasUsableCoordinates(source)) {
+            try {
+                snapshot.put("latitude", source.optDouble("latitude"));
+                snapshot.put("longitude", source.optDouble("longitude"));
+                for (String field : new String[] {"coordinate_system", "accuracy"}) {
+                    if (source.has(field) && !source.isNull(field)) {
+                        snapshot.put(field, source.opt(field));
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return snapshot;
+    }
+
+    private JSONArray mergeDiagnosticNestedEvidence(
+        JSONArray selected,
+        JSONArray candidate,
+        JSONObject parent,
+        JSONObject[] sourceSnapshots
+    ) {
+        Map<String, JSONObject> evidence = new LinkedHashMap<>();
+        for (JSONObject snapshot : sourceSnapshots) {
+            appendDiagnosticSourceSnapshotEvidence(evidence, snapshot, parent);
+        }
+        appendDiagnosticNestedEvidence(evidence, selected, parent);
+        appendDiagnosticNestedEvidence(evidence, candidate, parent);
+        JSONArray merged = new JSONArray();
+        for (JSONObject item : evidence.values()) {
+            merged.put(item);
+        }
+        return merged;
+    }
+
+    private void appendDiagnosticSourceSnapshotEvidence(Map<String, JSONObject> target, JSONObject source, JSONObject parent) {
+        if (source == null) {
+            return;
+        }
+        JSONObject snapshot = diagnosticSourceSnapshot(source);
+        String key = diagnosticNestedEvidenceKey(parent, snapshot);
+        if (!target.containsKey(key)) {
+            target.put(key, snapshot);
+        }
+    }
+
+    private void appendDiagnosticNestedEvidence(Map<String, JSONObject> target, JSONArray items, JSONObject parent) {
+        if (items == null) {
+            return;
+        }
+        for (int index = 0; index < items.length(); index += 1) {
+            JSONObject item = items.optJSONObject(index);
+            if (item == null) {
+                continue;
+            }
+            JSONObject clone = cloneDiagnosticObject(item);
+            String key = diagnosticNestedEvidenceKey(parent, clone);
+            if (!target.containsKey(key)) {
+                target.put(key, clone);
+            }
+        }
+    }
+
+    private String diagnosticNestedEvidenceKey(JSONObject parent, JSONObject evidence) {
+        String identity = diagnosticSourceIdentity(evidence);
+        if (identity.isEmpty() && diagnosticSourceIdentitiesCompatible(parent, evidence)) {
+            identity = diagnosticSourceIdentity(parent);
+        }
+        return DiagnosticSourcePolicy.evidenceKey(
+            identity,
+            evidence == null ? "" : evidence.optString("provider", ""),
+            evidence == null ? "" : evidence.optString("source", ""),
+            evidence == null ? "" : evidence.optString("source_region", ""),
+            evidence == null ? "" : evidence.optString("stun_server", ""),
+            evidence == null ? "" : evidence.optString("stun_label", ""),
+            evidence == null ? "" : evidence.optString("stun_scope", ""),
+            evidence == null ? "" : evidence.optString("candidate_type", ""),
+            evidence == null ? "" : evidence.optString("address", ""),
+            evidence == null ? "" : evidence.optString("country", ""),
+            evidence == null ? "" : evidence.optString("region", ""),
+            evidence == null ? "" : evidence.optString("city", ""),
+            evidence == null ? "" : evidence.optString("district", ""),
+            evidence == null ? "" : evidence.optString("street", ""),
+            evidence == null ? "" : evidence.optString("detail", ""),
+            evidence == null ? "" : evidence.optString("poi", ""),
+            evidence == null ? "" : evidence.optString("postal_code", ""),
+            evidence == null ? "" : evidence.optString("asn", ""),
+            evidence == null ? "" : evidence.optString("isp", ""),
+            evidence == null ? "" : evidence.optString("org", ""),
+            evidence == null ? "" : evidence.optString("carrier", ""),
+            evidence == null ? "" : String.valueOf(evidence.optBoolean("mobile_network", false)),
+            diagnosticCoordinateIdentity(evidence),
+            evidence == null || !evidence.has("accuracy") ? "" : String.valueOf(evidence.opt("accuracy"))
+        );
+    }
+
+    private String diagnosticCoordinateIdentity(JSONObject source) {
+        if (!hasUsableCoordinates(source)) {
+            return "";
+        }
+        return source.optString("coordinate_system", "") + ":"
+            + Double.toString(source.optDouble("latitude")) + ","
+            + Double.toString(source.optDouble("longitude"));
+    }
+
+    private JSONObject mostPreciseDiagnosticSource(JSONObject source) {
+        if (source == null) {
+            return null;
+        }
+        JSONObject best = cloneDiagnosticObject(source);
+        for (String nestedKey : new String[] {"variants", "candidates"}) {
+            JSONArray nested = source.optJSONArray(nestedKey);
+            if (nested == null) {
+                continue;
+            }
+            for (int index = 0; index < nested.length(); index += 1) {
+                JSONObject candidate = inheritedDiagnosticSource(source, nested.optJSONObject(index));
+                if (diagnosticCandidateIsMorePrecise(candidate, best)) {
+                    best = candidate;
+                }
+            }
+        }
+        return best;
+    }
+
+    private JSONObject inheritedDiagnosticSource(JSONObject parent, JSONObject child) {
+        if (parent == null || child == null) {
+            return null;
+        }
+        try {
+            boolean inheritParent = diagnosticSourceIdentitiesCompatible(parent, child);
+            JSONObject merged = new JSONObject(child.toString());
+            if (merged.optString("type", "").trim().isEmpty()) {
+                merged.put("type", diagnosticSourceType(parent));
+            }
+            if (merged.optString("name", "").trim().isEmpty()) {
+                merged.put("name", parent.optString("name", ""));
+            }
+            if (inheritParent && diagnosticSourceIdentity(child).isEmpty()) {
+                for (String field : new String[] {"ip", "server_ip", "ipv4", "ipv6"}) {
+                    if (merged.optString(field, "").trim().isEmpty() && !parent.optString(field, "").trim().isEmpty()) {
+                        merged.put(field, parent.opt(field));
+                    }
+                }
+            }
+            if (inheritParent && sameDiagnosticCoordinate(parent, child)) {
+                for (String field : new String[] {"coordinate_system", "accuracy"}) {
+                    if (!merged.has(field) && parent.has(field) && !parent.isNull(field)) {
+                        merged.put(field, parent.opt(field));
+                    }
+                }
+            }
+            return merged;
+        } catch (Exception exception) {
+            return child;
+        }
+    }
+
+    private boolean diagnosticCandidateHasBetterCoordinates(JSONObject candidate, JSONObject selected) {
+        boolean candidateCoordinates = hasUsableCoordinates(candidate);
+        boolean selectedCoordinates = hasUsableCoordinates(selected);
+        if (candidateCoordinates != selectedCoordinates) {
+            return candidateCoordinates;
+        }
+        double candidateAccuracy = candidate == null ? Double.NaN : candidate.optDouble("accuracy", Double.NaN);
+        double selectedAccuracy = selected == null ? Double.NaN : selected.optDouble("accuracy", Double.NaN);
+        return Double.isFinite(candidateAccuracy)
+            && candidateAccuracy >= 0.0d
+            && (!Double.isFinite(selectedAccuracy) || selectedAccuracy < 0.0d || candidateAccuracy < selectedAccuracy);
+    }
+
+    private boolean diagnosticCandidateIsMorePrecise(JSONObject candidate, JSONObject selected) {
+        if (candidate == null) {
+            return false;
+        }
+        if (selected == null) {
+            return true;
+        }
+        int candidateScore = diagnosticAddressScore(candidate);
+        int selectedScore = diagnosticAddressScore(selected);
+        if (candidateScore != selectedScore) {
+            return candidateScore > selectedScore;
+        }
+        int candidatePriority = addressProviderPriority(candidate.optString("provider", ""));
+        int selectedPriority = addressProviderPriority(selected.optString("provider", ""));
+        if (candidatePriority != selectedPriority) {
+            return candidatePriority < selectedPriority;
+        }
+        int candidateLength = diagnosticSourceAddressDirect(candidate).replaceAll("\\s+", "").length();
+        int selectedLength = diagnosticSourceAddressDirect(selected).replaceAll("\\s+", "").length();
+        if (candidateLength != selectedLength) {
+            return candidateLength > selectedLength;
+        }
+        return diagnosticCandidateHasBetterCoordinates(candidate, selected);
+    }
+
+    private boolean diagnosticSourceIdentitiesCompatible(JSONObject parent, JSONObject child) {
+        String parentIdentity = diagnosticSourceIdentity(parent);
+        String childIdentity = diagnosticSourceIdentity(child);
+        boolean webRtc = "webrtc".equals(diagnosticSourceType(parent)) || "webrtc".equals(diagnosticSourceType(child));
+        return DiagnosticSourcePolicy.identitiesCompatible(
+            parentIdentity,
+            childIdentity,
+            firstText(
+                parent == null ? "" : parent.optString("stun_server", ""),
+                webRtc && parent != null ? parent.optString("source", "") : ""
+            ),
+            firstText(
+                child == null ? "" : child.optString("stun_server", ""),
+                webRtc && child != null ? child.optString("source", "") : ""
+            ),
+            webRtc
+        );
+    }
+
+    private String diagnosticSourceIdentity(JSONObject source) {
+        return firstText(
+            source == null ? "" : source.optString("ip", ""),
+            source == null ? "" : source.optString("server_ip", ""),
+            source == null ? "" : source.optString("ipv4", ""),
+            source == null ? "" : source.optString("ipv6", "")
+        ).trim().toLowerCase(Locale.ROOT);
+    }
+
+    private boolean sameDiagnosticCoordinate(JSONObject left, JSONObject right) {
+        return hasUsableCoordinates(left)
+            && hasUsableCoordinates(right)
+            && Double.compare(left.optDouble("latitude"), right.optDouble("latitude")) == 0
+            && Double.compare(left.optDouble("longitude"), right.optDouble("longitude")) == 0;
+    }
+
+    private boolean hasUsefulDiagnosticsAddress(JSONObject diagnostics) {
+        if (diagnostics == null) {
+            return false;
+        }
+        for (String field : new String[] {
+            "preferred_detail", "preferred_poi", "preferred_district", "preferred_street",
+            "preferred_city", "preferred_region", "preferred_country", "preferred_postal_code", "preferred_postcode"
+        }) {
+            if (isResolvedPlaceText(diagnostics.optString(field, ""))) {
+                return true;
+            }
+        }
+        if (isResolvedPlaceText(diagnostics.optString("preferred_address", ""))) {
+            return true;
+        }
+        JSONArray sources = diagnostics.optJSONArray("sources");
+        if (sources == null) {
+            return false;
+        }
+        for (int index = 0; index < sources.length(); index += 1) {
+            JSONObject source = sources.optJSONObject(index);
+            if (hasUsefulAddressObject(source)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasUsefulAddressObject(JSONObject source) {
+        if (source == null) {
+            return false;
+        }
+        for (String field : new String[] {"detail", "poi", "district", "street", "city", "region", "country", "postal_code", "postcode"}) {
+            if (isResolvedPlaceText(source.optString(field, ""))) {
+                return true;
+            }
+        }
+        if (isResolvedPlaceText(source.optString("address", ""))) {
+            return true;
+        }
+        for (String nestedKey : new String[] {"variants", "candidates"}) {
+            JSONArray nested = source.optJSONArray(nestedKey);
+            if (nested != null) {
+                for (int index = 0; index < nested.length(); index += 1) {
+                    JSONObject candidate = nested.optJSONObject(index);
+                    if (candidate != null && (isResolvedPlaceText(candidate.optString("address", ""))
+                        || hasUsefulStructuredAddressFields(candidate))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean hasUsefulStructuredAddressFields(JSONObject source) {
+        if (source == null) {
+            return false;
+        }
+        for (String field : new String[] {"detail", "poi", "district", "street", "city", "region", "country", "postal_code", "postcode"}) {
+            if (isResolvedPlaceText(source.optString(field, ""))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isResolvedPlaceText(String value) {
+        String text = value == null ? "" : value.trim();
+        if (text.isEmpty() || "未知".equals(text) || "未解析".equals(text)) {
+            return false;
+        }
+        if (text.matches("^[+-]?\\d+(?:\\.\\d+)?\\s*[,，]\\s*[+-]?\\d+(?:\\.\\d+)?$")) {
+            return false;
+        }
+        return !text.matches("^(?:\\d{1,3}\\.){3}\\d{1,3}$")
+            && !(text.indexOf(':') >= 0 && text.matches("^[0-9A-Fa-f:.]+$"));
+    }
+
+    private String stayPartitionKey(JSONObject location) {
+        if (location == null) {
+            return "";
+        }
+        String groupKey = firstText(location.optString("group_id", ""), location.optString("group_name", ""));
+        String userKey = firstText(
+            location.optString("user_id", ""),
+            location.optString("member_id", ""),
+            location.optString("username", "")
+        );
+        return groupKey.isEmpty() || userKey.isEmpty() ? "" : groupKey + ":" + userKey;
+    }
+
+    private String locationCoordinateSystem(JSONObject location) {
+        JSONObject meta = location == null ? null : location.optJSONObject("location_meta");
+        String rawCoordinateSystem = firstText(
+            location == null ? "" : location.optString("location_coordinate_system", ""),
+            meta == null ? "" : meta.optString("coordinate_system", "")
+        );
+        if (rawCoordinateSystem.isEmpty() && location != null && !location.optBoolean("location_mock_provider", false)) {
+            return "wgs84";
+        }
+        return P2PRecordMergePolicy.normalizeCoordinateSystem(rawCoordinateSystem);
+    }
+
+    private long effectiveReportTimeMillis(JSONObject location) {
+        return parseReportTimeMillis(firstText(
+            location == null ? "" : location.optString("last_reported_at", ""),
+            location == null ? "" : location.optString("updated_at", ""),
+            location == null ? "" : location.optString("created_at", "")
+        ));
+    }
+
+    private long parseReportTimeMillis(String value) {
+        String text = value == null ? "" : value.trim();
+        if (text.isEmpty()) {
+            return 0L;
+        }
+        if (text.matches("^[0-9]{10,13}$")) {
+            try {
+                long numeric = Long.parseLong(text);
+                return text.length() <= 10 ? numeric * 1000L : numeric;
+            } catch (NumberFormatException ignored) {
+                return 0L;
+            }
+        }
+        String normalized = text.indexOf('T') >= 0 ? text : text.replace(' ', 'T');
+        try {
+            return Instant.parse(normalized).toEpochMilli();
+        } catch (Exception ignored) {
+        }
+        try {
+            return OffsetDateTime.parse(normalized, DateTimeFormatter.ISO_OFFSET_DATE_TIME).toInstant().toEpochMilli();
+        } catch (Exception ignored) {
+        }
+        try {
+            return LocalDateTime.parse(normalized, DateTimeFormatter.ISO_LOCAL_DATE_TIME).toInstant(ZoneOffset.UTC).toEpochMilli();
+        } catch (Exception ignored) {
+            return 0L;
         }
     }
 
@@ -2675,7 +3615,7 @@ public class MainActivity extends Activity {
             View child = content.getChildAt(index);
             if (isDynamicRowTag(child.getTag())) {
                 content.removeViewAt(index);
-                if (child instanceof WebView) {
+                if (child instanceof WebView && child != homeMapWebView) {
                     destroyManagedWebView((WebView) child);
                 }
             }
@@ -2702,37 +3642,54 @@ public class MainActivity extends Activity {
     }
 
     private void reportCurrentLocation() {
-        if (reporting) {
+        if (reportAttemptGate.activeToken() > 0L) {
+            setStatus("当前位置正在上报，请稍候。");
             return;
         }
 
         if (!hasFineLocationPermission()) {
+            setStatus("请先授予精确定位权限后再上报当前位置。");
             requestForegroundLocationPermissionIfNeeded();
             return;
         }
 
-        reporting = true;
-        if (reportButton != null) {
-            reportButton.setEnabled(false);
-        }
+        long attemptToken = beginReportAttempt();
         setStatus("正在读取定位");
 
         android.location.LocationManager manager = (android.location.LocationManager) getSystemService(Context.LOCATION_SERVICE);
-        android.location.Location location = bestLastKnownLocation(manager);
+        if (manager == null) {
+            finishReport(attemptToken, "读取定位失败：系统定位服务不可用。");
+            return;
+        }
+        android.location.Location location;
+        try {
+            location = bestLastKnownLocation(manager);
+        } catch (Throwable throwable) {
+            finishReport(attemptToken, "读取定位失败：" + safeThrowableMessage(throwable));
+            return;
+        }
         if (location != null) {
-            submitLocation(location);
+            submitLocation(attemptToken, location);
             return;
         }
 
         try {
-            List<String> providers = manager == null ? new ArrayList<>() : manager.getProviders(true);
+            List<String> providers = manager.getProviders(true);
+            if (providers == null || providers.isEmpty()) {
+                finishReport(attemptToken, "无法读取定位：请先开启系统定位服务。");
+                return;
+            }
             String provider = providers.contains(android.location.LocationManager.GPS_PROVIDER)
                 ? android.location.LocationManager.GPS_PROVIDER
-                : providers.isEmpty() ? android.location.LocationManager.NETWORK_PROVIDER : providers.get(0);
-            manager.requestSingleUpdate(provider, new android.location.LocationListener() {
+                : providers.get(0);
+            android.location.LocationListener listener = new android.location.LocationListener() {
                 @Override
                 public void onLocationChanged(android.location.Location newLocation) {
-                    submitLocation(newLocation);
+                    if (!reportAttemptGate.isActive(attemptToken)) {
+                        return;
+                    }
+                    clearReportLocationListener(attemptToken);
+                    submitLocation(attemptToken, newLocation);
                 }
 
                 @Override
@@ -2741,19 +3698,66 @@ public class MainActivity extends Activity {
 
                 @Override
                 public void onProviderDisabled(String providerName) {
+                    if (reportLocationListenerToken == attemptToken && reportAttemptGate.isActive(attemptToken)) {
+                        finishReport(attemptToken, "定位源已关闭，请开启系统定位服务后重试。");
+                    }
                 }
 
                 @Override
                 public void onStatusChanged(String providerName, int status, Bundle extras) {
+                    if (reportLocationListenerToken == attemptToken
+                        && reportAttemptGate.isActive(attemptToken)
+                        && (status == android.location.LocationProvider.OUT_OF_SERVICE
+                            || status == android.location.LocationProvider.TEMPORARILY_UNAVAILABLE)) {
+                        finishReport(attemptToken, "定位源暂时不可用，请稍后重试。");
+                    }
                 }
-            }, Looper.getMainLooper());
-            mainHandler.postDelayed(() -> {
-                if (reporting) {
-                    finishReport("定位超时，请确认定位已开启。");
-                }
-            }, 15000L);
-        } catch (Exception exception) {
-            finishReport("读取定位失败：" + exception.getMessage());
+            };
+            reportLocationManager = manager;
+            reportLocationListener = listener;
+            reportLocationListenerToken = attemptToken;
+            manager.requestSingleUpdate(provider, listener, Looper.getMainLooper());
+        } catch (Throwable throwable) {
+            finishReport(attemptToken, "读取定位失败：" + safeThrowableMessage(throwable));
+        }
+    }
+
+    private long beginReportAttempt() {
+        long attemptToken = reportAttemptGate.begin();
+        reportAttemptDeadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(REPORT_WATCHDOG_MS);
+        reportAttemptIdToken = attemptToken;
+        reportAttemptId = newReportAttemptId();
+        reporting = true;
+        syncReportButtonState();
+        if (reportWatchdog != null) {
+            mainHandler.removeCallbacks(reportWatchdog);
+        }
+        reportWatchdog = () -> finishReport(attemptToken, "上报超时，已解除按钮锁定；请检查定位和网络后重试。");
+        mainHandler.postDelayed(reportWatchdog, REPORT_WATCHDOG_MS);
+        return attemptToken;
+    }
+
+    private void syncReportButtonState() {
+        reporting = reportAttemptGate.activeToken() > 0L;
+        if (reportButton != null) {
+            reportButton.setEnabled(!reporting);
+        }
+    }
+
+    private void clearReportLocationListener(long attemptToken) {
+        if (reportLocationListenerToken != attemptToken) {
+            return;
+        }
+        android.location.LocationManager manager = reportLocationManager;
+        android.location.LocationListener listener = reportLocationListener;
+        reportLocationManager = null;
+        reportLocationListener = null;
+        reportLocationListenerToken = 0L;
+        if (manager != null && listener != null) {
+            try {
+                manager.removeUpdates(listener);
+            } catch (Throwable ignored) {
+            }
         }
     }
 
@@ -2779,21 +3783,36 @@ public class MainActivity extends Activity {
         return best;
     }
 
-    private void submitLocation(android.location.Location location) {
+    private void submitLocation(long attemptToken, android.location.Location location) {
+        if (!reportAttemptGate.isActive(attemptToken)) {
+            return;
+        }
         setStatus("正在上报位置");
         runBackground(() -> {
             try {
+                if (!reportAttemptGate.isActive(attemptToken)) {
+                    return;
+                }
                 String reportGroupName = currentGroupName();
-                JSONObject addressDiagnostics = buildAddressDiagnostics(location);
+                JSONObject addressDiagnostics = buildAddressDiagnostics(attemptToken, location);
+                if (!reportAttemptGate.isActive(attemptToken)) {
+                    return;
+                }
                 JSONObject payload = locationReportPayload(reportGroupName, location, addressDiagnostics);
-                JSONObject response = postLocationReport(reportGroupName, payload);
+                JSONObject response = postLocationReport(attemptToken, reportGroupName, payload);
+                if (!reportAttemptGate.isActive(attemptToken)) {
+                    return;
+                }
                 List<String> extraGroupNames = selectedCrossSyncGroups();
                 extraGroupNames.remove(reportGroupName);
                 int synced = 0;
                 List<String> failed = new ArrayList<>();
                 for (String groupName : extraGroupNames) {
+                    if (!reportAttemptGate.isActive(attemptToken)) {
+                        return;
+                    }
                     try {
-                        postLocationReport(groupName, locationReportPayload(groupName, location, addressDiagnostics));
+                        postLocationReport(attemptToken, groupName, locationReportPayload(groupName, location, addressDiagnostics));
                         synced += 1;
                     } catch (Exception syncException) {
                         failed.add(groupName);
@@ -2809,11 +3828,12 @@ public class MainActivity extends Activity {
                     if (failedCount > 0) {
                         message += " " + failedCount + " 个家庭组同步失败，请检查端到端加密密钥或权限。";
                     }
-                    finishReport(message);
-                    refreshLocations();
+                    if (finishReport(attemptToken, message)) {
+                        refreshLocations();
+                    }
                 });
-            } catch (Exception exception) {
-                runUi(() -> finishReport(exception.getMessage()));
+            } catch (Throwable throwable) {
+                runUi(() -> finishReport(attemptToken, safeThrowableMessage(throwable)));
             }
         });
     }
@@ -2828,7 +3848,8 @@ public class MainActivity extends Activity {
             .put("heading", location.hasBearing() ? location.getBearing() : JSONObject.NULL)
             .put("speed", location.hasSpeed() ? location.getSpeed() : JSONObject.NULL)
             .put("location_provider", location.getProvider())
-            .put("location_time", String.valueOf(location.getTime()));
+            .put("location_time", String.valueOf(location.getTime()))
+            .put("location_coordinate_system", "wgs84");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             payload.put("vertical_accuracy", location.hasVerticalAccuracy() ? location.getVerticalAccuracyMeters() : JSONObject.NULL);
             payload.put("bearing_accuracy", location.hasBearingAccuracy() ? location.getBearingAccuracyDegrees() : JSONObject.NULL);
@@ -2840,48 +3861,89 @@ public class MainActivity extends Activity {
         return payload;
     }
 
-    private JSONObject buildAddressDiagnostics(android.location.Location location) {
+    private JSONObject buildAddressDiagnostics(long attemptToken, android.location.Location location) {
+        if (!reportAttemptGate.isActive(attemptToken)) {
+            return null;
+        }
         double latitude = location.getLatitude();
         double longitude = location.getLongitude();
         JSONObject fallback;
         try {
             fallback = addressSource("gps", "定位地址", "坐标", "", formatCoordinate(latitude) + ", " + formatCoordinate(longitude), "", "", "", latitude, longitude);
+            fallback.put("coordinate_system", "wgs84");
         } catch (Exception exception) {
             return null;
         }
-        List<JSONObject> addressCandidates = new ArrayList<>();
-        addressCandidates.add(reverseAddressByAmapWebView(latitude, longitude));
-        addressCandidates.add(reverseAddressByMeituan(latitude, longitude));
-        addressCandidates.add(reverseAddressByBigDataCloud(latitude, longitude));
 
-        JSONArray sources = new JSONArray();
-        JSONObject best = fallback;
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(ADDRESS_DIAGNOSTICS_BUDGET_MS);
+        long probeDeadlineNanos = deadlineNanos - TimeUnit.MILLISECONDS.toNanos(ADDRESS_PROBE_COMPLETION_MARGIN_MS);
+        ExecutorService probes = Executors.newFixedThreadPool(5);
+        CompletionService<JSONObject> completedProbes = new ExecutorCompletionService<>(probes);
+        List<Future<JSONObject>> probeFutures = new ArrayList<>();
+        List<JSONObject> candidates;
+        try {
+            probeFutures.add(submitAddressProbe(completedProbes, attemptToken,
+                () -> reverseAddressByAmapWebView(attemptToken, latitude, longitude)));
+            probeFutures.add(submitAddressProbe(completedProbes, attemptToken,
+                () -> reverseAddressByMeituan(attemptToken, latitude, longitude)));
+            probeFutures.add(submitAddressProbe(completedProbes, attemptToken,
+                () -> reverseAddressByBigDataCloud(attemptToken, latitude, longitude)));
+            probeFutures.add(submitAddressProbe(completedProbes, attemptToken,
+                () -> probeIpAddressSource(attemptToken, probeDeadlineNanos)));
+            probeFutures.add(submitAddressProbe(completedProbes, attemptToken,
+                () -> probeWebRtcAddressSource(attemptToken, probeDeadlineNanos)));
+            candidates = awaitAddressProbes(completedProbes, probeFutures.size(), attemptToken, deadlineNanos);
+        } finally {
+            for (Future<JSONObject> probeFuture : probeFutures) {
+                cancelAddressProbe(probeFuture);
+            }
+            probes.shutdownNow();
+        }
+
+        if (!reportAttemptGate.isActive(attemptToken)) {
+            return null;
+        }
+        JSONObject bestGps = fallback;
+        JSONObject ipSource = null;
+        JSONObject webRtcSource = null;
         int bestScore = 0;
         int bestPriority = Integer.MAX_VALUE;
-        for (JSONObject candidate : addressCandidates) {
+        for (JSONObject candidate : candidates) {
+            if (candidate == null) {
+                continue;
+            }
+            String type = candidate.optString("type", "");
+            if ("ip".equals(type)) {
+                if (diagnosticAddressScore(candidate) > diagnosticAddressScore(ipSource)) {
+                    ipSource = candidate;
+                }
+                continue;
+            }
+            if ("webrtc".equals(type)) {
+                if (diagnosticAddressScore(candidate) > diagnosticAddressScore(webRtcSource)) {
+                    webRtcSource = candidate;
+                }
+                continue;
+            }
             if (!isUsefulAddressSource(candidate, fallback)) {
                 continue;
             }
-            sources.put(candidate);
             int score = addressPrecisionScore(candidate);
             int priority = addressProviderPriority(candidate.optString("provider", ""));
             if (score > bestScore || (score == bestScore && priority < bestPriority)) {
-                best = candidate;
+                bestGps = candidate;
                 bestScore = score;
                 bestPriority = priority;
             }
         }
 
-        JSONObject ipSource = probeIpAddressSource();
+        JSONArray sources = new JSONArray();
+        sources.put(bestGps);
         if (ipSource != null) {
             sources.put(ipSource);
         }
-        JSONObject webRtcSource = probeWebRtcAddressSource();
         if (webRtcSource != null) {
             sources.put(webRtcSource);
-        }
-        if (sources.length() == 0) {
-            sources.put(fallback);
         }
 
         JSONObject diagnostics = new JSONObject();
@@ -2889,9 +3951,18 @@ public class MainActivity extends Activity {
             diagnostics.put("complete", true)
                 .put("mismatch", false)
                 .put("preferred_source", "gps")
-                .put("preferred_address", cleanupComposedAddress(best.optString("address", fallback.optString("address", ""))))
+                .put("preferred_address", cleanupComposedAddress(bestGps.optString("address", fallback.optString("address", ""))))
+                .put("preferred_country", bestGps.optString("country", ""))
+                .put("preferred_region", bestGps.optString("region", ""))
+                .put("preferred_city", normalizeCityPart(bestGps.optString("city", "")))
+                .put("preferred_district", bestGps.optString("district", ""))
+                .put("preferred_street", bestGps.optString("street", ""))
+                .put("preferred_detail", bestGps.optString("detail", ""))
+                .put("preferred_poi", firstText(bestGps.optString("poi", ""), bestGps.optString("detail", "")))
+                .put("preferred_postal_code", firstText(bestGps.optString("postal_code", ""), bestGps.optString("postcode", "")))
                 .put("preferred_latitude", latitude)
                 .put("preferred_longitude", longitude)
+                .put("preferred_coordinate_system", "wgs84")
                 .put("sources", sources);
         } catch (Exception ignored) {
             return null;
@@ -2899,7 +3970,71 @@ public class MainActivity extends Activity {
         return diagnostics;
     }
 
-    private JSONObject reverseAddressByAmapWebView(double latitude, double longitude) {
+    private Future<JSONObject> submitAddressProbe(CompletionService<JSONObject> completion, long attemptToken, Callable<JSONObject> probe) {
+        return completion.submit(() -> {
+            if (!reportAttemptGate.isActive(attemptToken)) {
+                return null;
+            }
+            try {
+                JSONObject result = probe.call();
+                return reportAttemptGate.isActive(attemptToken) ? result : null;
+            } catch (Throwable throwable) {
+                Log.w(TAG, "Address probe failed: " + safeThrowableMessage(throwable));
+                return null;
+            }
+        });
+    }
+
+    private List<JSONObject> awaitAddressProbes(CompletionService<JSONObject> completion, int expectedCount,
+        long attemptToken, long deadlineNanos) {
+        List<JSONObject> results = new ArrayList<>();
+        int completedCount = 0;
+        try {
+            while (completedCount < expectedCount && reportAttemptGate.isActive(attemptToken)) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0L) {
+                    break;
+                }
+                Future<JSONObject> completed = completion.poll(remainingNanos, TimeUnit.NANOSECONDS);
+                if (completed == null) {
+                    break;
+                }
+                completedCount += 1;
+                try {
+                    JSONObject result = completed.get();
+                    if (result != null) {
+                        results.add(result);
+                    }
+                } catch (Exception exception) {
+                    Log.w(TAG, "Address probe result failed: " + safeThrowableMessage(exception));
+                }
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        }
+        Future<JSONObject> completed;
+        while ((completed = completion.poll()) != null) {
+            try {
+                JSONObject result = completed.get();
+                if (result != null) {
+                    results.add(result);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return results;
+    }
+
+    private void cancelAddressProbe(Future<JSONObject> probe) {
+        if (probe != null && !probe.isDone()) {
+            probe.cancel(true);
+        }
+    }
+
+    private JSONObject reverseAddressByAmapWebView(long attemptToken, double latitude, double longitude) {
+        if (!reportAttemptGate.isActive(attemptToken)) {
+            return null;
+        }
         String base = serverUrl();
         if (base.isEmpty()) {
             return null;
@@ -2916,7 +4051,7 @@ public class MainActivity extends Activity {
         }
 
         runUi(() -> {
-            if (!canLoadForegroundWebView()) {
+            if (!reportAttemptGate.isActive(attemptToken) || !canLoadForegroundWebView()) {
                 done.set(true);
                 latch.countDown();
                 return;
@@ -2931,10 +4066,14 @@ public class MainActivity extends Activity {
                 @JavascriptInterface
                 public void onAmapReverse(String json) {
                     if (done.compareAndSet(false, true)) {
-                        try {
-                            result.set(new JSONObject(json));
-                        } catch (Exception ignored) {
-                            result.set(null);
+                        if (reportAttemptGate.isActive(attemptToken)) {
+                            try {
+                                JSONObject source = new JSONObject(json);
+                                source.put("coordinate_system", "wgs84");
+                                result.set(source);
+                            } catch (Exception ignored) {
+                                result.set(null);
+                            }
                         }
                         latch.countDown();
                     }
@@ -2967,7 +4106,7 @@ public class MainActivity extends Activity {
         });
 
         try {
-            latch.await(12000L, TimeUnit.MILLISECONDS);
+            latch.await(ADDRESS_WEBVIEW_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
         } finally {
@@ -2978,14 +4117,20 @@ public class MainActivity extends Activity {
                 }
             });
         }
-        return result.get();
+        return reportAttemptGate.isActive(attemptToken) ? result.get() : null;
     }
 
-    private JSONObject reverseAddressByMeituan(double latitude, double longitude) {
+    private JSONObject reverseAddressByMeituan(long attemptToken, double latitude, double longitude) {
+        if (!reportAttemptGate.isActive(attemptToken)) {
+            return null;
+        }
         try {
             String url = "https://apimobile.meituan.com/group/v1/city/latlng/"
                 + urlEncode(formatMeituanCoordinate(latitude)) + "," + urlEncode(formatMeituanCoordinate(longitude)) + "?tag=0";
             JSONObject response = requestOpenJson(url);
+            if (!reportAttemptGate.isActive(attemptToken)) {
+                return null;
+            }
             JSONObject data = response.optJSONObject("data");
             if (data == null) {
                 return null;
@@ -3000,17 +4145,24 @@ public class MainActivity extends Activity {
             return addressSource("gps", "定位地址", "美团", "meituan", address, city, region, country, latitude, longitude)
                 .put("district", district)
                 .put("street", street)
-                .put("detail", detail);
+                .put("detail", detail)
+                .put("coordinate_system", "wgs84");
         } catch (Exception exception) {
             return null;
         }
     }
 
-    private JSONObject reverseAddressByBigDataCloud(double latitude, double longitude) {
+    private JSONObject reverseAddressByBigDataCloud(long attemptToken, double latitude, double longitude) {
+        if (!reportAttemptGate.isActive(attemptToken)) {
+            return null;
+        }
         try {
             String url = "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude="
                 + urlEncode(formatCoordinate(latitude)) + "&longitude=" + urlEncode(formatCoordinate(longitude)) + "&localityLanguage=zh";
             JSONObject data = requestOpenJson(url);
+            if (!reportAttemptGate.isActive(attemptToken)) {
+                return null;
+            }
             String country = data.optString("countryName", "");
             String region = data.optString("principalSubdivision", "");
             String city = normalizeCityPart(firstText(data.optString("city", ""), data.optString("locality", "")));
@@ -3027,26 +4179,39 @@ public class MainActivity extends Activity {
             String address = composeAddress(country, region, city, district, detail);
             return addressSource("gps", "定位地址", "BigDataCloud", "bigdatacloud", address, city, region, country, latitude, longitude)
                 .put("district", district)
-                .put("detail", detail);
+                .put("detail", detail)
+                .put("coordinate_system", "wgs84");
         } catch (Exception exception) {
             return null;
         }
     }
 
 
-    private JSONObject probeIpAddressSource() {
+    private JSONObject probeIpAddressSource(long attemptToken, long deadlineNanos) {
+        if (!reportAttemptGate.isActive(attemptToken)) {
+            return null;
+        }
         try {
             JSONObject probe = getJson("api/ip_probe.php");
+            if (!reportAttemptGate.isActive(attemptToken)) {
+                return null;
+            }
             String ip = firstText(probe.optString("ip", ""));
             if (ip.isEmpty()) {
                 JSONObject cloudflare = getJson("api/cloudflare_location.php");
+                if (!reportAttemptGate.isActive(attemptToken)) {
+                    return null;
+                }
                 ip = firstText(cloudflare.optString("ip", ""), cloudflare.optString("ipv6", ""));
             }
             if (ip.isEmpty()) {
                 return null;
             }
 
-            JSONObject geo = geocodeIpAddress(ip);
+            JSONObject geo = geocodeIpAddress(attemptToken, ip, deadlineNanos);
+            if (!reportAttemptGate.isActive(attemptToken)) {
+                return null;
+            }
             String address = geo == null ? ip : firstText(geo.optString("address", ""), ip);
             String city = geo == null ? "" : normalizeCityPart(geo.optString("city", ""));
             String region = geo == null ? "" : geo.optString("region", "");
@@ -3057,6 +4222,7 @@ public class MainActivity extends Activity {
             JSONObject source = addressSource("ip", "IP 探测", provider, "server", address, city, region, country, latitude, longitude)
                 .put("ip", ip)
                 .put("server_ip", ip);
+            copyAddressDetailFields(geo, source);
             JSONArray variants = new JSONArray();
             JSONObject variant = new JSONObject()
                 .put("label", "服务端")
@@ -3067,6 +4233,7 @@ public class MainActivity extends Activity {
                 .put("country", country)
                 .put("provider", provider)
                 .put("source", "server");
+            copyAddressDetailFields(geo, variant);
             if (latitude != 0 || longitude != 0) {
                 variant.put("latitude", latitude).put("longitude", longitude);
             }
@@ -3079,7 +4246,10 @@ public class MainActivity extends Activity {
         }
     }
 
-    private JSONObject probeWebRtcAddressSource() {
+    private JSONObject probeWebRtcAddressSource(long attemptToken, long deadlineNanos) {
+        if (!reportAttemptGate.isActive(attemptToken)) {
+            return null;
+        }
         String base = serverUrl();
         if (base.isEmpty()) {
             return null;
@@ -3091,7 +4261,7 @@ public class MainActivity extends Activity {
         String url = base + "api/webrtc_probe_webview.php";
 
         runUi(() -> {
-            if (!canLoadForegroundWebView()) {
+            if (!reportAttemptGate.isActive(attemptToken) || !canLoadForegroundWebView()) {
                 done.set(true);
                 latch.countDown();
                 return;
@@ -3106,10 +4276,12 @@ public class MainActivity extends Activity {
                 @JavascriptInterface
                 public void onWebRtcProbe(String json) {
                     if (done.compareAndSet(false, true)) {
-                        try {
-                            result.set(new JSONObject(json));
-                        } catch (Exception ignored) {
-                            result.set(null);
+                        if (reportAttemptGate.isActive(attemptToken)) {
+                            try {
+                                result.set(new JSONObject(json));
+                            } catch (Exception ignored) {
+                                result.set(null);
+                            }
                         }
                         latch.countDown();
                     }
@@ -3135,7 +4307,7 @@ public class MainActivity extends Activity {
         });
 
         try {
-            latch.await(9000L, TimeUnit.MILLISECONDS);
+            latch.await(ADDRESS_WEBVIEW_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
         } finally {
@@ -3148,52 +4320,148 @@ public class MainActivity extends Activity {
         }
 
         JSONObject payload = result.get();
-        if (payload == null || !payload.optBoolean("ok", false)) {
-            return null;
-        }
-        JSONObject selected = payload.optJSONObject("selected");
-        String ip = selected == null ? "" : selected.optString("ip", "");
-        if (ip.isEmpty()) {
+        if (!reportAttemptGate.isActive(attemptToken) || payload == null || !payload.optBoolean("ok", false)) {
             return null;
         }
         try {
-            JSONObject geo = geocodeIpAddress(ip);
-            String address = geo == null ? ip : firstText(geo.optString("address", ""), ip);
-            String city = geo == null ? "" : normalizeCityPart(geo.optString("city", ""));
-            String region = geo == null ? "" : geo.optString("region", "");
-            String country = geo == null ? "" : geo.optString("country", "");
-            double latitude = geo == null ? 0 : geo.optDouble("latitude", 0);
-            double longitude = geo == null ? 0 : geo.optDouble("longitude", 0);
-            String provider = geo == null ? selected.optString("stun_label", "WebRTC") : firstText(geo.optString("provider", ""), selected.optString("stun_label", "WebRTC"));
-            JSONObject source = addressSource("webrtc", "WebRTC 探测", provider, selected.optString("stun_server", ""), address, city, region, country, latitude, longitude)
-                .put("ip", ip)
-                .put("stun_server", selected.optString("stun_server", ""))
-                .put("stun_label", selected.optString("stun_label", ""))
-                .put("stun_scope", selected.optString("stun_scope", ""))
-                .put("candidate_type", selected.optString("candidate_type", ""));
-            JSONArray candidates = payload.optJSONArray("candidates");
-            if (candidates != null) {
-                source.put("candidates", candidates);
-            }
-            return source;
+            return resolveBestWebRtcSource(attemptToken, payload, deadlineNanos);
         } catch (Exception exception) {
             Log.w(TAG, "WebRTC probe normalize failed: " + exception.getMessage());
             return null;
         }
     }
 
-    private JSONObject geocodeIpAddress(String ip) {
-        JSONObject meituan = geocodeIpByMeituan(ip);
-        if (meituan != null) {
-            return meituan;
+    private JSONObject resolveBestWebRtcSource(long attemptToken, JSONObject payload, long deadlineNanos) throws Exception {
+        Map<String, JSONObject> uniqueCandidates = new LinkedHashMap<>();
+        JSONObject selected = payload.optJSONObject("selected");
+        addUniqueWebRtcCandidate(uniqueCandidates, selected);
+        JSONArray candidates = payload.optJSONArray("candidates");
+        if (candidates != null) {
+            for (int index = 0; index < candidates.length(); index += 1) {
+                addUniqueWebRtcCandidate(uniqueCandidates, candidates.optJSONObject(index));
+            }
         }
-        return geocodeIpByIpInfo(ip);
+        if (uniqueCandidates.isEmpty()) {
+            return null;
+        }
+
+        long geocodeDeadlineNanos = deadlineNanos - TimeUnit.MILLISECONDS.toNanos(ADDRESS_PROBE_COMPLETION_MARGIN_MS);
+        ExecutorService executor = Executors.newFixedThreadPool(Math.min(4, uniqueCandidates.size()));
+        CompletionService<JSONObject> completed = new ExecutorCompletionService<>(executor);
+        List<Future<JSONObject>> futures = new ArrayList<>();
+        List<JSONObject> resolved;
+        try {
+            for (JSONObject candidate : uniqueCandidates.values()) {
+                futures.add(submitAddressProbe(completed, attemptToken, () -> {
+                    String ip = candidate.optString("ip", "");
+                    JSONObject geo = geocodeIpAddress(attemptToken, ip, geocodeDeadlineNanos);
+                    return buildWebRtcSource(candidate, geo, candidates);
+                }));
+            }
+            resolved = awaitAddressProbes(completed, futures.size(), attemptToken, deadlineNanos);
+        } finally {
+            for (Future<JSONObject> future : futures) {
+                cancelAddressProbe(future);
+            }
+            executor.shutdownNow();
+        }
+
+        JSONObject best = null;
+        for (JSONObject candidate : resolved) {
+            if (diagnosticAddressScore(candidate) > diagnosticAddressScore(best)) {
+                best = candidate;
+            }
+        }
+        if (best != null) {
+            return best;
+        }
+        JSONObject fallbackCandidate = selected != null
+            && uniqueCandidates.containsKey(selected.optString("ip", "").trim())
+            ? selected
+            : uniqueCandidates.values().iterator().next();
+        return buildWebRtcSource(fallbackCandidate, null, candidates);
     }
 
-    private JSONObject geocodeIpByMeituan(String ip) {
+    private void addUniqueWebRtcCandidate(Map<String, JSONObject> uniqueCandidates, JSONObject candidate) {
+        if (candidate == null) {
+            return;
+        }
+        String ip = candidate.optString("ip", "").trim();
+        if (!ip.isEmpty() && !uniqueCandidates.containsKey(ip)) {
+            uniqueCandidates.put(ip, candidate);
+        }
+    }
+
+    private JSONObject buildWebRtcSource(JSONObject selected, JSONObject geo, JSONArray candidates) throws Exception {
+        String ip = selected.optString("ip", "");
+        String address = geo == null ? ip : firstText(geo.optString("address", ""), ip);
+        String city = geo == null ? "" : normalizeCityPart(geo.optString("city", ""));
+        String region = geo == null ? "" : geo.optString("region", "");
+        String country = geo == null ? "" : geo.optString("country", "");
+        double latitude = geo == null ? 0 : geo.optDouble("latitude", 0);
+        double longitude = geo == null ? 0 : geo.optDouble("longitude", 0);
+        String provider = geo == null
+            ? selected.optString("stun_label", "WebRTC")
+            : firstText(geo.optString("provider", ""), selected.optString("stun_label", "WebRTC"));
+        JSONObject source = addressSource("webrtc", "WebRTC 探测", provider, selected.optString("stun_server", ""),
+            address, city, region, country, latitude, longitude)
+            .put("ip", ip)
+            .put("stun_server", selected.optString("stun_server", ""))
+            .put("stun_label", selected.optString("stun_label", ""))
+            .put("stun_scope", selected.optString("stun_scope", ""))
+            .put("candidate_type", selected.optString("candidate_type", ""));
+        copyAddressDetailFields(geo, source);
+        if (candidates != null) {
+            source.put("candidates", candidates);
+        }
+        return source;
+    }
+
+    private JSONObject geocodeIpAddress(long attemptToken, String ip, long deadlineNanos) {
+        if (!reportAttemptGate.isActive(attemptToken)) {
+            return null;
+        }
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CompletionService<JSONObject> completed = new ExecutorCompletionService<>(executor);
+        List<Future<JSONObject>> futures = new ArrayList<>();
+        List<JSONObject> candidates;
+        try {
+            futures.add(submitAddressProbe(completed, attemptToken, () -> geocodeIpByMeituan(attemptToken, ip)));
+            futures.add(submitAddressProbe(completed, attemptToken, () -> geocodeIpByIpInfo(attemptToken, ip)));
+            candidates = awaitAddressProbes(completed, futures.size(), attemptToken, deadlineNanos);
+        } finally {
+            for (Future<JSONObject> future : futures) {
+                cancelAddressProbe(future);
+            }
+            executor.shutdownNow();
+        }
+        if (!reportAttemptGate.isActive(attemptToken)) {
+            return null;
+        }
+        JSONObject best = null;
+        for (JSONObject candidate : candidates) {
+            int score = geocodeIpScore(candidate);
+            int bestScore = geocodeIpScore(best);
+            if (score > bestScore
+                || (score == bestScore
+                    && addressProviderPriority(candidate.optString("provider", ""))
+                    < addressProviderPriority(best == null ? "" : best.optString("provider", "")))) {
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    private JSONObject geocodeIpByMeituan(long attemptToken, String ip) {
+        if (!reportAttemptGate.isActive(attemptToken)) {
+            return null;
+        }
         try {
             String url = "https://apimobile.meituan.com/locate/v2/ip/loc?rgeo=true&ip=" + urlEncode(ip);
             JSONObject response = requestOpenJson(url);
+            if (!reportAttemptGate.isActive(attemptToken)) {
+                return null;
+            }
             JSONObject data = response.optJSONObject("data");
             if (data == null) {
                 data = response;
@@ -3202,8 +4470,10 @@ public class MainActivity extends Activity {
             String region = firstText(data.optString("province", ""), data.optString("region", ""));
             String city = normalizeCityPart(firstText(data.optString("city", ""), data.optString("openCityName", "")));
             String district = data.optString("district", "");
+            String street = firstText(data.optString("street", ""), data.optString("township", ""));
             String detail = firstText(data.optString("detail", ""), data.optString("address", ""), data.optString("name", ""));
-            String address = composeAddress(country, region, city, district, detail);
+            String poi = firstText(data.optString("poi", ""), data.optString("name", ""));
+            String address = composeAddress(country, region, city, district, street, firstText(detail, poi));
             if (address.isEmpty() || "中国".equals(address)) {
                 return null;
             }
@@ -3214,31 +4484,54 @@ public class MainActivity extends Activity {
                 .put("region", region)
                 .put("city", city)
                 .put("district", district)
-                .put("detail", detail);
-            if (data.has("lat") && data.has("lng")) {
-                geo.put("latitude", data.optDouble("lat", 0)).put("longitude", data.optDouble("lng", 0));
-            }
+                .put("street", street)
+                .put("detail", detail)
+                .put("poi", poi)
+                .put("postal_code", firstText(data.optString("postal_code", ""), data.optString("postcode", "")));
             return geo;
         } catch (Exception exception) {
             return null;
         }
     }
 
-    private JSONObject geocodeIpByIpInfo(String ip) {
+    private JSONObject geocodeIpByIpInfo(long attemptToken, String ip) {
+        if (!reportAttemptGate.isActive(attemptToken)) {
+            return null;
+        }
         try {
             JSONObject response = postJson("api/ipinfo_lite.php", new JSONObject().put("ip", ip));
+            if (!reportAttemptGate.isActive(attemptToken)) {
+                return null;
+            }
             String country = response.optString("country", "");
             String region = response.optString("region", "");
             String city = normalizeCityPart(response.optString("city", ""));
-            String address = composeAddress(country, region, city);
-            return new JSONObject()
+            String district = response.optString("district", "");
+            String street = firstText(response.optString("street", ""), response.optString("township", ""));
+            String detail = firstText(response.optString("detail", ""), response.optString("poi", ""));
+            String address = firstText(response.optString("address", ""), composeAddress(country, region, city, district, street, detail));
+            JSONObject geo = new JSONObject()
                 .put("provider", response.optString("provider", "IPinfo Lite"))
                 .put("address", address.isEmpty() ? ip : address)
                 .put("country", country)
                 .put("region", region)
                 .put("city", city)
-                .put("latitude", response.optDouble("latitude", 0))
-                .put("longitude", response.optDouble("longitude", 0));
+                .put("district", district)
+                .put("street", street)
+                .put("detail", detail)
+                .put("poi", response.optString("poi", ""))
+                .put("postal_code", firstText(response.optString("postal_code", ""), response.optString("postcode", "")));
+            double latitude = response.optDouble("latitude", Double.NaN);
+            double longitude = response.optDouble("longitude", Double.NaN);
+            if (Double.isFinite(latitude) && Double.isFinite(longitude)
+                && latitude >= -90.0d && latitude <= 90.0d
+                && longitude >= -180.0d && longitude <= 180.0d
+                && !(latitude == 0.0d && longitude == 0.0d)) {
+                geo.put("latitude", latitude)
+                    .put("longitude", longitude)
+                    .put("coordinate_system", "wgs84");
+            }
+            return geo;
         } catch (Exception exception) {
             return null;
         }
@@ -3396,17 +4689,201 @@ public class MainActivity extends Activity {
     }
 
 
-    private JSONObject postLocationReport(String groupName, JSONObject payload) throws Exception {
+    private JSONObject postLocationReport(long attemptToken, String groupName, JSONObject payload) throws Exception {
+        assertActiveReportAttempt(attemptToken);
         JSONObject encryptedPayload = P2PCryptoSupport.encryptedReportOrNull(this::postJson, this, groupName, payload);
-        return postJson("api/report_location.php", encryptedPayload == null ? payload : encryptedPayload);
+        assertActiveReportAttempt(attemptToken);
+        JSONObject requestPayload = new JSONObject((encryptedPayload == null ? payload : encryptedPayload).toString())
+            .put("report_id", reportIdForGroup(attemptToken, groupName));
+        return postReportJson(attemptToken, requestPayload);
     }
 
-    private void finishReport(String message) {
-        reporting = false;
-        if (reportButton != null) {
-            reportButton.setEnabled(true);
+    private JSONObject postReportJson(long attemptToken, JSONObject payload) throws Exception {
+        assertActiveReportAttempt(attemptToken);
+        HttpURLConnection connection = (HttpURLConnection) new URL(serverUrl() + "api/report_location.php").openConnection();
+        if (!registerActiveReportConnection(attemptToken, connection)) {
+            connection.disconnect();
+            throw new IllegalStateException("本次位置上报已取消。");
         }
-        setStatus(message);
+        try {
+            connection.setConnectTimeout(remainingReportTimeoutMillis(attemptToken));
+            connection.setReadTimeout(remainingReportTimeoutMillis(attemptToken));
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("User-Agent", "loc-app/" + APP_VERSION_NAME);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Cookie", cookieHeader());
+            byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            connection.setFixedLengthStreamingMode(bytes.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(bytes);
+            }
+            assertActiveReportAttempt(attemptToken);
+            connection.setReadTimeout(remainingReportTimeoutMillis(attemptToken));
+            int status = connection.getResponseCode();
+            assertActiveReportAttempt(attemptToken);
+            captureCookies(connection);
+            InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+            String responseText = readResponse(stream);
+            assertActiveReportAttempt(attemptToken);
+            assertJsonResponse(responseText);
+            JSONObject response = responseText.isEmpty() ? new JSONObject() : new JSONObject(responseText);
+            if (status < 200 || status >= 300 || !response.optBoolean("ok", false)) {
+                throw new IllegalStateException(response.optString("message", "请求失败。"));
+            }
+            return response;
+        } finally {
+            unregisterActiveReportConnection(attemptToken, connection);
+            connection.disconnect();
+        }
+    }
+
+    private boolean registerActiveReportConnection(long attemptToken, HttpURLConnection connection) {
+        synchronized (reportConnectionLock) {
+            if (!reportAttemptGate.isActive(attemptToken)) {
+                return false;
+            }
+            if (activeReportConnection != null && activeReportConnection != connection) {
+                return false;
+            }
+            activeReportConnection = connection;
+            activeReportConnectionToken = attemptToken;
+            return true;
+        }
+    }
+
+    private void unregisterActiveReportConnection(long attemptToken, HttpURLConnection connection) {
+        synchronized (reportConnectionLock) {
+            if (activeReportConnectionToken == attemptToken && activeReportConnection == connection) {
+                activeReportConnection = null;
+                activeReportConnectionToken = 0L;
+            }
+        }
+    }
+
+    private void disconnectActiveReportConnection(long attemptToken) {
+        HttpURLConnection connection = null;
+        synchronized (reportConnectionLock) {
+            if (activeReportConnectionToken == attemptToken) {
+                connection = activeReportConnection;
+                activeReportConnection = null;
+                activeReportConnectionToken = 0L;
+            }
+        }
+        if (connection != null) {
+            connection.disconnect();
+        }
+    }
+
+    private void assertActiveReportAttempt(long attemptToken) {
+        if (!reportAttemptGate.isActive(attemptToken)
+            || reportAttemptIdToken != attemptToken
+            || reportAttemptDeadlineNanos <= 0L
+            || System.nanoTime() >= reportAttemptDeadlineNanos) {
+            throw new IllegalStateException("本次位置上报已取消或超时。");
+        }
+    }
+
+    private int remainingReportTimeoutMillis(long attemptToken) {
+        assertActiveReportAttempt(attemptToken);
+        long remainingNanos = reportAttemptDeadlineNanos - System.nanoTime();
+        long remainingMillis = Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remainingNanos));
+        return (int) Math.min(12_000L, remainingMillis);
+    }
+
+    private String reportIdForGroup(long attemptToken, String groupName) throws Exception {
+        assertActiveReportAttempt(attemptToken);
+        String attemptId = reportAttemptId;
+        if (attemptId.isEmpty()) {
+            throw new IllegalStateException("本次位置上报缺少幂等标识。");
+        }
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        return lowercaseHex(digest.digest((attemptId + "\n" + (groupName == null ? "" : groupName))
+            .getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private String newReportAttemptId() {
+        byte[] bytes = new byte[16];
+        new SecureRandom().nextBytes(bytes);
+        return lowercaseHex(bytes);
+    }
+
+    private String lowercaseHex(byte[] bytes) {
+        StringBuilder builder = new StringBuilder(bytes == null ? 0 : bytes.length * 2);
+        if (bytes != null) {
+            for (byte item : bytes) {
+                builder.append(String.format(Locale.ROOT, "%02x", item & 0xff));
+            }
+        }
+        return builder.toString();
+    }
+
+    private boolean finishReport(long attemptToken, String message) {
+        if (!reportAttemptGate.finish(attemptToken)) {
+            return false;
+        }
+        disconnectActiveReportConnection(attemptToken);
+        if (reportAttemptIdToken == attemptToken) {
+            reportAttemptIdToken = 0L;
+            reportAttemptId = "";
+            reportAttemptDeadlineNanos = 0L;
+        }
+        if (reportWatchdog != null) {
+            mainHandler.removeCallbacks(reportWatchdog);
+            reportWatchdog = null;
+        }
+        clearReportLocationListener(attemptToken);
+        reporting = false;
+        syncReportButtonState();
+        if (message != null && !message.trim().isEmpty()) {
+            setStatus(message.trim());
+        }
+        return true;
+    }
+
+    private void cancelActiveReportForBackground() {
+        long attemptToken = reportAttemptGate.activeToken();
+        if (attemptToken > 0L) {
+            finishReport(attemptToken, "已退出前台，本次位置上报已取消。");
+        }
+    }
+
+    private int geocodeIpScore(JSONObject geo) {
+        if (geo == null) {
+            return -1;
+        }
+        int score = Math.max(0, addressPrecisionScore(geo)) * 10;
+        if (!geo.optString("country", "").isEmpty()) score += 1;
+        if (!geo.optString("region", "").isEmpty()) score += 2;
+        if (!geo.optString("city", "").isEmpty()) score += 8;
+        if (!geo.optString("district", "").isEmpty()) score += 12;
+        if (!geo.optString("street", "").isEmpty()) score += 16;
+        if (!geo.optString("detail", "").isEmpty() || !geo.optString("poi", "").isEmpty()) score += 20;
+        double latitude = geo.optDouble("latitude", 0);
+        double longitude = geo.optDouble("longitude", 0);
+        if (latitude != 0 || longitude != 0) score += 3;
+        return score;
+    }
+
+    private void copyAddressDetailFields(JSONObject from, JSONObject to) throws Exception {
+        if (from == null || to == null) {
+            return;
+        }
+        for (String field : new String[] {"district", "street", "detail", "poi", "postal_code", "coordinate_system"}) {
+            String value = from.optString(field, "");
+            if (!value.isEmpty()) {
+                to.put(field, value);
+            }
+        }
+    }
+
+    private String safeThrowableMessage(Throwable throwable) {
+        if (throwable == null) {
+            return "未知错误";
+        }
+        String message = throwable.getMessage();
+        return message == null || message.trim().isEmpty() ? throwable.getClass().getSimpleName() : message.trim();
     }
 
     private void logout() {
@@ -4086,6 +5563,10 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         activityForeground = true;
+        syncReportButtonState();
+        if (currentUser != null && currentTab == TAB_POSITION && content != null && homeMapWebView == null) {
+            refreshLocations();
+        }
         long savedActiveDownload = prefs().getLong(KEY_ACTIVE_UPDATE_DOWNLOAD_ID, -1L);
         if (updateDownloadId <= 0 && savedActiveDownload > 0) {
             updateDownloadId = savedActiveDownload;
@@ -4106,13 +5587,16 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onStop() {
+        cancelActiveReportForBackground();
         activityForeground = false;
         destroyManagedWebViews();
+        homeMapWebView = null;
         super.onStop();
     }
 
     @Override
     protected void onDestroy() {
+        cancelActiveReportForBackground();
         destroyManagedWebViews();
         if (updateReceiver != null) {
             try {
@@ -4187,15 +5671,21 @@ public class MainActivity extends Activity {
     @Override
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
-        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+        if (!canLoadForegroundWebView() && level >= android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
             destroyManagedWebViews();
+            homeMapWebView = null;
+        }
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
             runStartupMaintenance();
         }
     }
 
     @Override
     public void onLowMemory() {
-        destroyManagedWebViews();
+        if (!canLoadForegroundWebView()) {
+            destroyManagedWebViews();
+            homeMapWebView = null;
+        }
         trimAppCaches();
         super.onLowMemory();
     }
@@ -4214,6 +5704,10 @@ public class MainActivity extends Activity {
         if (webView == null) {
             return;
         }
+        if (webView == homeMapWebView) {
+            homeMapWebView = null;
+        }
+        pendingMapRecords.remove(webView);
         managedWebViews.remove(webView);
         try {
             ViewGroup parent = webView.getParent() instanceof ViewGroup ? (ViewGroup) webView.getParent() : null;
@@ -4235,6 +5729,7 @@ public class MainActivity extends Activity {
             destroyManagedWebView(webView);
         }
         managedWebViews.clear();
+        homeMapWebView = null;
     }
 
     private boolean handleWebViewRendererGone(WebView webView, String message) {

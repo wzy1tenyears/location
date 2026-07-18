@@ -68,24 +68,13 @@ try {
         }
 
         if ($action === 'add_invite_code') {
-            $code = post_string('code', 255);
+            $code = (string) ($_POST['code'] ?? '');
             $note = post_string('note', 120);
             $inviteType = post_string('invite_type', 32);
             $allowGroupOwner = isset($_POST['allow_group_owner']) ? 1 : 0;
-            $maxUses = max(1, (int) ($_POST['max_uses'] ?? 1));
-            if ($code === '') {
-                $alphabet = '0123456789abcdefghijklmnopqrstuvwxyz';
-                $code = '';
-                for ($index = 0; $index < 6; $index += 1) {
-                    $code .= $alphabet[random_int(0, strlen($alphabet) - 1)];
-                }
-            }
-            if (!in_array($inviteType, ['invite', 'group_create'], true)) {
-                throw new RuntimeException('邀请码类型不正确。');
-            }
-            $stmt = $pdo->prepare('INSERT INTO invite_codes (code, note, invite_type, allow_group_owner, max_uses) VALUES (?, ?, ?, ?, ?)');
-            $stmt->execute([$code, $note, $inviteType, $allowGroupOwner, $maxUses]);
-            $message = '邀请码已添加。';
+            $maxUses = max(1, min(9999, (int) ($_POST['max_uses'] ?? 1)));
+            $code = create_invite_code_record($pdo, $code, $note, $inviteType, $allowGroupOwner, $maxUses);
+            $message = '邀请码已添加：' . $code;
         }
 
         if ($action === 'update_invite_note') {

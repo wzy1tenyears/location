@@ -252,73 +252,157 @@ function user_history_locations_cache_set(string $groupName, int $userId, array 
     );
 }
 
+function generate_lower_alphanumeric_code(int $length): string
+{
+    if ($length <= 0) {
+        throw new InvalidArgumentException('Code length must be positive.');
+    }
+
+    $alphabet = '0123456789abcdefghijklmnopqrstuvwxyz';
+    $code = '';
+    for ($index = 0; $index < $length; $index += 1) {
+        $code .= $alphabet[random_int(0, strlen($alphabet) - 1)];
+    }
+
+    return $code;
+}
+
+function pdo_duplicate_key_for(Throwable $error, string $keyName): bool
+{
+    $current = $error;
+    while ($current instanceof Throwable) {
+        if ($current instanceof PDOException) {
+            $driverCode = (int) (($current->errorInfo[1] ?? 0));
+            if ($driverCode === 1062) {
+                $pattern = "/for key [^\\r\\n]*[.\\x60'\\\"]" . preg_quote($keyName, '/') . "[\\x60'\\\"]?$/i";
+                if (preg_match($pattern, trim($current->getMessage())) === 1) {
+                    return true;
+                }
+            }
+        }
+
+        $next = $current->getPrevious();
+        if (!$next instanceof Throwable || $next === $current) {
+            break;
+        }
+        $current = $next;
+    }
+
+    return false;
+}
+
+function generate_legacy_group_code_candidate(): string
+{
+    return bin2hex(random_bytes(16));
+}
+
+function generate_group_code_candidate(bool $backfillEnabled): string
+{
+    return $backfillEnabled
+        ? generate_lower_alphanumeric_code(8)
+        : generate_legacy_group_code_candidate();
+}
+
+function should_generate_current_group_code(bool $backfillEnabled, bool $backfillCompleted): bool
+{
+    return $backfillEnabled || $backfillCompleted;
+}
+
 function generate_group_code(PDO $pdo): string
 {
+    $useCurrentFormat = should_generate_current_group_code(
+        LOC_GROUP_CODE_BACKFILL_ENABLED,
+        group_code_backfill_is_current($pdo)
+    );
     for ($attempt = 0; $attempt < 80; $attempt += 1) {
-        $code = bin2hex(random_bytes(16));
+        $code = generate_group_code_candidate($useCurrentFormat);
 
-        $stmt = $pdo->prepare('SELECT id FROM family_groups WHERE group_code = ? LIMIT 1');
-        $stmt->execute([$code]);
+        $stmt = $pdo->prepare('SELECT id FROM family_groups WHERE group_code = ? OR legacy_group_code = ? LIMIT 1');
+        $stmt->execute([$code, $code]);
         if (!$stmt->fetch()) {
             return $code;
         }
     }
 
-    throw new RuntimeException('Unable to generate group code.');
+    throw new RuntimeException('Unable to generate a unique group code.');
 }
 
 function ensure_family_group_codes(PDO $pdo): void
 {
-    $migrationKey = 'migration_group_codes_32_v1';
-    $check = $pdo->prepare('SELECT setting_value FROM app_settings WHERE setting_key = ? LIMIT 1');
-    $check->execute([$migrationKey]);
-    if ($check->fetchColumn() === 'done') {
-        return;
-    }
-
-    $seed = $pdo->prepare("INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES (?, 'pending')");
-    $seed->execute([$migrationKey]);
-
     $ownsTransaction = !$pdo->inTransaction();
     if ($ownsTransaction) {
         $pdo->beginTransaction();
     }
 
     try {
-        $marker = $pdo->prepare('SELECT setting_value FROM app_settings WHERE setting_key = ? FOR UPDATE');
-        $marker->execute([$migrationKey]);
-        if ($marker->fetchColumn() === 'done') {
-            if ($ownsTransaction) {
-                $pdo->commit();
-            }
-            return;
-        }
-
         $stmt = $pdo->query("
-            SELECT id
+            SELECT id, group_code, legacy_group_code
             FROM family_groups
             WHERE group_code IS NULL
-               OR CHAR_LENGTH(group_code) <> 32
-               OR BINARY group_code NOT REGEXP '^[0-9a-f]{32}$'
+               OR CHAR_LENGTH(group_code) <> 8
+               OR group_code COLLATE utf8mb4_bin NOT REGEXP '^[0-9a-z]{8}$'
+               OR (legacy_group_code IS NOT NULL AND (
+                   CHAR_LENGTH(legacy_group_code) <> 32
+                   OR legacy_group_code COLLATE utf8mb4_bin NOT REGEXP '^[0-9a-f]{32}$'
+               ))
+            ORDER BY id ASC
             FOR UPDATE
         ");
-        foreach ($stmt->fetchAll() as $row) {
-            $code = generate_group_code($pdo);
-            $update = $pdo->prepare("
-                UPDATE family_groups
-                SET group_code = ?
-                WHERE id = ?
-                  AND (
-                      group_code IS NULL
-                      OR CHAR_LENGTH(group_code) <> 32
-                      OR BINARY group_code NOT REGEXP '^[0-9a-f]{32}$'
-                  )
-            ");
-            $update->execute([$code, (int) $row['id']]);
-        }
+        $pending = $stmt->fetchAll();
+        $update = $pdo->prepare("
+            UPDATE family_groups
+            SET legacy_group_code = ?, group_code = ?
+            WHERE id = ?
+              AND COALESCE(group_code, '') = ?
+              AND COALESCE(legacy_group_code, '') = ?
+        ");
 
-        $complete = $pdo->prepare("UPDATE app_settings SET setting_value = 'done' WHERE setting_key = ?");
-        $complete->execute([$migrationKey]);
+        foreach ($pending as $row) {
+            $groupId = (int) $row['id'];
+            $currentRaw = $row['group_code'] === null ? '' : (string) $row['group_code'];
+            $legacyRaw = $row['legacy_group_code'] === null ? '' : (string) $row['legacy_group_code'];
+            $currentCode = trim($currentRaw);
+            $legacyCode = trim($legacyRaw);
+
+            if ($currentRaw !== $currentCode || $legacyRaw !== $legacyCode) {
+                throw new RuntimeException(sprintf('Group %d has a non-normalized group code.', $groupId));
+            }
+            if (preg_match('/^[0-9a-z]{8}$/D', $currentCode) === 1) {
+                throw new RuntimeException(sprintf('Group %d has an invalid legacy group-code alias.', $groupId));
+            }
+            if ($currentCode !== '' && preg_match('/^[0-9a-f]{32}$/D', $currentCode) !== 1) {
+                throw new RuntimeException(sprintf('Group %d has an unsupported historical group code.', $groupId));
+            }
+            if ($legacyCode !== '' && preg_match('/^[0-9a-f]{32}$/D', $legacyCode) !== 1) {
+                throw new RuntimeException(sprintf('Group %d has an unsupported legacy group-code alias.', $groupId));
+            }
+            if ($legacyCode !== '' && $currentCode !== '' && !hash_equals($legacyCode, $currentCode)) {
+                throw new RuntimeException(sprintf('Group %d has conflicting current and legacy group codes.', $groupId));
+            }
+
+            $alias = $legacyCode !== '' ? $legacyCode : ($currentCode !== '' ? $currentCode : null);
+            $updated = false;
+            for ($attempt = 0; $attempt < 80; $attempt += 1) {
+                $newCode = generate_lower_alphanumeric_code(8);
+                try {
+                    $update->execute([$alias, $newCode, $groupId, $currentRaw, $legacyRaw]);
+                } catch (Throwable $th) {
+                    if (pdo_duplicate_key_for($th, 'group_code')) {
+                        continue;
+                    }
+                    throw $th;
+                }
+
+                if ($update->rowCount() !== 1) {
+                    throw new RuntimeException(sprintf('Group-code update for group %d did not affect exactly one row.', $groupId));
+                }
+                $updated = true;
+                break;
+            }
+            if (!$updated) {
+                throw new RuntimeException(sprintf('Unable to allocate a unique group code for group %d.', $groupId));
+            }
+        }
 
         if ($ownsTransaction) {
             $pdo->commit();
@@ -329,6 +413,71 @@ function ensure_family_group_codes(PDO $pdo): void
         }
         throw $th;
     }
+}
+
+function is_valid_family_group_code(string $code): bool
+{
+    return preg_match('/^(?:[0-9a-z]{8}|[0-9a-f]{32})$/D', $code) === 1;
+}
+
+function find_family_group_by_code(PDO $pdo, string $rawCode): ?array
+{
+    $code = strtolower(trim($rawCode));
+    if (!is_valid_family_group_code($code)) {
+        return null;
+    }
+
+    $stmt = $pdo->prepare('SELECT * FROM family_groups WHERE group_code = ? OR legacy_group_code = ? LIMIT 1');
+    $stmt->execute([$code, $code]);
+    $group = $stmt->fetch();
+
+    return is_array($group) ? $group : null;
+}
+
+function create_invite_code_record(
+    PDO $pdo,
+    string $requestedCode,
+    string $note,
+    string $inviteType,
+    int $allowGroupOwner,
+    int $maxUses
+): string {
+    $code = strtolower(trim($requestedCode));
+    $customCode = $code !== '';
+    if ($customCode && preg_match('/^[0-9a-z]{4,64}$/D', $code) !== 1) {
+        throw new RuntimeException('自定义邀请码需为 4 至 64 位英文字母或数字。');
+    }
+    if (!in_array($inviteType, ['invite', 'group_create'], true)) {
+        throw new RuntimeException('邀请码类型不正确。');
+    }
+
+    $insert = $pdo->prepare('INSERT INTO invite_codes (code, note, invite_type, allow_group_owner, max_uses) VALUES (?, ?, ?, ?, ?)');
+    if ($customCode) {
+        try {
+            $insert->execute([$code, $note, $inviteType, $allowGroupOwner, $maxUses]);
+        } catch (Throwable $th) {
+            if (pdo_duplicate_key_for($th, 'code')) {
+                throw new RuntimeException('邀请码已存在。');
+            }
+            throw $th;
+        }
+        return $code;
+    }
+
+    for ($attempt = 0; $attempt < 80; $attempt += 1) {
+        $code = generate_lower_alphanumeric_code(8);
+        try {
+            $insert->execute([$code, $note, $inviteType, $allowGroupOwner, $maxUses]);
+            return $code;
+        } catch (Throwable $th) {
+            if (pdo_duplicate_key_for($th, 'code')) {
+                continue;
+            }
+            throw $th;
+        }
+    }
+
+    throw new RuntimeException('Unable to allocate a unique invite code.');
 }
 
 function ensure_family_group_owners(PDO $pdo): void
@@ -350,13 +499,261 @@ function ensure_family_group_owners(PDO $pdo): void
     }
 }
 
-function ensure_schema(PDO $pdo): void
+function schema_advisory_lock_name(string $databaseName): string
 {
-    static $done = false;
-
-    if ($done) {
-        return;
+    $databaseName = trim($databaseName);
+    if ($databaseName === '') {
+        throw new RuntimeException('Unable to determine the database for schema migration locking.');
     }
+
+    return 'family-location-schema-' . substr(hash('sha256', $databaseName), 0, 40);
+}
+
+function acquire_schema_advisory_lock(PDO $pdo, string $lockName, int $timeoutSeconds): void
+{
+    $stmt = $pdo->prepare('SELECT GET_LOCK(?, ?)');
+    $stmt->execute([$lockName, max(0, $timeoutSeconds)]);
+    if ((string) $stmt->fetchColumn() !== '1') {
+        throw new RuntimeException('Timed out waiting for the database schema migration lock.');
+    }
+}
+
+function release_schema_advisory_lock(PDO $pdo, string $lockName): void
+{
+    try {
+        $stmt = $pdo->prepare('SELECT RELEASE_LOCK(?)');
+        $stmt->execute([$lockName]);
+        if ((string) $stmt->fetchColumn() !== '1') {
+            error_log('[family-location] Database schema migration lock was not held during release.');
+        }
+    } catch (Throwable $error) {
+        // The connection closing also releases MySQL advisory locks. Do not hide the migration failure.
+        error_log('[family-location] Database schema migration lock release failed: ' . $error->getMessage());
+    }
+}
+
+function history_encrypted_payload_expectations(
+    array $rows,
+    int $maxPayloadBytes,
+    int $maxTotalBytes = PHP_INT_MAX
+): array
+{
+    $maxPayloadBytes = max(0, $maxPayloadBytes);
+    $maxTotalBytes = max(0, $maxTotalBytes);
+    $candidates = [];
+    $candidateOrder = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $id = (int) ($row['id'] ?? 0);
+        $bytes = max(0, (int) ($row['encrypted_payload_bytes'] ?? 0));
+        if ($id <= 0 || $bytes <= 0 || $bytes > $maxPayloadBytes) {
+            continue;
+        }
+        if (!isset($candidates[$id])) {
+            $candidates[$id] = ['bytes' => $bytes, 'occurrences' => 1];
+            $candidateOrder[] = $id;
+            continue;
+        }
+        if ((int) $candidates[$id]['bytes'] === $bytes) {
+            $candidates[$id]['occurrences'] += 1;
+        }
+    }
+
+    $expectations = [];
+    $totalBytes = 0;
+    foreach ($candidateOrder as $id) {
+        $bytes = (int) $candidates[$id]['bytes'];
+        $occurrences = max(1, (int) $candidates[$id]['occurrences']);
+        if ($bytes > intdiv($maxTotalBytes - $totalBytes, $occurrences)) {
+            continue;
+        }
+
+        $expectations[$id] = $bytes;
+        $totalBytes += $bytes * $occurrences;
+    }
+
+    return $expectations;
+}
+
+function history_encrypted_payload_unavailable_reasons(
+    array $rows,
+    array $selectedExpectations,
+    int $maxPayloadBytes,
+    string $boundedReason = 'response_byte_limit'
+): array {
+    $reasons = [];
+    $maxPayloadBytes = max(0, $maxPayloadBytes);
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $id = (int) ($row['id'] ?? 0);
+        $bytes = max(0, (int) ($row['encrypted_payload_bytes'] ?? 0));
+        $isEncrypted = strcasecmp(trim((string) ($row['encryption_mode'] ?? '')), 'p2p-v1') === 0
+            || $bytes > 0;
+        if (!$isEncrypted || $id <= 0 || isset($selectedExpectations[$id])) {
+            continue;
+        }
+
+        $reasons[$id] = $bytes <= 0
+            ? 'missing_ciphertext'
+            : ($bytes > $maxPayloadBytes ? 'payload_too_large' : $boundedReason);
+    }
+
+    return $reasons;
+}
+
+function history_client_snapshot_plan(
+    array $rows,
+    int $maxPayloadBytes,
+    int $maxTotalBytes
+): array {
+    $maxPayloadBytes = max(0, $maxPayloadBytes);
+    $maxTotalBytes = max(0, $maxTotalBytes);
+    $expectations = [];
+    $totalBytes = 0;
+    $eligible = true;
+
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            $eligible = false;
+            break;
+        }
+
+        $id = (int) ($row['id'] ?? 0);
+        $bytes = max(0, (int) ($row['encrypted_payload_bytes'] ?? 0));
+        $isEncrypted = strcasecmp(trim((string) ($row['encryption_mode'] ?? '')), 'p2p-v1') === 0
+            || $bytes > 0;
+        if (!$isEncrypted) {
+            continue;
+        }
+        if ($id <= 0 || $bytes <= 0 || $bytes > $maxPayloadBytes || isset($expectations[$id])) {
+            $eligible = false;
+            break;
+        }
+        if ($bytes > $maxTotalBytes - $totalBytes) {
+            $eligible = false;
+            break;
+        }
+
+        $expectations[$id] = $bytes;
+        $totalBytes += $bytes;
+    }
+
+    return [
+        'eligible' => $eligible,
+        'expectations' => $eligible ? $expectations : [],
+        'total_bytes' => $totalBytes,
+    ];
+}
+
+function history_hydrate_encrypted_payloads(
+    array $rows,
+    array $payloadsById,
+    array $unavailableReasonsById = []
+): array
+{
+    foreach ($rows as &$row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $id = (int) ($row['id'] ?? 0);
+        $expectedBytes = max(0, (int) ($row['encrypted_payload_bytes'] ?? 0));
+        $isEncrypted = strcasecmp(trim((string) ($row['encryption_mode'] ?? '')), 'p2p-v1') === 0
+            || $expectedBytes > 0;
+        $payload = $payloadsById[$id] ?? null;
+        $payloadAvailable = $isEncrypted
+            && is_string($payload)
+            && $expectedBytes > 0
+            && strlen($payload) === $expectedBytes;
+        $row['encrypted_payload'] = $payloadAvailable ? $payload : '';
+        $row['encrypted_payload_available'] = !$isEncrypted || $payloadAvailable;
+        $row['encrypted_payload_unavailable_reason'] = !$isEncrypted || $payloadAvailable
+            ? ''
+            : (string) ($unavailableReasonsById[$id] ?? 'payload_unavailable');
+    }
+    unset($row);
+
+    return $rows;
+}
+
+function history_complete_client_snapshot(
+    array $rows,
+    array $payloadsById,
+    int $maxPayloadBytes,
+    int $maxTotalBytes
+): ?array {
+    $plan = history_client_snapshot_plan($rows, $maxPayloadBytes, $maxTotalBytes);
+    if (!$plan['eligible']) {
+        return null;
+    }
+
+    foreach ($plan['expectations'] as $id => $expectedBytes) {
+        if (!array_key_exists($id, $payloadsById)
+            || !is_string($payloadsById[$id])
+            || strlen($payloadsById[$id]) !== $expectedBytes) {
+            return null;
+        }
+    }
+
+    return history_hydrate_encrypted_payloads($rows, $payloadsById);
+}
+
+function history_json_response_bytes(array $response): ?int
+{
+    $encoded = json_encode($response, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return is_string($encoded) ? strlen($encoded) : null;
+}
+
+function schema_setting_value(PDO $pdo, string $settingKey): ?string
+{
+    try {
+        $stmt = $pdo->prepare('SELECT setting_value FROM app_settings WHERE setting_key = ? LIMIT 1');
+        $stmt->execute([$settingKey]);
+        $value = $stmt->fetchColumn();
+        return $value === false ? null : (string) $value;
+    } catch (PDOException $error) {
+        $driverCode = (int) ($error->errorInfo[1] ?? 0);
+        if ($driverCode === 1146 || (string) $error->getCode() === '42S02') {
+            return null;
+        }
+        throw $error;
+    }
+}
+
+function schema_version_is_current(PDO $pdo): bool
+{
+    return schema_setting_value($pdo, 'database_schema_version') === DATABASE_SCHEMA_VERSION;
+}
+
+function group_code_backfill_is_current(PDO $pdo): bool
+{
+    return schema_setting_value($pdo, GROUP_CODE_BACKFILL_SETTING_KEY) === 'done';
+}
+
+function schema_runtime_state_is_current(PDO $pdo): bool
+{
+    return schema_version_is_current($pdo)
+        && (!LOC_GROUP_CODE_BACKFILL_ENABLED || group_code_backfill_is_current($pdo));
+}
+
+function write_schema_setting(PDO $pdo, string $settingKey, string $settingValue): void
+{
+    $stmt = $pdo->prepare('
+        INSERT INTO app_settings (setting_key, setting_value)
+        VALUES (?, ?)
+        ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)
+    ');
+    $stmt->execute([$settingKey, $settingValue]);
+}
+
+function ensure_schema_under_lock(PDO $pdo): void
+{
 
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS users (
@@ -388,12 +785,14 @@ function ensure_schema(PDO $pdo): void
             group_name VARCHAR(100) NOT NULL UNIQUE,
             display_name VARCHAR(100) NOT NULL DEFAULT '',
             group_code VARCHAR(32) NULL UNIQUE,
+            legacy_group_code VARCHAR(32) NULL,
             owner_user_id INT UNSIGNED NULL,
             p2p_enabled_at DATETIME NULL,
             p2p_enabled_by INT UNSIGNED NULL,
             p2p_key_version INT UNSIGNED NOT NULL DEFAULT 0,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_family_groups_legacy_group_code (legacy_group_code)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
 
@@ -478,6 +877,8 @@ function ensure_schema(PDO $pdo): void
     if (strtolower(column_type($pdo, 'family_groups', 'group_code')) !== 'varchar(32)') {
         $pdo->exec('ALTER TABLE family_groups MODIFY group_code VARCHAR(32) NULL');
     }
+    add_column_if_missing($pdo, 'family_groups', 'legacy_group_code', 'VARCHAR(32) NULL AFTER `group_code`');
+    add_unique_index_if_missing($pdo, 'family_groups', 'uniq_family_groups_legacy_group_code', 'legacy_group_code');
     add_column_if_missing($pdo, 'family_groups', 'owner_user_id', 'INT UNSIGNED NULL');
     add_column_if_missing($pdo, 'family_groups', 'p2p_enabled_at', 'DATETIME NULL');
     add_column_if_missing($pdo, 'family_groups', 'p2p_enabled_by', 'INT UNSIGNED NULL');
@@ -687,7 +1088,9 @@ function ensure_schema(PDO $pdo): void
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
-    ensure_family_group_codes($pdo);
+    if (LOC_GROUP_CODE_BACKFILL_ENABLED) {
+        ensure_family_group_codes($pdo);
+    }
 
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS admin_login_failures (
@@ -740,7 +1143,42 @@ function ensure_schema(PDO $pdo): void
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
 
-    $done = true;
+}
+
+function ensure_schema(PDO $pdo): void
+{
+    static $done = false;
+
+    if ($done) {
+        return;
+    }
+    if (schema_runtime_state_is_current($pdo)) {
+        $done = true;
+        return;
+    }
+
+    $databaseName = (string) $pdo->query('SELECT DATABASE()')->fetchColumn();
+    $lockName = schema_advisory_lock_name($databaseName);
+    acquire_schema_advisory_lock($pdo, $lockName, SCHEMA_MIGRATION_LOCK_TIMEOUT_SECONDS);
+    try {
+        if (!schema_version_is_current($pdo)) {
+            ensure_schema_under_lock($pdo);
+            write_schema_setting($pdo, 'database_schema_version', DATABASE_SCHEMA_VERSION);
+            if (LOC_GROUP_CODE_BACKFILL_ENABLED) {
+                write_schema_setting($pdo, GROUP_CODE_BACKFILL_SETTING_KEY, 'done');
+            }
+        } elseif (LOC_GROUP_CODE_BACKFILL_ENABLED && !group_code_backfill_is_current($pdo)) {
+            ensure_family_group_codes($pdo);
+            write_schema_setting($pdo, GROUP_CODE_BACKFILL_SETTING_KEY, 'done');
+        }
+
+        if (!schema_runtime_state_is_current($pdo)) {
+            throw new RuntimeException('Database schema migration did not reach the requested state.');
+        }
+        $done = true;
+    } finally {
+        release_schema_advisory_lock($pdo, $lockName);
+    }
 }
 
 function create_family_group_record(PDO $pdo, string $displayName, ?int $ownerUserId = null): array
@@ -750,10 +1188,25 @@ function create_family_group_record(PDO $pdo, string $displayName, ?int $ownerUs
         throw new RuntimeException('家庭组名称不能为空。');
     }
 
-    $code = generate_group_code($pdo);
-    $groupName = family_group_internal_name($pdo, $displayName, $code);
     $stmt = $pdo->prepare('INSERT INTO family_groups (group_name, display_name, group_code, owner_user_id) VALUES (?, ?, ?, ?)');
-    $stmt->execute([$groupName, $displayName, $code, $ownerUserId]);
+    $groupName = '';
+    for ($attempt = 0; $attempt < 80; $attempt += 1) {
+        $code = generate_group_code($pdo);
+        $groupName = family_group_internal_name($pdo, $displayName, $code);
+        try {
+            $stmt->execute([$groupName, $displayName, $code, $ownerUserId]);
+            break;
+        } catch (Throwable $th) {
+            if (pdo_duplicate_key_for($th, 'group_code') || pdo_duplicate_key_for($th, 'group_name')) {
+                $groupName = '';
+                continue;
+            }
+            throw $th;
+        }
+    }
+    if ($groupName === '') {
+        throw new RuntimeException('无法分配唯一的家庭组号。');
+    }
 
     $stmt = $pdo->prepare('SELECT * FROM family_groups WHERE group_name = ? LIMIT 1');
     $stmt->execute([$groupName]);
@@ -792,21 +1245,63 @@ function ensure_family_group_record(PDO $pdo, string $groupName, ?int $ownerUser
         throw new RuntimeException('家庭组名称不能为空。');
     }
 
-    $stmt = $pdo->prepare('INSERT IGNORE INTO family_groups (group_name, display_name, group_code, owner_user_id) VALUES (?, ?, ?, ?)');
-    $stmt->execute([$groupName, $groupName, generate_group_code($pdo), $ownerUserId]);
-
     $stmt = $pdo->prepare('SELECT * FROM family_groups WHERE group_name = ? LIMIT 1');
     $stmt->execute([$groupName]);
     $group = $stmt->fetch();
+    if (!$group) {
+        $insert = $pdo->prepare('INSERT INTO family_groups (group_name, display_name, group_code, owner_user_id) VALUES (?, ?, ?, ?)');
+        for ($attempt = 0; $attempt < 80; $attempt += 1) {
+            $code = generate_group_code($pdo);
+            try {
+                $insert->execute([$groupName, $groupName, $code, $ownerUserId]);
+                break;
+            } catch (Throwable $th) {
+                if (pdo_duplicate_key_for($th, 'group_code')) {
+                    continue;
+                }
+                if (pdo_duplicate_key_for($th, 'group_name')) {
+                    break;
+                }
+                throw $th;
+            }
+        }
+
+        $stmt->execute([$groupName]);
+        $group = $stmt->fetch();
+    }
     if (!$group) {
         throw new RuntimeException('家庭组不存在。');
     }
 
     if (empty($group['group_code'])) {
-        $code = generate_group_code($pdo);
-        $update = $pdo->prepare('UPDATE family_groups SET group_code = ? WHERE id = ?');
-        $update->execute([$code, (int) $group['id']]);
-        $group['group_code'] = $code;
+        $update = $pdo->prepare("UPDATE family_groups SET group_code = ? WHERE id = ? AND (group_code IS NULL OR group_code = '')");
+        for ($attempt = 0; $attempt < 80; $attempt += 1) {
+            $code = generate_group_code($pdo);
+            try {
+                $update->execute([$code, (int) $group['id']]);
+            } catch (Throwable $th) {
+                if (pdo_duplicate_key_for($th, 'group_code')) {
+                    continue;
+                }
+                throw $th;
+            }
+            if ($update->rowCount() === 1) {
+                $group['group_code'] = $code;
+                break;
+            }
+
+            $reload = $pdo->prepare('SELECT group_code FROM family_groups WHERE id = ? LIMIT 1');
+            $reload->execute([(int) $group['id']]);
+            $concurrentCode = (string) ($reload->fetchColumn() ?: '');
+            if (preg_match('/^[0-9a-z]{8}$/D', $concurrentCode) === 1) {
+                $group['group_code'] = $concurrentCode;
+                break;
+            }
+            throw new RuntimeException('家庭组号并发更新失败。');
+        }
+        if (empty($group['group_code'])) {
+            throw new RuntimeException('无法分配唯一的家庭组号。');
+        }
     }
 
     if (empty($group['display_name'])) {
@@ -864,6 +1359,37 @@ function column_type(PDO $pdo, string $table, string $column): string
     $stmt->execute([$table, $column]);
 
     return (string) ($stmt->fetchColumn() ?: '');
+}
+
+function index_exists(PDO $pdo, string $table, string $index): bool
+{
+    $stmt = $pdo->prepare("
+        SELECT COUNT(*)
+        FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = ?
+          AND INDEX_NAME = ?
+    ");
+    $stmt->execute([$table, $index]);
+
+    return (int) $stmt->fetchColumn() > 0;
+}
+
+function add_unique_index_if_missing(PDO $pdo, string $table, string $index, string $column): void
+{
+    assert_safe_identifier($table);
+    assert_safe_identifier($index);
+    assert_safe_identifier($column);
+    if (index_exists($pdo, $table, $index)) {
+        return;
+    }
+
+    $pdo->exec(sprintf(
+        'ALTER TABLE `%s` ADD UNIQUE INDEX `%s` (`%s`)',
+        $table,
+        $index,
+        $column
+    ));
 }
 
 function migrate_role_columns(PDO $pdo): void
@@ -1071,7 +1597,11 @@ function user_cross_border_transfer_accepted(array $user): bool
 function require_app_user_agent(): void
 {
     $ua = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
-    if (stripos($ua, APP_USER_AGENT_TOKEN) === false) {
+    $token = defined('APP_USER_AGENT_TOKEN') ? trim((string) APP_USER_AGENT_TOKEN) : '';
+    if ($token === '') {
+        json_response(['ok' => false, 'message' => 'App client token is not configured.'], 503);
+    }
+    if (stripos($ua, $token) === false) {
         json_response(['ok' => false, 'message' => 'Only loc-app client is allowed.'], 403);
     }
 }
@@ -1079,7 +1609,12 @@ function require_app_user_agent(): void
 function require_loc_app_page(): void
 {
     $ua = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
-    if (stripos($ua, APP_USER_AGENT_TOKEN) !== false) {
+    $token = defined('APP_USER_AGENT_TOKEN') ? trim((string) APP_USER_AGENT_TOKEN) : '';
+    if ($token === '') {
+        http_response_code(503);
+        exit('Service unavailable.');
+    }
+    if (stripos($ua, $token) !== false) {
         return;
     }
 

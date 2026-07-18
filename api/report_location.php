@@ -2,12 +2,11 @@
 
 declare(strict_types=1);
 
-require_once __DIR__ . '/../private/lib/bootstrap.php';
-
-require_app_user_agent();
-
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    json_response(['ok' => false, 'message' => 'Method not allowed.'], 405);
+$reportLocationFunctionsOnly = PHP_SAPI === 'cli'
+    && defined('REPORT_LOCATION_FUNCTIONS_ONLY')
+    && REPORT_LOCATION_FUNCTIONS_ONLY === true;
+if (!$reportLocationFunctionsOnly) {
+    require_once __DIR__ . '/../private/lib/bootstrap.php';
 }
 
 function report_string(mixed $value, int $maxLength = 255): string
@@ -42,58 +41,243 @@ function report_float(mixed $value, float $min, float $max): ?float
     return $number;
 }
 
+final class AddressDiagnosticsTooLargeException extends LengthException
+{
+}
+
+function sanitized_report_strings(array $item, array $limits): array
+{
+    $clean = [];
+    foreach ($limits as $field => $limit) {
+        $clean[$field] = report_string($item[$field] ?? '', $limit);
+    }
+
+    return $clean;
+}
+
 function sanitize_probe_items(mixed $items, string $kind): array
 {
     if (!is_array($items)) {
         return [];
     }
 
-    $clean = [];
-    foreach ($items as $item) {
+    $ranked = [];
+    foreach ($items as $inputIndex => $item) {
         if (!is_array($item)) {
             continue;
         }
 
+        $entry = null;
         if ($kind === 'ip_variant') {
-            $clean[] = [
-                'label' => report_string($item['label'] ?? '', 24),
-                'ip' => report_string($item['ip'] ?? '', 80),
-                'address' => report_string($item['address'] ?? '', 240),
-                'city' => report_string($item['city'] ?? '', 80),
-                'region' => report_string($item['region'] ?? '', 80),
-                'country' => report_string($item['country'] ?? '', 80),
-                'provider' => report_string($item['provider'] ?? '', 80),
-                'source' => report_string($item['source'] ?? '', 80),
-                'source_region' => report_string($item['source_region'] ?? '', 40),
-                'domestic_source' => !empty($item['domestic_source']),
-                'latitude' => report_float($item['latitude'] ?? null, -90, 90),
-                'longitude' => report_float($item['longitude'] ?? null, -180, 180),
-            ];
+            $entry = sanitized_report_strings($item, [
+                'label' => 24,
+                'ip' => 80,
+                'address' => 600,
+                'detail' => 240,
+                'poi' => 120,
+                'district' => 120,
+                'street' => 160,
+                'postal_code' => 32,
+                'city' => 80,
+                'region' => 80,
+                'country' => 80,
+                'provider' => 80,
+                'source' => 80,
+                'source_region' => 40,
+                'coordinate_system' => 16,
+                'asn' => 80,
+                'isp' => 120,
+                'org' => 120,
+                'carrier' => 120,
+            ]);
+            $entry['domestic_source'] = !empty($item['domestic_source']);
+            $entry['mobile_network'] = !empty($item['mobile_network']);
+            $entry['latitude'] = report_float($item['latitude'] ?? null, -90, 90);
+            $entry['longitude'] = report_float($item['longitude'] ?? null, -180, 180);
         } elseif ($kind === 'webrtc_candidate') {
-            $clean[] = [
-                'ip' => report_string($item['ip'] ?? '', 80),
-                'candidate_type' => report_string($item['candidate_type'] ?? '', 24),
-                'stun_server' => report_string($item['stun_server'] ?? '', 120),
-                'stun_label' => report_string($item['stun_label'] ?? '', 80),
-                'stun_scope' => report_string($item['stun_scope'] ?? '', 20),
-            ];
+            $entry = sanitized_report_strings($item, [
+                'ip' => 80,
+                'candidate_type' => 24,
+                'stun_server' => 120,
+                'stun_label' => 80,
+                'stun_scope' => 20,
+                'address' => 600,
+                'detail' => 240,
+                'poi' => 120,
+                'district' => 120,
+                'street' => 160,
+                'postal_code' => 32,
+                'city' => 80,
+                'region' => 80,
+                'country' => 80,
+                'provider' => 80,
+                'source' => 80,
+                'coordinate_system' => 16,
+            ]);
+            $entry['latitude'] = report_float($item['latitude'] ?? null, -90, 90);
+            $entry['longitude'] = report_float($item['longitude'] ?? null, -180, 180);
         }
 
-        if (count($clean) >= 12) {
-            break;
+        if (!is_array($entry)) {
+            continue;
+        }
+        $candidate = [
+            'entry' => $entry,
+            'score' => diagnostics_address_precision_score($entry),
+            'index' => (int) $inputIndex,
+        ];
+        $inserted = false;
+        foreach ($ranked as $index => $existing) {
+            if (diagnostics_score_compare($candidate['score'], $existing['score']) > 0) {
+                array_splice($ranked, $index, 0, [$candidate]);
+                $inserted = true;
+                break;
+            }
+        }
+        if (!$inserted) {
+            $ranked[] = $candidate;
+        }
+        if (count($ranked) > 12) {
+            array_pop($ranked);
         }
     }
 
+    return array_map(static fn (array $item): array => $item['entry'], $ranked);
+}
+
+function diagnostics_address_precision_score(array $item): array
+{
+    $specificity = 0;
+    $structuredFields = 0;
+    foreach (['country', 'region', 'city', 'postal_code', 'district', 'street', 'detail', 'poi'] as $field) {
+        if (trim((string) ($item[$field] ?? '')) !== '') {
+            $structuredFields += 1;
+        }
+    }
+    if (trim((string) ($item['country'] ?? '')) !== '') {
+        $specificity = max($specificity, 1);
+    }
+    if (trim((string) ($item['region'] ?? '')) !== '') {
+        $specificity = max($specificity, 2);
+    }
+    if (trim((string) ($item['city'] ?? '')) !== '') {
+        $specificity = max($specificity, 3);
+    }
+    if (trim((string) ($item['postal_code'] ?? '')) !== '') {
+        $specificity = max($specificity, 4);
+    }
+    if (trim((string) ($item['district'] ?? '')) !== '') {
+        $specificity = max($specificity, 5);
+    }
+    if (trim((string) ($item['street'] ?? '')) !== '') {
+        $specificity = max($specificity, 6);
+    }
+    if (
+        trim((string) ($item['detail'] ?? '')) !== ''
+        || trim((string) ($item['poi'] ?? '')) !== ''
+    ) {
+        $specificity = max($specificity, 7);
+    }
+    $address = trim((string) ($item['address'] ?? ''));
+    if ($address !== '') {
+        $specificity = max($specificity, strlen($address) >= 24 ? 5 : 4);
+    }
+    $hasDisplayAddress = $address !== '' ? 1 : 0;
+    $hasCoordinates = ($item['latitude'] ?? null) !== null && ($item['longitude'] ?? null) !== null ? 1 : 0;
+    $hasCoordinateSystem = trim((string) ($item['coordinate_system'] ?? '')) !== '' ? 1 : 0;
+
+    return [
+        $specificity,
+        $hasDisplayAddress,
+        $structuredFields,
+        min(600, strlen($address)),
+        $hasCoordinates,
+        $hasCoordinateSystem,
+    ];
+}
+
+function diagnostics_score_compare(array $left, array $right): int
+{
+    $length = max(count($left), count($right));
+    for ($index = 0; $index < $length; $index += 1) {
+        $leftValue = (int) ($left[$index] ?? 0);
+        $rightValue = (int) ($right[$index] ?? 0);
+        if ($leftValue !== $rightValue) {
+            return $leftValue <=> $rightValue;
+        }
+    }
+
+    return 0;
+}
+
+function diagnostics_source_precision_score(array $source): array
+{
+    $best = diagnostics_address_precision_score($source);
+    foreach (['variants', 'candidates'] as $field) {
+        foreach (($source[$field] ?? []) as $item) {
+            if (is_array($item)) {
+                $score = diagnostics_address_precision_score($item);
+                if (diagnostics_score_compare($score, $best) > 0) {
+                    $best = $score;
+                }
+            }
+        }
+    }
+
+    return $best;
+}
+
+function sanitize_diagnostics_source(array $source, string $type): array
+{
+    $clean = sanitized_report_strings($source, [
+        'name' => 40,
+        'provider' => 80,
+        'source' => 80,
+        'source_region' => 40,
+        'coordinate_system' => 16,
+        'address' => 600,
+        'detail' => 240,
+        'poi' => 120,
+        'district' => 120,
+        'street' => 160,
+        'postal_code' => 32,
+        'city' => 80,
+        'region' => 80,
+        'country' => 80,
+        'ip' => 80,
+        'ipv4' => 80,
+        'ipv6' => 80,
+        'server_ip' => 80,
+        'stun_server' => 120,
+        'stun_label' => 80,
+        'stun_scope' => 20,
+        'candidate_type' => 24,
+        'asn' => 80,
+        'isp' => 120,
+        'org' => 120,
+        'carrier' => 120,
+    ]);
+    $clean = ['type' => $type] + $clean;
+    $clean['domestic_source'] = !empty($source['domestic_source']);
+    $clean['mobile_network'] = !empty($source['mobile_network']);
+    $clean['variants'] = sanitize_probe_items($source['variants'] ?? [], 'ip_variant');
+    $clean['candidates'] = sanitize_probe_items($source['candidates'] ?? [], 'webrtc_candidate');
+    $clean['latitude'] = report_float($source['latitude'] ?? null, -90, 90);
+    $clean['longitude'] = report_float($source['longitude'] ?? null, -180, 180);
+
     return $clean;
 }
+
 function sanitize_address_diagnostics(?array $diagnostics): ?array
 {
     if (!$diagnostics) {
         return null;
     }
 
-    $sources = [];
-    foreach (($diagnostics['sources'] ?? []) as $source) {
+    $bestSources = [];
+    $bestScores = [];
+    $rawSources = is_array($diagnostics['sources'] ?? null) ? $diagnostics['sources'] : [];
+    foreach ($rawSources as $source) {
         if (!is_array($source)) {
             continue;
         }
@@ -103,33 +287,22 @@ function sanitize_address_diagnostics(?array $diagnostics): ?array
             continue;
         }
 
-        $sources[] = [
-            'type' => $type,
-            'name' => report_string($source['name'] ?? '', 40),
-            'provider' => report_string($source['provider'] ?? '', 80),
-            'source' => report_string($source['source'] ?? '', 80),
-            'source_region' => report_string($source['source_region'] ?? '', 40),
-            'domestic_source' => !empty($source['domestic_source']),
-            'address' => report_string($source['address'] ?? '', 600),
-            'city' => report_string($source['city'] ?? '', 80),
-            'region' => report_string($source['region'] ?? '', 80),
-            'country' => report_string($source['country'] ?? '', 80),
-            'ip' => report_string($source['ip'] ?? '', 80),
-            'ipv4' => report_string($source['ipv4'] ?? '', 80),
-            'ipv6' => report_string($source['ipv6'] ?? '', 80),
-            'server_ip' => report_string($source['server_ip'] ?? '', 80),
-            'stun_server' => report_string($source['stun_server'] ?? '', 120),
-            'stun_label' => report_string($source['stun_label'] ?? '', 80),
-            'stun_scope' => report_string($source['stun_scope'] ?? '', 20),
-            'candidate_type' => report_string($source['candidate_type'] ?? '', 24),
-            'variants' => sanitize_probe_items($source['variants'] ?? [], 'ip_variant'),
-            'candidates' => sanitize_probe_items($source['candidates'] ?? [], 'webrtc_candidate'),
-            'latitude' => report_float($source['latitude'] ?? null, -90, 90),
-            'longitude' => report_float($source['longitude'] ?? null, -180, 180),
-        ];
+        $clean = sanitize_diagnostics_source($source, $type);
+        $score = diagnostics_source_precision_score($clean);
+        $currentScore = $bestScores[$type] ?? null;
+        if (
+            !is_array($currentScore)
+            || diagnostics_score_compare($score, $currentScore) > 0
+        ) {
+            $bestSources[$type] = $clean;
+            $bestScores[$type] = $score;
+        }
+    }
 
-        if (count($sources) >= 3) {
-            break;
+    $sources = [];
+    foreach (['gps', 'ip', 'webrtc'] as $type) {
+        if (isset($bestSources[$type])) {
+            $sources[] = $bestSources[$type];
         }
     }
 
@@ -150,11 +323,73 @@ function sanitize_address_diagnostics(?array $diagnostics): ?array
         'complete' => !empty($diagnostics['complete']),
         'preferred_source' => report_string($diagnostics['preferred_source'] ?? '', 24),
         'preferred_address' => report_string($diagnostics['preferred_address'] ?? '', 600),
+        'preferred_detail' => report_string($diagnostics['preferred_detail'] ?? '', 240),
+        'preferred_poi' => report_string($diagnostics['preferred_poi'] ?? '', 120),
+        'preferred_district' => report_string($diagnostics['preferred_district'] ?? '', 120),
+        'preferred_street' => report_string($diagnostics['preferred_street'] ?? '', 160),
+        'preferred_postal_code' => report_string($diagnostics['preferred_postal_code'] ?? '', 32),
         'preferred_city' => report_string($diagnostics['preferred_city'] ?? '', 80),
+        'preferred_region' => report_string($diagnostics['preferred_region'] ?? '', 80),
+        'preferred_country' => report_string($diagnostics['preferred_country'] ?? '', 80),
+        'preferred_coordinate_system' => report_string($diagnostics['preferred_coordinate_system'] ?? '', 16),
         'preferred_latitude' => report_float($diagnostics['preferred_latitude'] ?? null, -90, 90),
         'preferred_longitude' => report_float($diagnostics['preferred_longitude'] ?? null, -180, 180),
         'sources' => $sources,
     ];
+}
+
+function encode_address_diagnostics(?array $diagnostics, int $maxBytes): ?string
+{
+    if ($diagnostics === null) {
+        return null;
+    }
+    if ($maxBytes <= 0) {
+        throw new AddressDiagnosticsTooLargeException('位置诊断数据大小限制无效。', 422);
+    }
+
+    $encode = static function (array $value): string {
+        $json = json_encode(
+            $value,
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE
+        );
+        if (!is_string($json)) {
+            throw new RuntimeException('位置诊断数据无法编码。');
+        }
+
+        return $json;
+    };
+
+    $bounded = $diagnostics;
+    $json = $encode($bounded);
+    if (strlen($json) <= $maxBytes) {
+        return $json;
+    }
+
+    if (is_array($bounded['sources'] ?? null)) {
+        foreach ($bounded['sources'] as &$source) {
+            if (!is_array($source)) {
+                continue;
+            }
+            unset($source['variants'], $source['candidates']);
+        }
+        unset($source);
+    }
+
+    $json = $encode($bounded);
+    if (strlen($json) <= $maxBytes) {
+        return $json;
+    }
+
+    throw new AddressDiagnosticsTooLargeException('位置诊断数据过大，请缩减后重试。', 422);
+}
+
+function encode_address_diagnostics_or_fail(?array $diagnostics, int $maxBytes): ?string
+{
+    try {
+        return encode_address_diagnostics($diagnostics, $maxBytes);
+    } catch (AddressDiagnosticsTooLargeException $exception) {
+        json_response(['ok' => false, 'message' => $exception->getMessage()], 422);
+    }
 }
 
 function diagnostics_place_mismatch(array $sources): bool
@@ -320,7 +555,7 @@ function p2p_encrypted_payload_from_request(mixed $value): ?string
     }
 
     $json = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if (!is_string($json) || strlen($json) > 500000) {
+    if (!is_string($json) || strlen($json) > MAX_P2P_ENCRYPTED_PAYLOAD_BYTES) {
         json_response(['ok' => false, 'message' => '加密定位数据过大。'], 422);
     }
 
@@ -400,6 +635,16 @@ function haversine_distance_meters(float $lat1, float $lon1, float $lat2, float 
     return $earthRadius * 2 * atan2(sqrt($a), sqrt(max(0.0, 1 - $a)));
 }
 
+if ($reportLocationFunctionsOnly) {
+    return;
+}
+
+require_app_user_agent();
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    json_response(['ok' => false, 'message' => 'Method not allowed.'], 405);
+}
+
 try {
     $user = require_user();
     rate_limit_or_fail('report_location', 900, 3600, 'user:' . (int) $user['id']);
@@ -421,14 +666,11 @@ try {
     $addressDiagnostics = sanitize_address_diagnostics(
         is_array($data['address_diagnostics'] ?? null) ? $data['address_diagnostics'] : null
     );
-    $addressDiagnosticsJson = $addressDiagnostics === null
-        ? null
-        : json_encode($addressDiagnostics, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $addressDiagnosticsJson = encode_address_diagnostics_or_fail(
+        $addressDiagnostics,
+        MAX_ADDRESS_DIAGNOSTICS_BYTES
+    );
     $addressMismatch = $addressDiagnostics && !empty($addressDiagnostics['mismatch']) ? 1 : 0;
-
-    if (is_string($addressDiagnosticsJson) && strlen($addressDiagnosticsJson) > MAX_ADDRESS_DIAGNOSTICS_BYTES) {
-        $addressDiagnosticsJson = substr($addressDiagnosticsJson, 0, MAX_ADDRESS_DIAGNOSTICS_BYTES);
-    }
 
     if ($locationId > 0) {
         $pdo = db();

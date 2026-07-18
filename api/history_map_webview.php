@@ -83,6 +83,85 @@ echo <<<HTML
       return text.length > 2 ? text.slice(0, 2) : text;
     }
 
+    function outOfChina(lng, lat) {
+      return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271;
+    }
+
+    function transformLat(x, y) {
+      let result = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+      result += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+      result += (20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin(y / 3.0 * Math.PI)) * 2.0 / 3.0;
+      result += (160.0 * Math.sin(y / 12.0 * Math.PI) + 320 * Math.sin(y * Math.PI / 30.0)) * 2.0 / 3.0;
+      return result;
+    }
+
+    function transformLng(x, y) {
+      let result = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+      result += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+      result += (20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin(x / 3.0 * Math.PI)) * 2.0 / 3.0;
+      result += (150.0 * Math.sin(x / 12.0 * Math.PI) + 300.0 * Math.sin(x / 30.0 * Math.PI)) * 2.0 / 3.0;
+      return result;
+    }
+
+    function wgs84ToGcj02(lng, lat) {
+      if (outOfChina(lng, lat)) return { lng, lat };
+      const semiMajorAxis = 6378245.0;
+      const eccentricity = 0.00669342162296594323;
+      let latitudeDelta = transformLat(lng - 105.0, lat - 35.0);
+      let longitudeDelta = transformLng(lng - 105.0, lat - 35.0);
+      const latitudeRadians = lat / 180.0 * Math.PI;
+      let magic = Math.sin(latitudeRadians);
+      magic = 1 - eccentricity * magic * magic;
+      const sqrtMagic = Math.sqrt(magic);
+      latitudeDelta = (latitudeDelta * 180.0) / ((semiMajorAxis * (1 - eccentricity)) / (magic * sqrtMagic) * Math.PI);
+      longitudeDelta = (longitudeDelta * 180.0) / (semiMajorAxis / sqrtMagic * Math.cos(latitudeRadians) * Math.PI);
+      return { lat: lat + latitudeDelta, lng: lng + longitudeDelta };
+    }
+
+    function bd09ToGcj02(lng, lat) {
+      const x = lng - 0.0065;
+      const y = lat - 0.006;
+      const distance = Math.sqrt(x * x + y * y) - 0.00002 * Math.sin(y * Math.PI * 3000.0 / 180.0);
+      const angle = Math.atan2(y, x) - 0.000003 * Math.cos(x * Math.PI * 3000.0 / 180.0);
+      return { lng: distance * Math.cos(angle), lat: distance * Math.sin(angle) };
+    }
+
+    function normalizedCoordinateSystem(value) {
+      const text = firstText(value).toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (text === 'bd09' || text === 'baidu') return 'bd09';
+      if (text === 'gcj02' || text === 'gcj' || text === 'amap' || text === 'gaode') return 'gcj02';
+      if (text === 'wgs84' || text === 'gps') return 'wgs84';
+      return '';
+    }
+
+    function firstGpsSource(diagnostics) {
+      const sources = diagnostics && Array.isArray(diagnostics.sources) ? diagnostics.sources : [];
+      for (const source of sources) {
+        if (source && String(source.type || '').toLowerCase() === 'gps') return source;
+      }
+      return null;
+    }
+
+    function mapCoordinateFor(record, lng, lat, diagnostics) {
+      const meta = record && record.location_meta && typeof record.location_meta === 'object' ? record.location_meta : {};
+      const gpsSource = firstGpsSource(diagnostics);
+      const system = normalizedCoordinateSystem(firstText(
+        meta.coordinate_system,
+        gpsSource && gpsSource.coordinate_system,
+        diagnostics && diagnostics.preferred_coordinate_system
+      )) || 'wgs84';
+      if (system === 'bd09') return bd09ToGcj02(lng, lat);
+      if (system === 'gcj02') return { lng, lat };
+      return wgs84ToGcj02(lng, lat);
+    }
+
+    function mapCoordinateForDiagnosticSource(source, lng, lat) {
+      const system = normalizedCoordinateSystem(source && source.coordinate_system) || 'wgs84';
+      if (system === 'bd09') return bd09ToGcj02(lng, lat);
+      if (system === 'gcj02') return { lng, lat };
+      return wgs84ToGcj02(lng, lat);
+    }
+
     function sourceLabel(type) {
       if (type === 'ip') return 'IP';
       if (type === 'webrtc') return 'WebRTC';
@@ -103,13 +182,46 @@ echo <<<HTML
     function markerInfo(item) {
       const lines = [];
       lines.push(`\${item.name} · \${sourceLabel(item.type)}`);
-      if (item.address) lines.push(item.address);
+      if (item.address) lines.push(`地址：\${item.address}`);
+      if (item.district) lines.push(`区县：\${item.district}`);
+      if (item.street) lines.push(`街道：\${item.street}`);
+      if (item.detail) lines.push(`详情：\${item.detail}`);
+      if (item.poi) lines.push(`POI：\${item.poi}`);
+      if (item.postalCode) lines.push(`邮编：\${item.postalCode}`);
       if (item.city || item.region || item.country) lines.push([item.country, item.region, item.city].filter(Boolean).join(' '));
       if (item.provider) lines.push(`来源：\${item.provider}`);
       if (item.ip) lines.push(`IP：\${item.ip}`);
-      if (item.time) lines.push(`时间：\${item.time}`);
+      if (item.coordinateSystem) lines.push(`坐标系：\${item.coordinateSystem}`);
+      const firstReportedAt = firstText(item.firstReportedAt, item.time);
+      const lastReportedAt = firstText(item.lastReportedAt, item.time, firstReportedAt);
+      if (firstReportedAt || lastReportedAt) {
+        const reportCount = Math.max(1, Math.floor(Number(item.reportCount) || 1));
+        lines.push(`停留时间：\${firstText(firstReportedAt, lastReportedAt)} 至 \${firstText(lastReportedAt, firstReportedAt)}（\${formatStayDuration(item.stayDurationSeconds)}，\${reportCount}次上报）`);
+      }
       if (Number.isFinite(item.accuracy)) lines.push(`精度：\${Math.round(item.accuracy)}m`);
-      return lines.join('<br>');
+      const content = document.createElement('div');
+      lines.forEach((line) => {
+        const row = document.createElement('div');
+        row.textContent = line;
+        content.appendChild(row);
+      });
+      return content;
+    }
+
+    function formatStayDuration(value) {
+      let remaining = Math.max(0, Math.round(Number(value) || 0));
+      const days = Math.floor(remaining / 86400);
+      remaining %= 86400;
+      const hours = Math.floor(remaining / 3600);
+      remaining %= 3600;
+      const minutes = Math.floor(remaining / 60);
+      const seconds = remaining % 60;
+      const parts = [];
+      if (days) parts.push(`\${days}天`);
+      if (hours) parts.push(`\${hours}小时`);
+      if (minutes) parts.push(`\${minutes}分钟`);
+      if (seconds || !parts.length) parts.push(`\${seconds}秒`);
+      return parts.join('');
     }
 
     function normalizeRecord(record, index) {
@@ -118,47 +230,146 @@ echo <<<HTML
       const lng = Number(record.longitude);
       if (!validCoordinate(lat, lng)) return null;
       const diagnostics = record.address_diagnostics || {};
+      const mapCoordinate = mapCoordinateFor(record, lng, lat, diagnostics);
+      const gpsSource = firstGpsSource(diagnostics);
+      const firstReportedAt = firstText(record.first_reported_at, record.created_at, record.updated_at);
+      const lastReportedAt = firstText(record.last_reported_at, record.updated_at, record.created_at, firstReportedAt);
       return {
         type: 'gps',
         name: nameOf(record),
         label: compactName(record),
-        lat,
-        lng,
+        lat: mapCoordinate.lat,
+        lng: mapCoordinate.lng,
         address: firstText(diagnostics.preferred_address, record.address, record.location_address),
-        city: firstText(record.city),
+        city: firstText(diagnostics.preferred_city, record.city, gpsSource && gpsSource.city),
         region: firstText(record.region),
         country: firstText(record.country),
         provider: 'GPS',
-        time: firstText(record.created_at, record.updated_at),
+        time: lastReportedAt,
+        firstReportedAt,
+        lastReportedAt,
+        stayDurationSeconds: Math.max(0, Number(record.stay_duration_seconds) || 0),
+        reportCount: Math.max(1, Math.floor(Number(record.report_count) || 1)),
         accuracy: Number(record.accuracy),
         userKey: firstText(record.user_id, record.username, String(index)),
         sourceIndex: 0,
       };
     }
 
-    function normalizeSource(record, source, sourceIndex) {
+    function diagnosticSourceAddress(source) {
+      const ip = firstText(source && source.ip, source && source.server_ip, source && source.ipv4, source && source.ipv6);
+      const reportedAddress = firstText(source && source.address);
+      const structuredAddress = [
+        source && source.country,
+        source && source.region,
+        source && source.city,
+        source && source.district,
+        source && source.street,
+        source && source.detail,
+        source && source.poi,
+      ].map((value) => firstText(value)).filter(Boolean).join(' ');
+      const address = reportedAddress && reportedAddress !== ip
+        ? reportedAddress
+        : firstText(structuredAddress, reportedAddress);
+      const postalCode = firstText(source && source.postal_code);
+      return address && postalCode && !address.includes(postalCode) ? `\${address} \${postalCode}` : address;
+    }
+
+    function diagnosticAddressPrecision(source) {
+      const fields = [
+        ['country', 1],
+        ['region', 2],
+        ['city', 4],
+        ['postal_code', 8],
+        ['district', 16],
+        ['address', 32],
+        ['street', 64],
+        ['detail', 128],
+        ['poi', 128],
+      ];
+      const ip = firstText(source && source.ip, source && source.server_ip, source && source.ipv4, source && source.ipv6);
+      let score = 0;
+      let populated = 0;
+      fields.forEach(([field, weight]) => {
+        const value = firstText(source && source[field]);
+        if (!value || (field === 'address' && value === ip)) return;
+        score += weight;
+        populated += 1;
+      });
+      return {
+        score,
+        populated,
+        addressLength: firstText(source && source.address).length,
+      };
+    }
+
+    function bestDiagnosticSource(source) {
+      const candidates = [source];
+      ['variants', 'candidates'].forEach((field) => {
+        const nested = source && Array.isArray(source[field]) ? source[field] : [];
+        nested.forEach((candidate) => {
+          if (candidate && typeof candidate === 'object') candidates.push(candidate);
+        });
+      });
+
+      let selected = null;
+      let selectedRank = null;
+      candidates.forEach((candidate) => {
+        if (candidate.latitude === null || candidate.latitude === undefined
+            || candidate.longitude === null || candidate.longitude === undefined) return;
+        const latitude = Number(candidate.latitude);
+        const longitude = Number(candidate.longitude);
+        if (!validCoordinate(latitude, longitude)) return;
+        const rank = diagnosticAddressPrecision(candidate);
+        if (!selectedRank
+            || rank.score > selectedRank.score
+            || (rank.score === selectedRank.score && rank.populated > selectedRank.populated)
+            || (rank.score === selectedRank.score && rank.populated === selectedRank.populated
+                && rank.addressLength > selectedRank.addressLength)) {
+          selected = candidate;
+          selectedRank = rank;
+        }
+      });
+      return selected;
+    }
+
+    function normalizeDiagnosticSource(record, source, sourceIndex, recordIndex) {
       if (!source || typeof source !== 'object') return null;
-      const type = String(source.type || '').toLowerCase();
+      const type = firstText(source.type).toLowerCase();
       if (type !== 'ip' && type !== 'webrtc') return null;
-      const lat = Number(source.latitude);
-      const lng = Number(source.longitude);
-      if (!validCoordinate(lat, lng)) return null;
+      const selected = bestDiagnosticSource(source);
+      if (!selected) return null;
+      const lat = Number(selected.latitude);
+      const lng = Number(selected.longitude);
+      const mapCoordinate = mapCoordinateForDiagnosticSource(selected, lng, lat);
+      const firstReportedAt = firstText(record && record.first_reported_at, record && record.created_at, record && record.updated_at);
+      const lastReportedAt = firstText(record && record.last_reported_at, record && record.updated_at, record && record.created_at, firstReportedAt);
       return {
         type,
         name: nameOf(record),
         label: sourceLabel(type),
-        lat,
-        lng,
-        address: firstText(source.address, source.detail, source.ip),
-        city: firstText(source.city),
-        region: firstText(source.region),
-        country: firstText(source.country),
-        provider: firstText(source.provider, source.name, source.source),
-        ip: firstText(source.ip),
-        time: firstText(record && record.created_at, record && record.updated_at),
-        accuracy: Number.NaN,
-        userKey: firstText(record && record.user_id, record && record.username, source.ip, type),
-        sourceIndex,
+        lat: mapCoordinate.lat,
+        lng: mapCoordinate.lng,
+        address: diagnosticSourceAddress(selected),
+        district: firstText(selected.district),
+        street: firstText(selected.street),
+        detail: firstText(selected.detail),
+        poi: firstText(selected.poi),
+        postalCode: firstText(selected.postal_code),
+        city: firstText(selected.city),
+        region: firstText(selected.region),
+        country: firstText(selected.country),
+        provider: firstText(selected.provider, selected.name, selected.source),
+        ip: firstText(selected.ip, selected.server_ip, selected.ipv4, selected.ipv6),
+        coordinateSystem: firstText(selected.coordinate_system, 'wgs84'),
+        time: lastReportedAt,
+        firstReportedAt,
+        lastReportedAt,
+        stayDurationSeconds: Math.max(0, Number(record && record.stay_duration_seconds) || 0),
+        reportCount: Math.max(1, Math.floor(Number(record && record.report_count) || 1)),
+        accuracy: Number(selected.accuracy),
+        userKey: firstText(record && record.user_id, record && record.username, String(recordIndex)),
+        sourceIndex: sourceIndex + 1,
       };
     }
 
@@ -172,7 +383,7 @@ echo <<<HTML
           ? record.address_diagnostics.sources
           : [];
         sources.forEach((source, sourceIndex) => {
-          const item = normalizeSource(record, source, sourceIndex + 1);
+          const item = normalizeDiagnosticSource(record, source, sourceIndex, index);
           if (item) items.push(item);
         });
       });

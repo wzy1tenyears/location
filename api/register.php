@@ -93,12 +93,10 @@ try {
         }
         ensure_family_group_record($pdo, $assignedGroupName);
     } else {
-        if (!preg_match('/^[0-9a-f]{32}$/', $groupCode)) {
+        if (!is_valid_family_group_code($groupCode)) {
             $rejectInviteRegistration();
         }
-        $stmt = $pdo->prepare('SELECT group_name FROM family_groups WHERE group_code = ? LIMIT 1');
-        $stmt->execute([$groupCode]);
-        $group = $stmt->fetch();
+        $group = find_family_group_by_code($pdo, $groupCode);
         if (!$group) {
             $rejectInviteRegistration();
         }

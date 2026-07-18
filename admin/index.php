@@ -114,7 +114,7 @@ require_once __DIR__ . '/../private/admin/controller.php';
                     <input type="hidden" name="action" value="add_invite_code">
                     <div class="field">
                         <label for="invite_code">邀请码</label>
-                        <input id="invite_code" name="code" placeholder="留空自动生成">
+                        <input id="invite_code" name="code" maxlength="64" pattern="[0-9A-Za-z]{4,64}" placeholder="留空自动生成 8 位；可自定义 4 至 64 位字母数字">
                     </div>
                     <div class="field">
                         <label for="invite_note">备注名</label>

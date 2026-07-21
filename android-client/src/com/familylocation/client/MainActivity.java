@@ -8,6 +8,7 @@ import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.IntentFilter;
 import android.content.Intent;
@@ -108,8 +109,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 86;
-    private static final String APP_VERSION_NAME = "2.1.0";
+    private static final int APP_VERSION_CODE = 87;
+    private static final String APP_VERSION_NAME = "2.1.1";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -126,6 +127,8 @@ public class MainActivity extends Activity {
     private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String KEY_SEEN_ANNOUNCEMENT_PREFIX = "announcement_seen_";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
+    private static final String ACTION_ACCESSIBILITY_DETAILS_SETTINGS =
+        "android.settings.ACCESSIBILITY_DETAILS_SETTINGS";
     private static final String TAG = "FamilyLocationNative";
     private static final String UPDATE_APK_NAME = "location-release.apk";
     private static final long MAX_CACHE_BYTES = 50L * 1024L * 1024L;
@@ -179,6 +182,7 @@ public class MainActivity extends Activity {
     private boolean notificationPermissionRequestInFlight;
     private boolean locationPermissionRequestInFlight;
     private boolean backgroundLocationPermissionRequestInFlight;
+    private boolean accessibilitySettingsLaunched;
     private volatile int challengeGeneration;
     private volatile boolean challengeCancelled;
     private String loginDraftUsername = "";
@@ -2187,6 +2191,17 @@ public class MainActivity extends Activity {
         currentTab = TAB_MINE;
         LinearLayout card = screen("我的");
         TextView account = infoPanel(userDisplayName(currentUser), false);
+        boolean accessibilityKeepAliveEnabled = KeepAliveAccessibilityService.isEnabled(this);
+        TextView accessibilityKeepAlive = infoPanel(
+            "无障碍保活：" + (accessibilityKeepAliveEnabled
+                ? "已开启，系统正在绑定位置保活辅助服务。"
+                : "未开启，需由你在系统无障碍设置中手动授权。"),
+            false
+        );
+        Button accessibilityKeepAliveSettings = secondaryButton(
+            accessibilityKeepAliveEnabled ? "查看无障碍设置" : "开启无障碍保活"
+        );
+        accessibilityKeepAliveSettings.setOnClickListener(view -> showAccessibilityKeepAliveSettings());
         Button changePassword = secondaryButton("修改密码");
         changePassword.setOnClickListener(view -> showPasswordChange());
         Button logout = secondaryButton("退出登录");
@@ -2200,12 +2215,60 @@ public class MainActivity extends Activity {
         card.addView(sectionTitle("界面主题"), blockParams(8));
         card.addView(themeSummary, blockParams(8));
         card.addView(changeTheme, blockParams(14));
+        card.addView(sectionTitle("运行与保活"), blockParams(8));
+        card.addView(accessibilityKeepAlive, blockParams(8));
+        card.addView(accessibilityKeepAliveSettings, blockParams(14));
         card.addView(sectionTitle("账号安全"), blockParams(8));
         card.addView(compactInfoPanel("验证当前密码后修改，修改成功后继续保持当前登录状态。", false), blockParams(8));
         card.addView(changePassword, blockParams(14));
         card.addView(logout, blockParams(0));
         setScreen(card, false);
         setStatus("");
+    }
+
+    private void showAccessibilityKeepAliveSettings() {
+        showPopupDialog(
+            "无障碍保活",
+            new String[][] {
+                new String[] {
+                    "用途",
+                    "开启后，Android 会持续绑定本应用的保活辅助服务，以降低位置上报进程在后台被回收的概率。"
+                },
+                new String[] {
+                    "隐私边界",
+                    "该服务仅监听本应用窗口状态，事件回调不会读取或保存内容；它不能查看其他应用、读取窗口内容、截图或执行手势。"
+                },
+                new String[] {
+                    "如何开启",
+                    "进入系统页面后选择“位置保活辅助服务”并开启。你可随时回到同一页面关闭。"
+                }
+            },
+            "前往系统设置",
+            this::launchAccessibilityKeepAliveSettings,
+            "取消"
+        );
+    }
+
+    private void launchAccessibilityKeepAliveSettings() {
+        accessibilitySettingsLaunched = true;
+        ComponentName component = new ComponentName(this, KeepAliveAccessibilityService.class);
+        try {
+            Intent details = new Intent(ACTION_ACCESSIBILITY_DETAILS_SETTINGS);
+            details.putExtra(Intent.EXTRA_COMPONENT_NAME, component);
+            details.setData(Uri.parse("package:" + getPackageName()));
+            if (details.resolveActivity(getPackageManager()) != null) {
+                startActivity(details);
+                return;
+            }
+        } catch (Exception exception) {
+            Log.w(TAG, "Accessibility details settings unavailable: " + exception.getMessage());
+        }
+        try {
+            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+        } catch (Exception exception) {
+            accessibilitySettingsLaunched = false;
+            setStatus("系统无障碍设置不可用：" + exceptionMessage(exception));
+        }
     }
 
     private void showThemePicker() {
@@ -5564,6 +5627,13 @@ public class MainActivity extends Activity {
         super.onResume();
         activityForeground = true;
         syncReportButtonState();
+        if (accessibilitySettingsLaunched) {
+            accessibilitySettingsLaunched = false;
+            syncKeepAliveService();
+            if (currentUser != null && currentTab == TAB_MINE) {
+                showSettings();
+            }
+        }
         if (currentUser != null && currentTab == TAB_POSITION && content != null && homeMapWebView == null) {
             refreshLocations();
         }

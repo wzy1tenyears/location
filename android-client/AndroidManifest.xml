@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="86"
-    android:versionName="2.1.0"
+    android:versionCode="87"
+    android:versionName="2.1.1"
     package="com.familylocation.client">
 
     <uses-sdk
@@ -46,6 +46,19 @@
             android:name=".KeepAliveService"
             android:exported="false"
             android:foregroundServiceType="dataSync|location" />
+
+        <service
+            android:name=".KeepAliveAccessibilityService"
+            android:exported="true"
+            android:label="@string/accessibility_keep_alive_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_keep_alive_service" />
+        </service>
 
         <receiver
             android:name=".BootReceiver"

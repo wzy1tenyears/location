@@ -3,6 +3,7 @@
 
 -keep class com.familylocation.client.MainActivity { *; }
 -keep class com.familylocation.client.KeepAliveService { *; }
+-keep class com.familylocation.client.KeepAliveAccessibilityService { *; }
 -keep class com.familylocation.client.BootReceiver { *; }
 -keep class com.familylocation.client.LocalApkProvider { *; }
 -keep class * extends android.app.Activity { *; }

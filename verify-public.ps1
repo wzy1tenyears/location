@@ -119,6 +119,10 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 & (Join-Path $Root 'verify-invite-check.ps1')
 $UserMain = Resolve-RequiredFile (Join-Path $Root "android-client\src\com\familylocation\client\MainActivity.java") "user MainActivity.java"
 $UserManifest = Resolve-RequiredFile (Join-Path $Root "android-client\AndroidManifest.xml") "user AndroidManifest.xml"
+$UserAccessibilityService = Resolve-RequiredFile (Join-Path $Root "android-client\src\com\familylocation\client\KeepAliveAccessibilityService.java") "KeepAliveAccessibilityService.java"
+$AccessibilityKeepAlivePolicy = Resolve-RequiredFile (Join-Path $Root "android-client\src\com\familylocation\client\AccessibilityKeepAlivePolicy.java") "AccessibilityKeepAlivePolicy.java"
+$AccessibilityKeepAlivePolicyTest = Resolve-RequiredFile (Join-Path $Root "android-client\tests\com\familylocation\client\AccessibilityKeepAlivePolicyTest.java") "AccessibilityKeepAlivePolicyTest.java"
+$AccessibilityServiceConfig = Resolve-RequiredFile (Join-Path $Root "android-client\res\xml\accessibility_keep_alive_service.xml") "accessibility keep-alive service config"
 $P2PCrypto = Resolve-RequiredFile (Join-Path $Root "android-client\src\com\familylocation\client\P2PCryptoSupport.java") "P2PCryptoSupport.java"
 $P2PPolicy = Resolve-RequiredFile (Join-Path $Root "android-client\src\com\familylocation\client\P2PRecordMergePolicy.java") "P2PRecordMergePolicy.java"
 $P2PPolicyTest = Resolve-RequiredFile (Join-Path $Root "android-client\tests\com\familylocation\client\P2PRecordMergePolicyTest.java") "P2PRecordMergePolicyTest.java"
@@ -153,6 +157,9 @@ $AdminApkApi = Resolve-RequiredFile (Join-Path $Root "api\admin_apk.php") "admin
 
 $UserMainText = Get-Content -Raw -Encoding UTF8 -LiteralPath $UserMain
 $UserManifestText = Get-Content -Raw -Encoding UTF8 -LiteralPath $UserManifest
+$UserAccessibilityServiceText = Get-Content -Raw -Encoding UTF8 -LiteralPath $UserAccessibilityService
+$AccessibilityKeepAlivePolicyText = Get-Content -Raw -Encoding UTF8 -LiteralPath $AccessibilityKeepAlivePolicy
+$AccessibilityServiceConfigText = Get-Content -Raw -Encoding UTF8 -LiteralPath $AccessibilityServiceConfig
 $P2PCryptoText = Get-Content -Raw -Encoding UTF8 -LiteralPath $P2PCrypto
 $P2PPolicyText = Get-Content -Raw -Encoding UTF8 -LiteralPath $P2PPolicy
 $P2PPolicyTestText = Get-Content -Raw -Encoding UTF8 -LiteralPath $P2PPolicyTest
@@ -181,9 +188,30 @@ $AdminUpdateApiText = Get-Content -Raw -Encoding UTF8 -LiteralPath $AdminUpdateA
 $AdminApkApiText = Get-Content -Raw -Encoding UTF8 -LiteralPath $AdminApkApi
 
 # Public builds must not report installed package names or embed private endpoints.
-Assert-Contains 'User manifest' $UserManifestText 'android:versionCode="86"' 'the security client release must use versionCode 86.'
-Assert-Contains 'User app source' $UserMainText 'APP_VERSION_CODE = 86;' 'the client update constant must match the manifest.'
-Assert-Contains 'PHP update gate' $PrivateConfigText 'ANDROID_VERSION_CODE = 86;' 'the server update gate must match the manifest.'
+Assert-Contains 'User manifest' $UserManifestText 'android:versionCode="87"' 'the accessibility keep-alive client release must use versionCode 87.'
+Assert-Contains 'User app source' $UserMainText 'APP_VERSION_CODE = 87;' 'the client update constant must match the manifest.'
+Assert-Contains 'PHP update gate' $PrivateConfigText 'ANDROID_VERSION_CODE = 87;' 'the server update gate must match the manifest.'
+Assert-Contains 'User manifest' $UserManifestText 'android:name="\.KeepAliveAccessibilityService"[\s\S]*android:exported="true"[\s\S]*android:permission="android\.permission\.BIND_ACCESSIBILITY_SERVICE"' 'the keep-alive accessibility service must be protected by the system binding permission.'
+Assert-Contains 'User manifest' $UserManifestText 'android:name="android\.accessibilityservice"[\s\S]*android:resource="@xml/accessibility_keep_alive_service"' 'the keep-alive accessibility service must use restricted metadata.'
+Assert-Contains 'Accessibility service config' $AccessibilityServiceConfigText 'android:packageNames="com\.familylocation\.client"' 'accessibility events must be scoped to this app.'
+Assert-Contains 'Accessibility service config' $AccessibilityServiceConfigText 'android:accessibilityEventTypes="typeWindowStateChanged"' 'the service must request only the minimal own-window event.'
+foreach ($control in @(
+    'android:canRetrieveWindowContent="false"',
+    'android:canRequestTouchExplorationMode="false"',
+    'android:canRequestFilterKeyEvents="false"',
+    'android:canPerformGestures="false"',
+    'android:canTakeScreenshot="false"',
+    'android:isAccessibilityTool="false"'
+)) {
+    Assert-Contains 'Accessibility service config' $AccessibilityServiceConfigText ([regex]::Escape($control)) "least-privilege declaration is missing: $control"
+}
+Assert-NotContains 'Accessibility service config' $AccessibilityServiceConfigText 'typeAllMask|canRetrieveWindowContent="true"|canPerformGestures="true"|canTakeScreenshot="true"' 'the keep-alive service must not request content, gesture, screenshot, or broad event access.'
+Assert-Contains 'Accessibility service source' $UserAccessibilityServiceText 'onAccessibilityEvent\(AccessibilityEvent event\)\s*\{\s*// Deliberately empty' 'accessibility events must remain an explicit no-op.'
+Assert-NotContains 'Accessibility service source' $UserAccessibilityServiceText 'getRootInActiveWindow|performGlobalAction|dispatchGesture|takeScreenshot|AccessibilityNodeInfo' 'keep-alive must not inspect UI content or control the device.'
+Assert-Contains 'User app source' $UserMainText 'showAccessibilityKeepAliveSettings' 'the My tab must expose the keep-alive setting.'
+Assert-Contains 'User app source' $UserMainText 'ACTION_ACCESSIBILITY_DETAILS_SETTINGS\s*=\s*\r?\n?\s*"android\.settings\.ACCESSIBILITY_DETAILS_SETTINGS"' 'the setting must use the guarded service-detail action.'
+Assert-Contains 'User app source' $UserMainText 'Settings\.ACTION_ACCESSIBILITY_SETTINGS' 'the setting must fall back to the system accessibility list.'
+Assert-NotContains 'Accessibility keep-alive policy' $AccessibilityKeepAlivePolicyText '(?i)password|cookie|token|latitude|longitude|event' 'the enabled-service parser must remain independent of credentials, location, and event data.'
 Assert-Contains 'Admin build' $AdminBuildText '\$OutputApk = Join-Path \$ProjectRoot "private\\location-admin-release\.apk"' 'the default build output must match the protected admin download path.'
 Assert-Contains 'PHP admin update gate' $PrivateConfigText "ANDROID_ADMIN_APK_FILENAME = 'location-admin-release\.apk';" 'the admin update filename must match the build output.'
 Assert-Contains 'Admin update API' $AdminUpdateApiText "'private' \. DIRECTORY_SEPARATOR \. ANDROID_ADMIN_APK_FILENAME" 'the update gate must inspect the protected admin APK path.'
@@ -267,6 +295,7 @@ foreach ($docContract in @(
     @{ Name = 'README'; Text = $ReadmeText; Value = '不超过 25 米' },
     @{ Name = 'README'; Text = $ReadmeText; Value = 'client_merge_snapshot' },
     @{ Name = 'README'; Text = $ReadmeText; Value = 'IP 和 WebRTC' },
+    @{ Name = 'README'; Text = $ReadmeText; Value = '无障碍保活' },
     @{ Name = 'AGENTS'; Text = $AgentsText; Value = 'server-url.txt' },
     @{ Name = 'AGENTS'; Text = $AgentsText; Value = 'homeMapWebView' },
     @{ Name = 'AGENTS'; Text = $AgentsText; Value = 'ReportAttemptGate' },
@@ -482,7 +511,8 @@ try {
     & $javac.Source '-encoding' 'UTF-8' '-Xlint:-options' '--release' '8' '-d' $testOutputRoot `
         $P2PPolicy $P2PPolicyTest `
         $ReportAttemptGate $ReportAttemptGateTest `
-        $DiagnosticSourcePolicy $DiagnosticSourcePolicyTest
+        $DiagnosticSourcePolicy $DiagnosticSourcePolicyTest `
+        $AccessibilityKeepAlivePolicy $AccessibilityKeepAlivePolicyTest
     if ($LASTEXITCODE -ne 0) {
         Fail 'P2P merge policy regression test did not compile.'
     }
@@ -497,6 +527,10 @@ try {
     $diagnosticSourcePolicyOutput = & $java.Source '-cp' $testOutputRoot 'com.familylocation.client.DiagnosticSourcePolicyTest' 2>&1
     if ($LASTEXITCODE -ne 0) {
         Fail "Diagnostic-source policy regression test failed: $($diagnosticSourcePolicyOutput -join ' ')"
+    }
+    $accessibilityPolicyOutput = & $java.Source '-cp' $testOutputRoot 'com.familylocation.client.AccessibilityKeepAlivePolicyTest' 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Fail "Accessibility keep-alive policy regression test failed: $($accessibilityPolicyOutput -join ' ')"
     }
 } finally {
     $resolvedTestOutput = [System.IO.Path]::GetFullPath($testOutputRoot)

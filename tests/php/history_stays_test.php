@@ -367,15 +367,16 @@ history_test_assert(array_column($view['map_rows'], 'id') === [5, 3], 'map limit
 $mapSource = file_get_contents(dirname(__DIR__, 2) . '/api/history_map_webview.php');
 history_test_assert(is_string($mapSource), 'history map source is unreadable');
 foreach ([
-    'function bestDiagnosticSource(source)',
-    "['variants', 'candidates']",
-    'function diagnosticSourceAddress(source)',
-    'source && source.address',
-    'source && source.district',
-    'source && source.street',
-    'source && source.detail',
-    'source && source.poi',
-    'source && source.postal_code',
+    'function firstGpsSource(diagnostics)',
+    'const gpsSource = firstGpsSource(diagnostics);',
+    'gpsSource && gpsSource.address',
+    'gpsSource && gpsSource.district',
+    'gpsSource && gpsSource.street',
+    'gpsSource && gpsSource.detail',
+    'gpsSource && gpsSource.poi',
+    'gpsSource && gpsSource.postal_code',
+    'const gps = normalizeRecord(record, index);',
+    'if (gps) items.push(gps);',
     "if (item.type !== 'gps') return;",
     'const path = group.map((item) => [item.lng, item.lat]);',
     'record.first_reported_at',
@@ -384,6 +385,15 @@ foreach ([
     'record.report_count',
 ] as $required) {
     history_test_assert(str_contains($mapSource, $required), 'history map is missing: ' . $required);
+}
+foreach ([
+    'function normalizeDiagnosticSource',
+    '.marker.ip',
+    '.marker.webrtc',
+    'diagnostics.preferred_address',
+    'diagnostics.preferred_coordinate_system',
+] as $forbidden) {
+    history_test_assert(!str_contains($mapSource, $forbidden), 'history map must not expose network-derived map data: ' . $forbidden);
 }
 
 fwrite(STDOUT, "history_stays_test: OK\n");

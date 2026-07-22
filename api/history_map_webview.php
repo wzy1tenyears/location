@@ -27,8 +27,6 @@ echo <<<HTML
     .map-state { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; padding: 18px; box-sizing: border-box; text-align: center; color: #5b6f69; font-size: 13px; background: linear-gradient(180deg, rgba(244,249,247,.92), rgba(238,243,241,.76)); }
     .marker { display: inline-flex; align-items: center; justify-content: center; height: 24px; min-width: 24px; padding: 0 7px; border-radius: 999px; border: 2px solid #fff; background: var(--marker-color, #0d5f54); color: #fff; font-size: 12px; font-weight: 800; box-shadow: 0 5px 15px rgba(0,0,0,.26); white-space: nowrap; transform: translate(-50%, -50%); }
     .marker.gps.latest { height: 30px; min-width: 30px; box-shadow: 0 0 0 7px rgba(13,95,84,.16), 0 6px 18px rgba(0,0,0,.3); }
-    .marker.ip { --marker-color: #d97706; }
-    .marker.webrtc { --marker-color: #7c3aed; }
     .marker-label { padding: 4px 7px; border-radius: 8px; background: rgba(255,255,255,.94); color: #173b35; border: 1px solid rgba(13,95,84,.16); box-shadow: 0 4px 12px rgba(0,0,0,.16); font-size: 11px; line-height: 1.35; max-width: 210px; white-space: normal; }
     .amap-info-content { color: #173b35; font-size: 13px; line-height: 1.5; }
   </style>
@@ -147,41 +145,23 @@ echo <<<HTML
       const gpsSource = firstGpsSource(diagnostics);
       const system = normalizedCoordinateSystem(firstText(
         meta.coordinate_system,
-        gpsSource && gpsSource.coordinate_system,
-        diagnostics && diagnostics.preferred_coordinate_system
+        gpsSource && gpsSource.coordinate_system
       )) || 'wgs84';
       if (system === 'bd09') return bd09ToGcj02(lng, lat);
       if (system === 'gcj02') return { lng, lat };
       return wgs84ToGcj02(lng, lat);
     }
 
-    function mapCoordinateForDiagnosticSource(source, lng, lat) {
-      const system = normalizedCoordinateSystem(source && source.coordinate_system) || 'wgs84';
-      if (system === 'bd09') return bd09ToGcj02(lng, lat);
-      if (system === 'gcj02') return { lng, lat };
-      return wgs84ToGcj02(lng, lat);
-    }
-
-    function sourceLabel(type) {
-      if (type === 'ip') return 'IP';
-      if (type === 'webrtc') return 'WebRTC';
-      return '定位';
-    }
-
-    function sourceClass(type) {
-      return type === 'ip' || type === 'webrtc' ? type : 'gps';
-    }
-
     function makeMarkerContent(type, latest, text) {
       const node = document.createElement('div');
-      node.className = `marker \${sourceClass(type)}\${latest ? ' latest' : ''}`;
+      node.className = `marker gps\${latest ? ' latest' : ''}`;
       node.textContent = text;
       return node;
     }
 
     function markerInfo(item) {
       const lines = [];
-      lines.push(`\${item.name} · \${sourceLabel(item.type)}`);
+      lines.push(`\${item.name} · 定位`);
       if (item.address) lines.push(`地址：\${item.address}`);
       if (item.district) lines.push(`区县：\${item.district}`);
       if (item.street) lines.push(`街道：\${item.street}`);
@@ -240,10 +220,15 @@ echo <<<HTML
         label: compactName(record),
         lat: mapCoordinate.lat,
         lng: mapCoordinate.lng,
-        address: firstText(diagnostics.preferred_address, record.address, record.location_address),
-        city: firstText(diagnostics.preferred_city, record.city, gpsSource && gpsSource.city),
-        region: firstText(record.region),
-        country: firstText(record.country),
+        address: firstText(gpsSource && gpsSource.address, gpsSource && gpsSource.detail, gpsSource && gpsSource.poi),
+        district: firstText(gpsSource && gpsSource.district),
+        street: firstText(gpsSource && gpsSource.street),
+        detail: firstText(gpsSource && gpsSource.detail),
+        poi: firstText(gpsSource && gpsSource.poi),
+        postalCode: firstText(gpsSource && gpsSource.postal_code),
+        city: firstText(gpsSource && gpsSource.city),
+        region: firstText(gpsSource && gpsSource.region),
+        country: firstText(gpsSource && gpsSource.country),
         provider: 'GPS',
         time: lastReportedAt,
         firstReportedAt,
@@ -256,136 +241,12 @@ echo <<<HTML
       };
     }
 
-    function diagnosticSourceAddress(source) {
-      const ip = firstText(source && source.ip, source && source.server_ip, source && source.ipv4, source && source.ipv6);
-      const reportedAddress = firstText(source && source.address);
-      const structuredAddress = [
-        source && source.country,
-        source && source.region,
-        source && source.city,
-        source && source.district,
-        source && source.street,
-        source && source.detail,
-        source && source.poi,
-      ].map((value) => firstText(value)).filter(Boolean).join(' ');
-      const address = reportedAddress && reportedAddress !== ip
-        ? reportedAddress
-        : firstText(structuredAddress, reportedAddress);
-      const postalCode = firstText(source && source.postal_code);
-      return address && postalCode && !address.includes(postalCode) ? `\${address} \${postalCode}` : address;
-    }
-
-    function diagnosticAddressPrecision(source) {
-      const fields = [
-        ['country', 1],
-        ['region', 2],
-        ['city', 4],
-        ['postal_code', 8],
-        ['district', 16],
-        ['address', 32],
-        ['street', 64],
-        ['detail', 128],
-        ['poi', 128],
-      ];
-      const ip = firstText(source && source.ip, source && source.server_ip, source && source.ipv4, source && source.ipv6);
-      let score = 0;
-      let populated = 0;
-      fields.forEach(([field, weight]) => {
-        const value = firstText(source && source[field]);
-        if (!value || (field === 'address' && value === ip)) return;
-        score += weight;
-        populated += 1;
-      });
-      return {
-        score,
-        populated,
-        addressLength: firstText(source && source.address).length,
-      };
-    }
-
-    function bestDiagnosticSource(source) {
-      const candidates = [source];
-      ['variants', 'candidates'].forEach((field) => {
-        const nested = source && Array.isArray(source[field]) ? source[field] : [];
-        nested.forEach((candidate) => {
-          if (candidate && typeof candidate === 'object') candidates.push(candidate);
-        });
-      });
-
-      let selected = null;
-      let selectedRank = null;
-      candidates.forEach((candidate) => {
-        if (candidate.latitude === null || candidate.latitude === undefined
-            || candidate.longitude === null || candidate.longitude === undefined) return;
-        const latitude = Number(candidate.latitude);
-        const longitude = Number(candidate.longitude);
-        if (!validCoordinate(latitude, longitude)) return;
-        const rank = diagnosticAddressPrecision(candidate);
-        if (!selectedRank
-            || rank.score > selectedRank.score
-            || (rank.score === selectedRank.score && rank.populated > selectedRank.populated)
-            || (rank.score === selectedRank.score && rank.populated === selectedRank.populated
-                && rank.addressLength > selectedRank.addressLength)) {
-          selected = candidate;
-          selectedRank = rank;
-        }
-      });
-      return selected;
-    }
-
-    function normalizeDiagnosticSource(record, source, sourceIndex, recordIndex) {
-      if (!source || typeof source !== 'object') return null;
-      const type = firstText(source.type).toLowerCase();
-      if (type !== 'ip' && type !== 'webrtc') return null;
-      const selected = bestDiagnosticSource(source);
-      if (!selected) return null;
-      const lat = Number(selected.latitude);
-      const lng = Number(selected.longitude);
-      const mapCoordinate = mapCoordinateForDiagnosticSource(selected, lng, lat);
-      const firstReportedAt = firstText(record && record.first_reported_at, record && record.created_at, record && record.updated_at);
-      const lastReportedAt = firstText(record && record.last_reported_at, record && record.updated_at, record && record.created_at, firstReportedAt);
-      return {
-        type,
-        name: nameOf(record),
-        label: sourceLabel(type),
-        lat: mapCoordinate.lat,
-        lng: mapCoordinate.lng,
-        address: diagnosticSourceAddress(selected),
-        district: firstText(selected.district),
-        street: firstText(selected.street),
-        detail: firstText(selected.detail),
-        poi: firstText(selected.poi),
-        postalCode: firstText(selected.postal_code),
-        city: firstText(selected.city),
-        region: firstText(selected.region),
-        country: firstText(selected.country),
-        provider: firstText(selected.provider, selected.name, selected.source),
-        ip: firstText(selected.ip, selected.server_ip, selected.ipv4, selected.ipv6),
-        coordinateSystem: firstText(selected.coordinate_system, 'wgs84'),
-        time: lastReportedAt,
-        firstReportedAt,
-        lastReportedAt,
-        stayDurationSeconds: Math.max(0, Number(record && record.stay_duration_seconds) || 0),
-        reportCount: Math.max(1, Math.floor(Number(record && record.report_count) || 1)),
-        accuracy: Number(selected.accuracy),
-        userKey: firstText(record && record.user_id, record && record.username, String(recordIndex)),
-        sourceIndex: sourceIndex + 1,
-      };
-    }
-
     function expandRecords(records) {
       const items = [];
       const seen = new Set();
       (Array.isArray(records) ? records : []).forEach((record, index) => {
         const gps = normalizeRecord(record, index);
         if (gps) items.push(gps);
-        const sources = record && record.address_diagnostics && Array.isArray(record.address_diagnostics.sources)
-          ? record.address_diagnostics.sources
-          : [];
-        sources.forEach((source, sourceIndex) => {
-          const item = normalizeDiagnosticSource(record, source, sourceIndex, index);
-          if (item) items.push(item);
-        });
       });
       return items.filter((item) => {
         const key = [item.type, item.userKey, item.time, item.lat.toFixed(6), item.lng.toFixed(6), item.sourceIndex].join('|');

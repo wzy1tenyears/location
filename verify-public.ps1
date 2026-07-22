@@ -294,7 +294,7 @@ foreach ($docContract in @(
     @{ Name = 'README'; Text = $ReadmeText; Value = '显式设置为 `false`' },
     @{ Name = 'README'; Text = $ReadmeText; Value = '不超过 25 米' },
     @{ Name = 'README'; Text = $ReadmeText; Value = 'client_merge_snapshot' },
-    @{ Name = 'README'; Text = $ReadmeText; Value = 'IP 和 WebRTC' },
+    @{ Name = 'README'; Text = $ReadmeText; Value = '地图只显示 GPS' },
     @{ Name = 'README'; Text = $ReadmeText; Value = '无障碍保活' },
     @{ Name = 'AGENTS'; Text = $AgentsText; Value = 'server-url.txt' },
     @{ Name = 'AGENTS'; Text = $AgentsText; Value = 'homeMapWebView' },
@@ -355,6 +355,8 @@ $ClipboardConfirmedText = Text-BetweenMarkers $UserMainText 'private void applyC
 $InviteGuidanceText = Text-BetweenMarkers $UserMainText 'private void checkInviteCode' 'private void register' 'local invite guidance'
 Assert-Contains 'Registration screen' $RegistrationText 'pasteInvite\.setOnClickListener\(view -> offerClipboardInvite\(' 'clipboard access must require a dedicated button click.'
 Assert-NotContains 'Registration screen' $RegistrationText 'readClipboardText\(' 'opening registration must not read the clipboard.'
+Assert-Contains 'Registration screen' $RegistrationText 'setScreen\(card, false\)' 'registration must remain vertically scrollable while the soft keyboard is open.'
+Assert-NotContains 'Registration screen' $RegistrationText 'InputMethodManager|hideSoftInput|SOFT_INPUT|windowSoftInputMode' 'registration must not control or dismiss the soft keyboard.'
 Assert-Contains 'Clipboard invite offer' $ClipboardOfferText 'showPopupDialog\(' 'the requested clipboard value must be shown behind a confirmation.'
 Assert-MatchCount 'Clipboard invite offer' $ClipboardOfferText 'readClipboardText\(' 1 'the explicit action must read the clipboard exactly once.'
 Assert-Contains 'Clipboard invite offer' $ClipboardOfferText '\(\) -> applyConfirmedClipboardInvite\(code,' 'only the confirmed parsed value may enter the form.'
@@ -404,6 +406,9 @@ Assert-Contains 'History snapshot acceptance' $HistoryDecryptText 'client_merge_
 Assert-Contains 'History diagnostic merge' $UserMainText 'DiagnosticSourcePolicy\.sourceMergeKey' 'merged stays must keep distinct provider, IP, and STUN identities.'
 Assert-Contains 'History diagnostic merge' $UserMainText 'mergeDiagnosticNestedEvidence\(' 'merged stays must retain variants and candidates as structured evidence.'
 Assert-Contains 'Home diagnostic display' $UserMainText 'mostPreciseDiagnosticSource\(' 'the home screen must select the most precise nested diagnostic source.'
+Assert-Contains 'History map' $HistoryMapText 'function expandRecords\(records\)[\s\S]*const gps = normalizeRecord\(record, index\);[\s\S]*if \(gps\) items\.push\(gps\);' 'history maps must render GPS records only.'
+Assert-Contains 'History map' $HistoryMapText 'address: firstText\(gpsSource && gpsSource\.address' 'map labels must source addresses from GPS diagnostics only.'
+Assert-NotContains 'History map' $HistoryMapText 'normalizeDiagnosticSource|marker\.ip|marker\.webrtc|diagnostics\.preferred_address|diagnostics\.preferred_coordinate_system' 'IP and WebRTC coordinates or preferred diagnostics must not reach the map.'
 Assert-Contains 'Diagnostic source policy test' $DiagnosticSourcePolicyTestText 'different WebRTC identities stay distinct' 'the Java regression test must cover WebRTC identity separation.'
 Assert-Contains 'Diagnostic source policy test' $DiagnosticSourcePolicyTestText 'provider variants remain independently selectable' 'the Java regression test must cover provider evidence separation.'
 Assert-Contains 'Report attempt lifecycle' $UserMainText 'onProviderDisabled\(String providerName\)[\s\S]*finishReport\(attemptToken' 'a disabled location provider must immediately release the report attempt.'

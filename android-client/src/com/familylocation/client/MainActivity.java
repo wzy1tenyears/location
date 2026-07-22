@@ -384,7 +384,7 @@ public class MainActivity extends Activity {
         card.addView(terms, blockParams(12));
         card.addView(submit, blockParams(10));
         card.addView(back, blockParams(0));
-        setScreen(card, true);
+        setScreen(card, false);
     }
 
 

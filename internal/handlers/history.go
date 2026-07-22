@@ -21,12 +21,12 @@ const (
 	maxHistoryMemberPageSize  = 64
 	maxHistorySnapshotRawRows = 10000
 	maxHistoryMapRows         = 2000
-	maxHistoryResponseBytes   = 16 << 20
+	maxHistoryResponseBytes   = 2 << 20
 
 	historyTooManyMembersMessage   = "家庭组成员过多，请选择单个成员查看历史。"
 	historyTooManyRowsMessage      = "历史记录过多，请选择单个成员查看。"
 	historyTooManyMapRowsMessage   = "地图历史记录过多，请选择单个成员查看。"
-	historyResponseTooLargeMessage = "历史快照超过 16 MiB，无法一次返回。"
+	historyResponseTooLargeMessage = "历史快照超过 2 MiB，无法一次返回，请缩短时间范围或选择单个成员。"
 )
 
 type HistoryHandler struct {
@@ -34,7 +34,16 @@ type HistoryHandler struct {
 	scope     scopedHandler
 	groups    repositories.GroupRepository
 	locations repositories.LocationRepository
+	rates     hitLimiter
 }
+
+const (
+	historyReadUserMaxHits    = 30
+	historyReadIPMaxHits      = 90
+	historyMembersUserMaxHits = 60
+	historyMembersIPMaxHits   = 180
+	historyReadRateWindow     = time.Minute
+)
 
 func NewHistoryHandler(cfg config.Config, db *sql.DB, sessions session.Reader) HistoryHandler {
 	return HistoryHandler{
@@ -42,6 +51,7 @@ func NewHistoryHandler(cfg config.Config, db *sql.DB, sessions session.Reader) H
 		scope:     newScopedHandler(db, sessions),
 		groups:    repositories.NewGroupRepository(db),
 		locations: repositories.NewLocationRepository(db),
+		rates:     repositories.NewRateLimitRepository(db),
 	}
 }
 
@@ -51,6 +61,9 @@ func (handler HistoryHandler) Members(w http.ResponseWriter, r *http.Request) {
 	scope, _, err := handler.scope.requireScope(r, selectedGroupName(r, groupName))
 	if err != nil {
 		httpx.Error(w, err)
+		return
+	}
+	if !allowScopedRead(w, r, handler.rates, "history_members_read", scope.User.ID, historyMembersUserMaxHits, historyMembersIPMaxHits, historyReadRateWindow) {
 		return
 	}
 	total, err := handler.groups.CountMembers(r.Context(), scope.Membership.GroupName)
@@ -93,11 +106,12 @@ type historyRequest struct {
 	PerPage             int    `json:"per_page"`
 	MapPerUser          int    `json:"map_per_user"`
 	UserID              int64  `json:"user_id"`
+	RangeHours          int    `json:"range_hours"`
 	ClientMergeSnapshot bool   `json:"client_merge_snapshot"`
 }
 
 func (handler HistoryHandler) List(w http.ResponseWriter, r *http.Request) {
-	req := historyRequest{Page: 1, PerPage: 20, MapPerUser: 20}
+	req := historyRequest{Page: 1, PerPage: 20, MapPerUser: 20, RangeHours: 24}
 	if r.Method == http.MethodPost {
 		if err := httpx.DecodeJSON(r, &req); err != nil {
 			httpx.Error(w, err)
@@ -109,6 +123,7 @@ func (handler HistoryHandler) List(w http.ResponseWriter, r *http.Request) {
 		req.PerPage = httpx.IntQuery(r, "per_page", 20)
 		req.MapPerUser = httpx.IntQuery(r, "map_per_user", 20)
 		req.UserID = int64(httpx.IntQuery(r, "user_id", 0))
+		req.RangeHours = httpx.IntQuery(r, "range_hours", 24)
 	}
 	if req.Page < 1 {
 		req.Page = 1
@@ -119,10 +134,14 @@ func (handler HistoryHandler) List(w http.ResponseWriter, r *http.Request) {
 	if !containsInt([]int{20, 50, 100}, req.MapPerUser) {
 		req.MapPerUser = 20
 	}
+	req.RangeHours = normalizeHistoryRangeHours(req.RangeHours)
 
 	scope, _, err := handler.scope.requireScope(r, selectedGroupName(r, req.GroupName))
 	if err != nil {
 		httpx.Error(w, err)
+		return
+	}
+	if !allowScopedRead(w, r, handler.rates, "history_read", scope.User.ID, historyReadUserMaxHits, historyReadIPMaxHits, historyReadRateWindow) {
 		return
 	}
 
@@ -165,19 +184,28 @@ func (handler HistoryHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rawRows, err := handler.locations.RetainedHistoryForUsersBounded(
+	rangeStart := time.Now().Add(-time.Duration(req.RangeHours) * time.Hour)
+	rawRows, err := handler.locations.RetainedHistoryForUsersBoundedSince(
 		r.Context(),
 		scope.Membership.GroupName,
 		memberUserIDs(members),
 		handler.cfg.Location.HistoryLimit,
 		maxHistorySnapshotRawRows,
 		maxHistoryResponseBytes,
+		rangeStart,
 	)
 	if err != nil {
 		httpx.Error(w, historyRepositoryError(err))
 		return
 	}
-	view := composeLocationHistory(rawRows, req.Page, req.PerPage, req.MapPerUser)
+	composeRows := rawRows
+	if !req.ClientMergeSnapshot {
+		composeRows = historyRowsAtOrAfter(rawRows, rangeStart)
+	}
+	view := composeLocationHistory(composeRows, req.Page, req.PerPage, req.MapPerUser)
+	if req.ClientMergeSnapshot {
+		view.clientMergeRows = rawRows
+	}
 	if err := validateHistoryMapRowCount(len(view.mapRows)); err != nil {
 		httpx.Error(w, err)
 		return
@@ -192,6 +220,8 @@ func (handler HistoryHandler) List(w http.ResponseWriter, r *http.Request) {
 		"selection_limited": membersTruncated,
 		"history":           locationPayloads(view.rows, false),
 		"map_history":       locationPayloads(view.mapRows, false),
+		"range_hours":       req.RangeHours,
+		"range_start":       services.FormatDatetime(rangeStart),
 		"pagination": map[string]any{
 			"page":         req.Page,
 			"per_page":     req.PerPage,
@@ -231,6 +261,8 @@ func (handler HistoryHandler) respondMemberSelectionRequired(w http.ResponseWrit
 		},
 		"history":     []map[string]any{},
 		"map_history": []map[string]any{},
+		"range_hours": req.RangeHours,
+		"range_start": services.FormatDatetime(time.Now().Add(-time.Duration(req.RangeHours) * time.Hour)),
 		"pagination": map[string]any{
 			"page":         1,
 			"per_page":     req.PerPage,
@@ -351,6 +383,23 @@ func containsInt(values []int, target int) bool {
 		}
 	}
 	return false
+}
+
+func normalizeHistoryRangeHours(value int) int {
+	if containsInt([]int{1, 24, 168, 720}, value) {
+		return value
+	}
+	return 24
+}
+
+func historyRowsAtOrAfter(rows []models.Location, since time.Time) []models.Location {
+	filtered := make([]models.Location, 0, len(rows))
+	for _, row := range rows {
+		if !row.CreatedAt.Before(since) {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
 }
 
 func filterMembers(members []models.GroupMember, userID int64) []models.GroupMember {

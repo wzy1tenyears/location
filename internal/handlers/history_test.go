@@ -174,7 +174,7 @@ func TestHistoryHardLimitsHaveExactBoundariesAndStableErrors(t *testing.T) {
 	}{
 		{name: "members 64/65", atLimit: 64, overLimit: 65, validate: validateHistoryMemberCount, wantMessage: historyTooManyMembersMessage},
 		{name: "map rows 2000/2001", atLimit: 2000, overLimit: 2001, validate: validateHistoryMapRowCount, wantMessage: historyTooManyMapRowsMessage},
-		{name: "response body 16MiB boundary including encoder newline", atLimit: maxHistoryResponseBytes - 1, overLimit: maxHistoryResponseBytes, validate: validateHistoryResponseBytes, wantMessage: historyResponseTooLargeMessage},
+		{name: "response body 2MiB boundary including encoder newline", atLimit: maxHistoryResponseBytes - 1, overLimit: maxHistoryResponseBytes, validate: validateHistoryResponseBytes, wantMessage: historyResponseTooLargeMessage},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := test.validate(test.atLimit); err != nil {

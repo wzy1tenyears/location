@@ -10,6 +10,26 @@ import (
 	"familylocation/location-v3/internal/httpx"
 )
 
+func TestSanitizeAddressDiagnosticsKeepsSafeProviderAttemptSummary(t *testing.T) {
+	diagnostics := sanitizeAddressDiagnostics(map[string]any{
+		"sources": []any{map[string]any{
+			"type": "ip",
+			"provider_attempts": []any{
+				map[string]any{"provider": "ipdata", "status": "success", "precision": "district", "raw_response": "secret"},
+				map[string]any{"provider": "ipregistry", "status": "failed", "precision": "invalid"},
+			},
+		}},
+	})
+	source := diagnostics["sources"].([]map[string]any)[0]
+	attempts := source["provider_attempts"].([]map[string]any)
+	if len(attempts) != 2 || attempts[0]["precision"] != "district" || attempts[1]["precision"] != "none" {
+		t.Fatalf("unexpected provider attempts: %#v", attempts)
+	}
+	if _, exists := attempts[0]["raw_response"]; exists {
+		t.Fatal("provider attempt leaked raw response")
+	}
+}
+
 func TestSanitizeAddressDiagnosticsPreservesPreciseSourceFields(t *testing.T) {
 	diagnostics := sanitizeAddressDiagnostics(map[string]any{
 		"preferred_country":     "中国",

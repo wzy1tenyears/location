@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS locations (
     INDEX idx_locations_group_created (group_name, created_at),
     INDEX idx_locations_user_created (user_id, created_at),
     INDEX idx_locations_group_user_id (group_name, user_id, id),
+    INDEX idx_locations_group_user_created_id (group_name, user_id, created_at, id),
     CONSTRAINT fk_locations_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

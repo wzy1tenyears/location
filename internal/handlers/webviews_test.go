@@ -69,95 +69,26 @@ func TestHistoryMapInfoWindowBuildsTextOnlyDOM(t *testing.T) {
 	}
 }
 
-func TestHistoryMapRendersIPAndWebRTCSourcesWithoutAddingThemToGPSPaths(t *testing.T) {
-	for _, required := range []string{
-		"function normalizeDiagnosticSource(record, source, sourceIndex, recordIndex)",
-		"if (type !== 'ip' && type !== 'webrtc') return null;",
-		"const selected = bestDiagnosticSource(source, type);",
-		"if (!selected) return null;",
-		"const sources = Array.isArray(diagnostics.sources) ? diagnostics.sources : [];",
-		"const diagnostic = normalizeDiagnosticSource(record, source, sourceIndex, index);",
-		"if (diagnostic) items.push(diagnostic);",
-		"if (item.type !== 'gps') return;",
-	} {
-		if !strings.Contains(historyMapHTML, required) {
-			t.Fatalf("history map diagnostic marker handling is missing %q", required)
-		}
-	}
-}
-
-func TestHistoryMapDiagnosticAddressUsesMostPreciseAvailableText(t *testing.T) {
-	for _, required := range []string{
-		"const ip = firstText(source && source.ip, source && source.server_ip, source && source.ipv4, source && source.ipv6);",
-		"if (!text || text === ip || parts.some((part) => part.includes(text))) return;",
-		"if (text.includes(parts[index])) parts.splice(index, 1);",
-		"source && source.district",
-		"source && source.street",
-		"source && source.address",
-		"source && source.detail",
-		"source && source.poi",
-		"const address = parts.join(' ');",
-		"const postalCode = firstText(source && source.postal_code);",
-		"return address && postalCode && !address.includes(postalCode) ? `${address} ${postalCode}` : address;",
-	} {
-		if !strings.Contains(historyMapHTML, required) {
-			t.Fatalf("history map diagnostic address handling is missing %q", required)
-		}
-	}
-	if !strings.Contains(historyMapHTML, "normalizedCoordinateSystem(source && source.coordinate_system) || 'wgs84'") {
-		t.Fatal("history map diagnostic coordinates must default to WGS84")
-	}
-}
-
-func TestHistoryMapNestedDiagnosticsSelectMostPreciseEffectiveSource(t *testing.T) {
-	start := strings.Index(historyMapHTML, "    function diagnosticAddressPrecision(")
-	end := strings.Index(historyMapHTML, "    function normalizeDiagnosticSource(")
+func TestHistoryMapExcludesIPAndWebRTCMarkers(t *testing.T) {
+	start := strings.Index(historyMapHTML, "    function expandRecords(")
+	end := strings.Index(historyMapHTML, "    function clearMap(")
 	if start < 0 || end <= start {
-		t.Fatal("history map nested diagnostic selection helpers not found")
+		t.Fatal("history map expansion block not found")
 	}
-	selection := historyMapHTML[start:end]
-	for _, required := range []string{
-		"const nestedField = type === 'ip' ? 'variants' : 'candidates';",
-		"const nested = source && Array.isArray(source[nestedField]) ? source[nestedField] : [];",
-		"const effective = inheritDiagnosticSource(source, candidate, type);",
-		"effective.type = type;",
-		"const inheritParent = candidate !== parent && diagnosticIdentitiesCompatible(parent, candidate);",
-		"const coordinateSource = hasDiagnosticCoordinate(candidate)",
-		": (inheritParent && hasDiagnosticCoordinate(parent) ? parent : null);",
-		"effective.latitude = Number(coordinateSource.latitude);",
-		"effective.longitude = Number(coordinateSource.longitude);",
-		"const mayUseParentSystem = coordinateSource === parent || (inheritParent && sameDiagnosticCoordinate(parent, coordinateSource));",
-		"mayUseParentSystem && parent && parent.coordinate_system",
-		"address: diagnosticAddressPrecision(effective),",
-		"ownCoordinate: hasDiagnosticCoordinate(candidate),",
-		"candidate.address.score > selected.address.score",
-		"candidate.address.populated > selected.address.populated",
-		"candidate.accuracy < selected.accuracy",
-	} {
-		if !strings.Contains(selection, required) {
-			t.Fatalf("history map nested diagnostic selection is missing %q", required)
+	expansion := historyMapHTML[start:end]
+	for _, forbidden := range []string{"diagnostics.sources", "normalizeDiagnosticSource", "sourceIndex", "webrtc", "'ip'"} {
+		if strings.Contains(expansion, forbidden) {
+			t.Fatalf("history map still expands network diagnostic marker data %q", forbidden)
 		}
 	}
-	for _, required := range []string{
-		"if (parentIdentity && nestedIdentity) return parentIdentity === nestedIdentity;",
-		"if (!parentIdentity && nestedIdentity) return false;",
-		"if (inheritParent) copyFields(parent);",
-	} {
-		if !strings.Contains(selection, required) {
-			t.Fatalf("history map diagnostic identity isolation is missing %q", required)
-		}
-	}
-	for _, inherited := range []string{"provider", "ip", "server_ip", "stun_server", "stun_label"} {
-		if !strings.Contains(selection, "Object.keys(source).forEach((key) => {") {
-			t.Fatal("history map diagnostic inheritance no longer copies parent fields")
-		}
-		if strings.Contains(selection, "key === '"+inherited+"'") {
-			t.Fatalf("history map diagnostic inheritance unexpectedly excludes %q", inherited)
+	for _, forbidden := range []string{".marker.ip", ".marker.webrtc"} {
+		if strings.Contains(historyMapHTML, forbidden) {
+			t.Fatalf("history map still contains network marker styling %q", forbidden)
 		}
 	}
 }
 
-func TestHistoryMapUsesSemanticStableMarkerKeys(t *testing.T) {
+func TestHistoryMapUsesStableGPSMarkerKeys(t *testing.T) {
 	start := strings.Index(historyMapHTML, "    function stableMarkerKey(")
 	end := strings.Index(historyMapHTML, "    function expandRecords(")
 	if start < 0 || end <= start {
@@ -165,12 +96,10 @@ func TestHistoryMapUsesSemanticStableMarkerKeys(t *testing.T) {
 	}
 	stableKey := historyMapHTML[start:end]
 	for _, required := range []string{
-		"item.type",
 		"item.userKey",
 		"item.time",
 		"rawLat.toFixed(6)",
 		"rawLng.toFixed(6)",
-		"firstText(item.ip, item.address, item.provider).toLowerCase()",
 	} {
 		if !strings.Contains(stableKey, required) {
 			t.Fatalf("history map stable marker key is missing %q", required)
@@ -184,10 +113,27 @@ func TestHistoryMapUsesSemanticStableMarkerKeys(t *testing.T) {
 	}
 }
 
-func TestHistoryMapGPSCityUsesPreciseDiagnosticsBeforeRecordFallbacks(t *testing.T) {
-	required := "city: firstText(diagnostics.preferred_city, record.city, gpsSource && gpsSource.city),"
-	if !strings.Contains(historyMapHTML, required) {
-		t.Fatalf("history map GPS city priority is missing %q", required)
+func TestHistoryMapInfoWindowUsesOnlyGPSAddressSource(t *testing.T) {
+	for _, required := range []string{
+		"address: firstText(gpsSource && gpsSource.address, gpsSource && gpsSource.detail),",
+		"city: firstText(gpsSource && gpsSource.city),",
+		"region: firstText(gpsSource && gpsSource.region),",
+		"country: firstText(gpsSource && gpsSource.country),",
+	} {
+		if !strings.Contains(historyMapHTML, required) {
+			t.Fatalf("history map GPS-only information priority is missing %q", required)
+		}
+	}
+	start := strings.Index(historyMapHTML, "function normalizeRecord(record, index)")
+	end := strings.Index(historyMapHTML, "function stableMarkerKey(item)")
+	if start < 0 || end < 0 || start >= end {
+		t.Fatal("history map record normalization block not found")
+	}
+	normalize := historyMapHTML[start:end]
+	if strings.Contains(normalize, "diagnostics.preferred_address") || strings.Contains(normalize, "diagnostics.preferred_city") ||
+		strings.Contains(normalize, "record.address,") || strings.Contains(normalize, "record.address)") ||
+		strings.Contains(normalize, "record.location_address") {
+		t.Fatal("history map information window still consumes a network-preferred address")
 	}
 }
 
@@ -209,35 +155,12 @@ func TestHistoryMapRawGPSCoordinatesIgnoreAddressOnlyPreferredSystem(t *testing.
 	}
 }
 
-func TestHistoryMapDiagnosticCoordinateConversionMatchesAMap(t *testing.T) {
-	start := strings.Index(historyMapHTML, "    function mapCoordinateForDiagnosticSource(")
-	end := strings.Index(historyMapHTML, "    function sourceLabel(")
-	if start < 0 || end <= start {
-		t.Fatal("history map diagnostic coordinate conversion block not found")
-	}
-	conversion := historyMapHTML[start:end]
-	for _, required := range []string{
-		"normalizedCoordinateSystem(source && source.coordinate_system) || 'wgs84'",
-		"if (system === 'bd09') return bd09ToGcj02(lng, lat);",
-		"if (system === 'gcj02') return { lng, lat };",
-		"return wgs84ToGcj02(lng, lat);",
-	} {
-		if !strings.Contains(conversion, required) {
-			t.Fatalf("history map diagnostic coordinate conversion is missing %q", required)
-		}
-	}
-}
-
 func TestHistoryMapCarriesMergedStayFieldsToEveryMarker(t *testing.T) {
 	for _, required := range []string{
 		"record.first_reported_at",
 		"record.last_reported_at",
 		"record.stay_duration_seconds",
 		"record.report_count",
-		"record && record.first_reported_at",
-		"record && record.last_reported_at",
-		"record && record.stay_duration_seconds",
-		"record && record.report_count",
 		"function formatStayDuration(value)",
 	} {
 		if !strings.Contains(historyMapHTML, required) {

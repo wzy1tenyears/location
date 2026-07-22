@@ -25,7 +25,9 @@ func NewRouter(cfg config.Config, db *sql.DB) http.Handler {
 	tickets := handlers.NewTicketsHandler(db, sessions)
 	p2p := handlers.NewP2PHandler(db, sessions)
 	webviews := handlers.NewWebViewHandler(cfg)
-	adminManage := handlers.NewAdminManageHandler(db, sessions, cfg.Database.GroupCodeBackfillEnabled)
+	eventHub := handlers.NewEventHub()
+	eventStream := handlers.NewEventStreamHandler(db, sessions, eventHub)
+	adminManage := handlers.NewAdminManageHandler(db, sessions, cfg.Database.GroupCodeBackfillEnabled, eventHub)
 	adminSummary := handlers.NewAdminSummaryHandler(cfg, db, sessions)
 	announcements := handlers.NewAnnouncementHandler(db, sessions)
 	invites := handlers.NewInviteHandler(db)
@@ -48,6 +50,7 @@ func NewRouter(cfg config.Config, db *sql.DB) http.Handler {
 	mux.Handle("POST /api/register", middleware.Chain(http.HandlerFunc(register.Register), appOnly))
 	mux.Handle("GET /api/admin-app-update", middleware.Chain(http.HandlerFunc(updates.AdminAppUpdate), appOnly))
 	mux.Handle("GET /api/announcement", middleware.Chain(http.HandlerFunc(announcements.Latest), appOnly))
+	mux.Handle("GET /api/events", middleware.Chain(eventStream, appOnly))
 	mux.Handle("GET /api/invite-check", middleware.Chain(http.HandlerFunc(invites.Check), appOnly))
 	mux.Handle("POST /api/invite-check", middleware.Chain(http.HandlerFunc(invites.Check), appOnly))
 	mux.Handle("GET /api/me", middleware.Chain(http.HandlerFunc(me.Show), appOnly))
@@ -86,5 +89,5 @@ func NewRouter(cfg config.Config, db *sql.DB) http.Handler {
 	mux.Handle("GET /share/", http.HandlerFunc(shares.PublicPage))
 	mux.Handle("POST /share/", http.HandlerFunc(shares.PublicPage))
 
-	return middleware.Chain(mux, middleware.Recover, middleware.AccessLog)
+	return middleware.Chain(mux, middleware.Recover, middleware.AccessLog, middleware.WriteFreeze(cfg.Server.WriteFreezeFile))
 }

@@ -25,6 +25,9 @@ $RequiredFiles = @(
     'internal/database/migrations/008_app_sessions_user_id_index.sql',
     'internal/database/migrations/009_location_retention_index.sql',
     'internal/database/migrations/010_environment_report_retention_index.sql',
+    'internal/database/migrations/011_group_code_alias.sql',
+    'internal/database/migrations/012_location_history_time_index.sql',
+    'internal/database/migrations/013_disable_unbound_invites.sql',
     'deploy/family-location-go.service.sample',
     'deploy/nginx-go-backend.sample.conf',
     'internal/httpx/json.go',
@@ -49,6 +52,10 @@ $RequiredFiles = @(
 	'internal/handlers/templates/location_share.html',
 	'internal/handlers/templates/location_share_unlock.html',
     'internal/handlers/announcements.go',
+    'internal/handlers/events.go',
+    'internal/handlers/events_test.go',
+    'internal/handlers/read_rate_limit.go',
+    'internal/handlers/read_rate_limit_test.go',
     'internal/handlers/invites.go',
     'internal/handlers/me.go',
     'internal/handlers/auth.go',
@@ -75,6 +82,9 @@ $RequiredFiles = @(
     'internal/repositories/settings.go',
     'internal/repositories/support_tickets.go',
     'internal/httpx/client.go',
+    'internal/httpx/json_test.go',
+    'internal/middleware/write_freeze.go',
+    'internal/middleware/write_freeze_test.go',
     'internal/services/users.go',
     'internal/services/passwords.go',
     'internal/services/device_policy.go',
@@ -122,6 +132,12 @@ if ($NginxSampleText -notmatch 'include /etc/nginx/snippets/family-location-clou
 if ($NginxSampleText -match 'location \^~ /_ShareMapService/') {
     throw 'public Nginx sample must not include a catch-all third-party map proxy.'
 }
+if ($NginxSampleText -notmatch 'location = /api/events[\s\S]*proxy_set_header Upgrade \$http_upgrade;[\s\S]*proxy_set_header Connection "upgrade";') {
+    throw 'public Nginx sample must document the exact authenticated WebSocket upgrade route.'
+}
+if ($NginxSampleText.IndexOf('location = /api/events', [StringComparison]::Ordinal) -gt $NginxSampleText.IndexOf('location ^~ /api/', [StringComparison]::Ordinal)) {
+    throw 'public Nginx sample must place the exact event route before the general API route.'
+}
 
 $RouterText = Get-Content -LiteralPath (Join-Path $Root 'internal/app/router.go') -Raw -Encoding UTF8
 $ExpectedRoutes = @(
@@ -136,6 +152,7 @@ $ExpectedRoutes = @(
     '/api/settings',
     '/api/locations',
     '/api/history',
+    '/api/events',
     '/api/legal-documents',
     '/api/groups',
     '/api/report-location',
@@ -165,6 +182,18 @@ foreach ($Route in $ExpectedRoutes) {
     if ($RouterText -notmatch [regex]::Escape($Route)) {
         throw "v3 router is missing route: $Route"
     }
+}
+
+$EventsText = Get-Content -LiteralPath (Join-Path $Root 'internal/handlers/events.go') -Raw -Encoding UTF8
+if ($EventsText -notmatch 'websocket\.Upgrader' -or $EventsText -notmatch 'handler\.scope\.requireUser' -or $EventsText -notmatch 'eventMaxConnectionsPerUser') {
+    throw 'event streaming must retain WebSocket upgrade, session authentication, and per-user connection caps.'
+}
+$HistoryMapText = Get-Content -LiteralPath (Join-Path $Root 'internal/handlers/templates/history_map.html') -Raw -Encoding UTF8
+if ($HistoryMapText -match 'networkMarker|normalizeDiagnosticSource|diagnostics\.preferred_address') {
+    throw 'history maps must not render IP/WebRTC coordinates or preferred network addresses.'
+}
+if ($HistoryMapText -notmatch 'const gpsSource = firstGpsSource\(diagnostics\)') {
+    throw 'history map labels must resolve from GPS diagnostics only.'
 }
 
 $UpdateText = Get-Content -LiteralPath (Join-Path $Root 'internal/handlers/updates.go') -Raw -Encoding UTF8

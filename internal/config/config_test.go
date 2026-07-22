@@ -62,6 +62,20 @@ func TestLoadPreservesPositiveLocationHistoryLimit(t *testing.T) {
 	}
 }
 
+func TestLoadReadsWriteFreezeFile(t *testing.T) {
+	t.Setenv("LOC_WRITE_FREEZE_FILE", "/srv/family-location/state/runtime/write-freeze")
+	if got := Load().Server.WriteFreezeFile; got != "/srv/family-location/state/runtime/write-freeze" {
+		t.Fatalf("WriteFreezeFile = %q", got)
+	}
+}
+
+func TestLoadDisablesWriteFreezeWhenPathIsUnset(t *testing.T) {
+	t.Setenv("LOC_WRITE_FREEZE_FILE", "")
+	if got := Load().Server.WriteFreezeFile; got != "" {
+		t.Fatalf("WriteFreezeFile = %q, want empty", got)
+	}
+}
+
 func TestLoadEnablesGroupCodeBackfillByDefault(t *testing.T) {
 	t.Setenv("LOC_GROUP_CODE_BACKFILL_ENABLED", "")
 	if !Load().Database.GroupCodeBackfillEnabled {

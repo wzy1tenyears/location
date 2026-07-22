@@ -116,12 +116,12 @@ func (handler TicketsHandler) get(w http.ResponseWriter, r *http.Request, scope 
 	rows, err := handler.db.QueryContext(r.Context(), `
 SELECT
 	t.id, t.group_name, t.subject, t.status, t.created_at, t.updated_at,
-	COALESCE(last_message.message, ''), last_message.created_at
+	COALESCE(last_admin_reply.message, ''), last_admin_reply.created_at
 FROM support_tickets t
-LEFT JOIN support_ticket_messages last_message ON last_message.id = (
+LEFT JOIN support_ticket_messages last_admin_reply ON last_admin_reply.id = (
 	SELECT id
 	FROM support_ticket_messages
-	WHERE ticket_id = t.id
+	WHERE ticket_id = t.id AND sender_type = 'admin'
 	ORDER BY id DESC
 	LIMIT 1
 )
@@ -492,15 +492,17 @@ func ticketPayload(id int64, groupName string, subject string, status string, la
 		lastMessageAtText = nowFormat(lastMessageAt.Time)
 	}
 	return map[string]any{
-		"id":              id,
-		"group_name":      groupName,
-		"subject":         subject,
-		"status":          status,
-		"status_label":    statusLabel,
-		"last_message":    lastMessage,
-		"last_message_at": lastMessageAtText,
-		"created_at":      nowFormat(createdAt),
-		"updated_at":      nowFormat(updatedAt),
+		"id":                    id,
+		"group_name":            groupName,
+		"subject":               subject,
+		"status":                status,
+		"status_label":          statusLabel,
+		"last_message":          lastMessage,
+		"last_message_at":       lastMessageAtText,
+		"latest_admin_reply":    lastMessage,
+		"latest_admin_reply_at": lastMessageAtText,
+		"created_at":            nowFormat(createdAt),
+		"updated_at":            nowFormat(updatedAt),
 	}
 }
 

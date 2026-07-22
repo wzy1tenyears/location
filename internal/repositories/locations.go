@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"familylocation/location-v3/internal/models"
 )
@@ -162,6 +163,17 @@ func (repo LocationRepository) RetainedHistoryForUsers(ctx context.Context, grou
 // and an optional total scan budget. It returns an explicit error instead of a
 // partial snapshot when the total budget would be exceeded.
 func (repo LocationRepository) RetainedHistoryForUsersBounded(ctx context.Context, groupName string, userIDs []int64, perUserLimit int, totalLimit int, totalSourceBytesLimit int) ([]models.Location, error) {
+	return repo.retainedHistoryForUsersBounded(ctx, groupName, userIDs, perUserLimit, totalLimit, totalSourceBytesLimit, time.Time{})
+}
+
+// RetainedHistoryForUsersBoundedSince reads the complete raw snapshot inside
+// the requested time window and, when budget permits, one immediately
+// preceding record per member as the stay-merge boundary anchor.
+func (repo LocationRepository) RetainedHistoryForUsersBoundedSince(ctx context.Context, groupName string, userIDs []int64, perUserLimit int, totalLimit int, totalSourceBytesLimit int, since time.Time) ([]models.Location, error) {
+	return repo.retainedHistoryForUsersBounded(ctx, groupName, userIDs, perUserLimit, totalLimit, totalSourceBytesLimit, since)
+}
+
+func (repo LocationRepository) retainedHistoryForUsersBounded(ctx context.Context, groupName string, userIDs []int64, perUserLimit int, totalLimit int, totalSourceBytesLimit int, since time.Time) ([]models.Location, error) {
 	if perUserLimit <= 0 {
 		perUserLimit = defaultLocationHistoryLimit
 	}
@@ -181,7 +193,7 @@ func (repo LocationRepository) RetainedHistoryForUsersBounded(ctx context.Contex
 		if totalSourceBytesLimit > 0 {
 			remainingSourceBytes = totalSourceBytesLimit - loadedSourceBytes
 		}
-		rows, sourceBytes, err := repo.historyForUserBounded(ctx, groupName, userID, fetchLimit, remainingSourceBytes)
+		rows, sourceBytes, err := repo.historyForUserBoundedSince(ctx, groupName, userID, fetchLimit, remainingSourceBytes, since)
 		if err != nil {
 			return nil, err
 		}
@@ -195,8 +207,35 @@ func (repo LocationRepository) RetainedHistoryForUsersBounded(ctx context.Contex
 }
 
 func (repo LocationRepository) historyForUserBounded(ctx context.Context, groupName string, userID int64, limit int, sourceBytesLimit int) ([]models.Location, int, error) {
+	return repo.historyForUserBoundedSince(ctx, groupName, userID, limit, sourceBytesLimit, time.Time{})
+}
+
+func (repo LocationRepository) historyForUserBoundedSince(ctx context.Context, groupName string, userID int64, limit int, sourceBytesLimit int, since time.Time) ([]models.Location, int, error) {
 	if limit <= 0 {
 		limit = defaultLocationHistoryLimit
+	}
+	if !since.IsZero() {
+		query := historySelect() + `
+WHERE l.group_name = ? AND l.user_id = ? AND l.created_at >= ? AND u.is_active = 1
+ORDER BY l.created_at DESC, l.id DESC
+LIMIT ?`
+		rows, sourceBytes, err := repo.queryLocationsBounded(ctx, sourceBytesLimit, query, groupName, userID, since, limit)
+		if err != nil || len(rows) >= limit {
+			return rows, sourceBytes, err
+		}
+		remainingBytes := sourceBytesLimit
+		if remainingBytes >= 0 {
+			remainingBytes -= sourceBytes
+		}
+		anchorQuery := historySelect() + `
+WHERE l.group_name = ? AND l.user_id = ? AND l.created_at < ? AND u.is_active = 1
+ORDER BY l.created_at DESC, l.id DESC
+LIMIT 1`
+		anchor, anchorBytes, err := repo.queryLocationsBounded(ctx, remainingBytes, anchorQuery, groupName, userID, since)
+		if err != nil {
+			return nil, 0, err
+		}
+		return append(rows, anchor...), sourceBytes + anchorBytes, nil
 	}
 	query := historySelect() + `
 WHERE l.group_name = ? AND l.user_id = ? AND u.is_active = 1

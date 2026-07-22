@@ -577,6 +577,7 @@ func sanitizeAddressDiagnostics(diagnostics map[string]any) map[string]any {
 			}
 			clean["variants"] = sanitizeProbeList(source["variants"], "ip_variant")
 			clean["candidates"] = sanitizeProbeList(source["candidates"], "webrtc_candidate")
+			clean["provider_attempts"] = sanitizeProviderAttempts(source["provider_attempts"])
 			sources = append(sources, clean)
 		}
 	}
@@ -618,6 +619,33 @@ func sanitizeAddressDiagnostics(diagnostics map[string]any) map[string]any {
 		result["preferred_longitude"] = nil
 	}
 	return result
+}
+
+func sanitizeProviderAttempts(value any) []map[string]any {
+	items, ok := value.([]any)
+	if !ok {
+		return []map[string]any{}
+	}
+	clean := make([]map[string]any, 0, 8)
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok || len(clean) >= 8 {
+			continue
+		}
+		provider := truncateString(fmt.Sprint(item["provider"]), 40)
+		status := strings.ToLower(truncateString(fmt.Sprint(item["status"]), 16))
+		precision := strings.ToLower(truncateString(fmt.Sprint(item["precision"]), 16))
+		if provider == "" || (status != "success" && status != "failed") {
+			continue
+		}
+		switch precision {
+		case "street", "district", "city", "region", "country", "coordinate", "none":
+		default:
+			precision = "none"
+		}
+		clean = append(clean, map[string]any{"provider": provider, "status": status, "precision": precision})
+	}
+	return clean
 }
 
 func sanitizeProbeList(value any, kind string) []map[string]any {

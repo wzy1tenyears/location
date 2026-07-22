@@ -71,7 +71,6 @@ type registerRequest struct {
 	PasswordConfirm             string `json:"password_confirm"`
 	DisplayName                 string `json:"display_name"`
 	InviteCode                  string `json:"invite_code"`
-	GroupName                   string `json:"group_name"`
 	GroupCode                   string `json:"group_code"`
 	TermsAccepted               bool   `json:"terms_accepted"`
 	CrossBorderTransferAccepted bool   `json:"cross_border_transfer_accepted"`
@@ -98,7 +97,6 @@ func (handler RegisterHandler) Register(w http.ResponseWriter, r *http.Request) 
 	req.Username = strings.TrimSpace(req.Username)
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
 	req.InviteCode = strings.ToLower(strings.TrimSpace(req.InviteCode))
-	req.GroupName = strings.TrimSpace(req.GroupName)
 	req.GroupCode = strings.ToLower(strings.TrimSpace(req.GroupCode))
 	req.TurnstileToken = strings.TrimSpace(req.TurnstileToken)
 	req.BrowserFingerprint = sanitizeBrowserFingerprint(req.BrowserFingerprint)
@@ -108,7 +106,7 @@ func (handler RegisterHandler) Register(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if !validRegisterUsername(req.Username) {
-		httpx.Error(w, httpx.Unprocessable("用户名需至少 6 位，并同时包含英文和数字。"))
+		httpx.Error(w, httpx.Unprocessable("用户名需为 6 至 64 位英文字母、数字或下划线。"))
 		return
 	}
 	if len(req.Password) < 6 {
@@ -175,28 +173,17 @@ func (handler RegisterHandler) Register(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	assignedGroupName := ""
+	assignedGroupName := strings.TrimSpace(invite.AssignedGroupName)
 	role := "guardian"
-	assignedGroupNameOriginallyEmpty := strings.TrimSpace(invite.AssignedGroupName) == ""
-	if invite.InviteType == "group_create" {
-		assignedGroupName = strings.TrimSpace(invite.AssignedGroupName)
-		if assignedGroupName == "" {
-			if req.GroupName == "" {
-				httpx.Error(w, httpx.Unprocessable("请填写要创建的家庭组名称。"))
-				return
-			}
-			groupName, err := createFamilyGroupRecordTx(r.Context(), tx, req.GroupName, nil, groupCodeModeForBackfill(handler.cfg.Database.GroupCodeBackfillEnabled))
-			if err != nil {
-				httpx.Error(w, err)
-				return
-			}
-			assignedGroupName = groupName
-		}
-		if err := ensureFamilyGroupRecordTx(r.Context(), tx, assignedGroupName, nil, groupCodeModeForBackfill(handler.cfg.Database.GroupCodeBackfillEnabled)); err != nil {
-			httpx.Error(w, err)
-			return
-		}
-	} else {
+	if assignedGroupName == "" {
+		httpx.Error(w, httpx.Unprocessable("邀请码尚未绑定家庭组，请联系管理员。"))
+		return
+	}
+	if err := ensureBoundFamilyGroupExistsTx(r.Context(), tx, assignedGroupName); err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	if invite.InviteType != "group_create" {
 		if !groupCodePattern.MatchString(req.GroupCode) {
 			httpx.Error(w, httpx.Unprocessable("请填写 8 位家庭组号。"))
 			return
@@ -210,7 +197,10 @@ func (handler RegisterHandler) Register(w http.ResponseWriter, r *http.Request) 
 			httpx.Error(w, httpx.APIError{Status: http.StatusNotFound, Message: "家庭组号不存在。"})
 			return
 		}
-		assignedGroupName = groupName
+		if groupName != assignedGroupName {
+			httpx.Error(w, httpx.Forbidden("家庭组号与邀请码绑定的家庭组不一致。"))
+			return
+		}
 	}
 
 	passwordHash, err := services.HashPassword(req.Password)
@@ -227,15 +217,8 @@ func (handler RegisterHandler) Register(w http.ResponseWriter, r *http.Request) 
 		httpx.Error(w, err)
 		return
 	}
-	if invite.InviteType == "group_create" && invite.AllowGroupOwner && assignedGroupNameOriginallyEmpty {
+	if invite.InviteType == "group_create" && invite.AllowGroupOwner {
 		_, err = tx.ExecContext(r.Context(), "UPDATE family_groups SET owner_user_id = ? WHERE group_name = ? AND owner_user_id IS NULL", userID, assignedGroupName)
-		if err != nil {
-			httpx.Error(w, err)
-			return
-		}
-	}
-	if invite.InviteType == "group_create" && assignedGroupNameOriginallyEmpty {
-		_, err = tx.ExecContext(r.Context(), "UPDATE invite_codes SET assigned_group_name = ? WHERE id = ?", assignedGroupName, invite.ID)
 		if err != nil {
 			httpx.Error(w, err)
 			return
@@ -283,20 +266,16 @@ func (handler RegisterHandler) Register(w http.ResponseWriter, r *http.Request) 
 }
 
 func validRegisterUsername(username string) bool {
-	if !registerUsernamePattern.MatchString(username) {
-		return false
+	return registerUsernamePattern.MatchString(username)
+}
+
+func ensureBoundFamilyGroupExistsTx(ctx context.Context, tx *sql.Tx, groupName string) error {
+	var exists int
+	err := tx.QueryRowContext(ctx, "SELECT 1 FROM family_groups WHERE group_name = ? LIMIT 1", groupName).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return httpx.Unprocessable("邀请码绑定的家庭组不存在，请联系管理员。")
 	}
-	hasLetter := false
-	hasDigit := false
-	for _, char := range username {
-		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') {
-			hasLetter = true
-		}
-		if char >= '0' && char <= '9' {
-			hasDigit = true
-		}
-	}
-	return hasLetter && hasDigit
+	return err
 }
 
 func (handler RegisterHandler) verifyTurnstile(r *http.Request, token string) error {

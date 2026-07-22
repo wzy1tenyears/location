@@ -16,13 +16,21 @@ type LocationsHandler struct {
 	cfg       config.Config
 	scope     scopedHandler
 	locations repositories.LocationRepository
+	rates     hitLimiter
 }
+
+const (
+	locationReadUserMaxHits = 120
+	locationReadIPMaxHits   = 240
+	locationReadWindow      = time.Minute
+)
 
 func NewLocationsHandler(cfg config.Config, db *sql.DB, sessions session.Reader) LocationsHandler {
 	return LocationsHandler{
 		cfg:       cfg,
 		scope:     newScopedHandler(db, sessions),
 		locations: repositories.NewLocationRepository(db),
+		rates:     repositories.NewRateLimitRepository(db),
 	}
 }
 
@@ -30,6 +38,9 @@ func (handler LocationsHandler) Latest(w http.ResponseWriter, r *http.Request) {
 	scope, _, err := handler.scope.requireScope(r, selectedGroupName(r, ""))
 	if err != nil {
 		httpx.Error(w, err)
+		return
+	}
+	if !allowScopedRead(w, r, handler.rates, "locations_read", scope.User.ID, locationReadUserMaxHits, locationReadIPMaxHits, locationReadWindow) {
 		return
 	}
 

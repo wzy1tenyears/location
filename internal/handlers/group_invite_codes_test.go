@@ -15,6 +15,12 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
+func expectInviteGroupExists(mock sqlmock.Sqlmock, groupName string) {
+	mock.ExpectQuery(`SELECT 1 FROM family_groups WHERE group_name = \? LIMIT 1`).
+		WithArgs(groupName).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(1))
+}
+
 func TestFindGroupNameByCodeReadsCurrentAndLegacyAlias(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -198,12 +204,13 @@ func TestAddInviteDefaultsToEightCharactersAndRetriesCollision(t *testing.T) {
 	}
 	defer db.Close()
 	handler := AdminManageHandler{db: db}
-	data := map[string]any{"code": "", "note": "", "invite_type": "invite", "allow_group_owner": false, "max_uses": 1}
+	data := map[string]any{"code": "", "note": "", "invite_type": "invite", "allow_group_owner": false, "max_uses": 1, "assigned_group_name": "family"}
+	expectInviteGroupExists(mock, "family")
 	mock.ExpectExec(`INSERT INTO invite_codes`).
-		WithArgs("00000000", "", "invite", false, 1).
+		WithArgs("00000000", "", "invite", false, 1, "family").
 		WillReturnError(&mysql.MySQLError{Number: 1062, Message: "Duplicate entry '00000000' for key 'invite_codes.code'"})
 	mock.ExpectExec(`INSERT INTO invite_codes`).
-		WithArgs("11111111", "", "invite", false, 1).
+		WithArgs("11111111", "", "invite", false, 1, "family").
 		WillReturnResult(sqlmock.NewResult(2, 1))
 	message, err := handler.addInviteWithReader(context.Background(), data, bytes.NewReader(append(make([]byte, 8), bytes.Repeat([]byte{1}, 8)...)))
 	if err != nil {
@@ -224,9 +231,10 @@ func TestAddInviteNormalizesCustomCodeAndReturnsConflictForDuplicate(t *testing.
 	}
 	defer db.Close()
 	handler := AdminManageHandler{db: db}
-	data := map[string]any{"code": " AbC123 ", "note": "", "invite_type": "invite", "allow_group_owner": false, "max_uses": 1}
+	data := map[string]any{"code": " AbC123 ", "note": "", "invite_type": "invite", "allow_group_owner": false, "max_uses": 1, "assigned_group_name": "family"}
+	expectInviteGroupExists(mock, "family")
 	mock.ExpectExec(`INSERT INTO invite_codes`).
-		WithArgs("abc123", "", "invite", false, 1).
+		WithArgs("abc123", "", "invite", false, 1, "family").
 		WillReturnError(&mysql.MySQLError{Number: 1062, Message: "Duplicate entry 'abc123' for key 'invite_codes.code'"})
 	_, err = handler.addInviteWithReader(context.Background(), data, bytes.NewReader(nil))
 	var apiErr httpx.APIError
@@ -245,12 +253,13 @@ func TestAddInviteRejectsInvalidCustomLengthAndPropagatesEntropyFailure(t *testi
 	}
 	defer db.Close()
 	handler := AdminManageHandler{db: db}
-	base := map[string]any{"note": "", "invite_type": "invite", "allow_group_owner": false, "max_uses": 1}
+	base := map[string]any{"note": "", "invite_type": "invite", "allow_group_owner": false, "max_uses": 1, "assigned_group_name": "family"}
 	base["code"] = "abc"
 	if _, err := handler.addInviteWithReader(context.Background(), base, bytes.NewReader(nil)); err == nil {
 		t.Fatal("three-character custom invite code was accepted")
 	}
 	base["code"] = ""
+	expectInviteGroupExists(mock, "family")
 	if _, err := handler.addInviteWithReader(context.Background(), base, bytes.NewReader(nil)); err == nil || !strings.Contains(err.Error(), "entropy") {
 		t.Fatalf("entropy failure = %v", err)
 	}
@@ -268,12 +277,13 @@ func TestAddInviteAcceptsCustomBoundaryLengths(t *testing.T) {
 			}
 			defer db.Close()
 			code := strings.Repeat("a", length)
+			expectInviteGroupExists(mock, "family")
 			mock.ExpectExec(`INSERT INTO invite_codes`).
-				WithArgs(code, "", "invite", false, 1).
+				WithArgs(code, "", "invite", false, 1, "family").
 				WillReturnResult(sqlmock.NewResult(1, 1))
 			handler := AdminManageHandler{db: db}
 			_, err = handler.addInviteWithReader(context.Background(), map[string]any{
-				"code": code, "note": "", "invite_type": "invite", "allow_group_owner": false, "max_uses": 1,
+				"code": code, "note": "", "invite_type": "invite", "allow_group_owner": false, "max_uses": 1, "assigned_group_name": "family",
 			}, bytes.NewReader(nil))
 			if err != nil {
 				t.Fatal(err)
@@ -312,11 +322,12 @@ func TestAddInviteDoesNotRetryUnrelatedUniqueCollision(t *testing.T) {
 	}
 	defer db.Close()
 	handler := AdminManageHandler{db: db}
+	expectInviteGroupExists(mock, "family")
 	mock.ExpectExec(`INSERT INTO invite_codes`).
-		WithArgs("00000000", "", "invite", false, 1).
+		WithArgs("00000000", "", "invite", false, 1, "family").
 		WillReturnError(&mysql.MySQLError{Number: 1062, Message: "Duplicate entry '1' for key 'invite_codes.PRIMARY'"})
 	_, err = handler.addInviteWithReader(context.Background(), map[string]any{
-		"code": "", "note": "", "invite_type": "invite", "allow_group_owner": false, "max_uses": 1,
+		"code": "", "note": "", "invite_type": "invite", "allow_group_owner": false, "max_uses": 1, "assigned_group_name": "family",
 	}, bytes.NewReader(make([]byte, 64)))
 	if err == nil {
 		t.Fatal("unrelated invite unique collision was retried or ignored")
@@ -336,5 +347,41 @@ func TestRegistrationInviteValidationKeepsLegacyAlphaNumericCodesUsable(t *testi
 		if registerInviteCodePattern.MatchString(code) {
 			t.Fatalf("invalid registration invite code %q was accepted", code)
 		}
+	}
+}
+
+func TestRegisterUsernamePolicyAllowsSixLetters(t *testing.T) {
+	for _, username := range []string{"abcdef", "ABCDEF", "abc_12", strings.Repeat("a", 64)} {
+		if !validRegisterUsername(username) {
+			t.Fatalf("valid username %q was rejected", username)
+		}
+	}
+	for _, username := range []string{"abcde", "abc-12", strings.Repeat("a", 65), "中文账号"} {
+		if validRegisterUsername(username) {
+			t.Fatalf("invalid username %q was accepted", username)
+		}
+	}
+}
+
+func TestAddInviteRequiresExistingAssignedGroup(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	handler := AdminManageHandler{db: db}
+	base := map[string]any{"code": "abcdefgh", "note": "", "invite_type": "invite", "allow_group_owner": false, "max_uses": 1}
+	if _, err := handler.addInviteWithReader(context.Background(), base, bytes.NewReader(nil)); err == nil {
+		t.Fatal("invite without assigned group was accepted")
+	}
+	base["assigned_group_name"] = "missing"
+	mock.ExpectQuery(`SELECT 1 FROM family_groups WHERE group_name = \? LIMIT 1`).
+		WithArgs("missing").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}))
+	if _, err := handler.addInviteWithReader(context.Background(), base, bytes.NewReader(nil)); err == nil {
+		t.Fatal("invite assigned to missing group was accepted")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

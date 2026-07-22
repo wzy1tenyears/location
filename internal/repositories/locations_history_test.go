@@ -109,6 +109,43 @@ func TestRetainedHistoryForUsersUsesFiniteFallback(t *testing.T) {
 	}
 }
 
+func TestRetainedHistoryForUsersBoundedSinceIncludesPreWindowAnchor(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New(): %v", err)
+	}
+	defer db.Close()
+
+	since := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	inWindow := boundedHistoryModel(7, "inside")
+	inWindow.ID = 70
+	inWindow.CreatedAt = since.Add(time.Minute)
+	inWindow.UpdatedAt = inWindow.CreatedAt
+	anchor := boundedHistoryModel(7, "anchor")
+	anchor.ID = 69
+	anchor.CreatedAt = since.Add(-time.Minute)
+	anchor.UpdatedAt = anchor.CreatedAt
+
+	mock.ExpectQuery(`(?s)FROM locations l.*l\.created_at >= \?.*ORDER BY l\.created_at DESC, l\.id DESC.*LIMIT \?`).
+		WithArgs("family-a", int64(7), since, 3).
+		WillReturnRows(boundedHistoryRows(inWindow))
+	mock.ExpectQuery(`(?s)FROM locations l.*l\.created_at < \?.*ORDER BY l\.created_at DESC, l\.id DESC.*LIMIT 1`).
+		WithArgs("family-a", int64(7), since).
+		WillReturnRows(boundedHistoryRows(anchor))
+
+	repo := NewLocationRepository(db)
+	rows, err := repo.RetainedHistoryForUsersBoundedSince(context.Background(), "family-a", []int64{7}, 3, 10, 1024*1024, since)
+	if err != nil {
+		t.Fatalf("RetainedHistoryForUsersBoundedSince(): %v", err)
+	}
+	if len(rows) != 2 || rows[0].ID != 70 || rows[1].ID != 69 {
+		t.Fatalf("window rows = %#v, want in-window row followed by anchor", rows)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("window queries: %v", err)
+	}
+}
+
 func TestRetainedHistorySourceByteBudgetAcceptsExactAndRejectsOneByteOver(t *testing.T) {
 	fixture := boundedHistoryModel(7, strings.Repeat("x", 128))
 	exactBudget := locationHistorySourceBytes(fixture)

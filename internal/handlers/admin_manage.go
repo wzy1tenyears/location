@@ -25,16 +25,21 @@ type AdminManageHandler struct {
 	users              repositories.UserRepository
 	settings           repositories.SettingRepository
 	groupCodeWriteMode groupCodeWriteMode
+	events             *EventHub
 }
 
-func NewAdminManageHandler(db *sql.DB, sessions session.Reader, groupCodeBackfillEnabled bool) AdminManageHandler {
-	return AdminManageHandler{
+func NewAdminManageHandler(db *sql.DB, sessions session.Reader, groupCodeBackfillEnabled bool, hubs ...*EventHub) AdminManageHandler {
+	handler := AdminManageHandler{
 		db:                 db,
 		sessions:           sessions,
 		users:              repositories.NewUserRepository(db),
 		settings:           repositories.NewSettingRepository(db),
 		groupCodeWriteMode: groupCodeModeForBackfill(groupCodeBackfillEnabled),
 	}
+	if len(hubs) > 0 {
+		handler.events = hubs[0]
+	}
+	return handler
 }
 
 func (handler AdminManageHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +118,9 @@ func (handler AdminManageHandler) execute(r *http.Request, action string, data m
 		} else if err == nil {
 			_, err = handler.db.ExecContext(r.Context(), "UPDATE announcements SET title = ?, body = ?, is_active = ?, version = version + 1 WHERE id = ?", title, body, active, id)
 		}
+		if err == nil {
+			handler.broadcastLatestAnnouncement(r.Context())
+		}
 		return "公告已保存。", err
 	case "add_invite_code":
 		return handler.addInvite(r, data)
@@ -123,6 +131,8 @@ func (handler AdminManageHandler) execute(r *http.Request, action string, data m
 		}
 		_, err := handler.db.ExecContext(r.Context(), "UPDATE invite_codes SET note = ? WHERE id = ?", adminString(data, "note", 120), id)
 		return "邀请码备注已保存。", err
+	case "update_invite_group":
+		return handler.updateInviteGroup(r, data)
 	case "delete_invite_code":
 		id := int64FromMap(data, "invite_id", 0)
 		if id <= 0 {
@@ -172,6 +182,18 @@ func (handler AdminManageHandler) execute(r *http.Request, action string, data m
 		return handler.updateTicketStatus(r, data)
 	default:
 		return "", httpx.Unprocessable("暂不支持的后台操作。")
+	}
+}
+
+func (handler AdminManageHandler) broadcastLatestAnnouncement(ctx context.Context) {
+	if handler.events == nil {
+		return
+	}
+	var id int64
+	var version int
+	var active bool
+	if err := handler.db.QueryRowContext(ctx, "SELECT id, version, is_active FROM announcements ORDER BY id DESC LIMIT 1").Scan(&id, &version, &active); err == nil {
+		handler.events.BroadcastAnnouncement(id, version, active)
 	}
 }
 
@@ -345,9 +367,13 @@ func (handler AdminManageHandler) addInviteWithReader(ctx context.Context, data 
 	}
 	note := adminString(data, "note", 120)
 	allowGroupOwner := truthyAny(data["allow_group_owner"])
+	assignedGroupName := adminString(data, "assigned_group_name", 100)
+	if err := handler.requireExistingFamilyGroup(ctx, assignedGroupName); err != nil {
+		return "", err
+	}
 	if customCode {
-		_, err := handler.db.ExecContext(ctx, "INSERT INTO invite_codes (code, note, invite_type, allow_group_owner, max_uses) VALUES (?, ?, ?, ?, ?)",
-			code, note, inviteType, allowGroupOwner, maxUses)
+		_, err := handler.db.ExecContext(ctx, "INSERT INTO invite_codes (code, note, invite_type, allow_group_owner, max_uses, assigned_group_name) VALUES (?, ?, ?, ?, ?, ?)",
+			code, note, inviteType, allowGroupOwner, maxUses, assignedGroupName)
 		if isDuplicateKeyFor(err, "code") {
 			return "", httpx.APIError{Status: http.StatusConflict, Message: "邀请码已存在。"}
 		}
@@ -362,8 +388,8 @@ func (handler AdminManageHandler) addInviteWithReader(ctx context.Context, data 
 		if err != nil {
 			return "", fmt.Errorf("generate invite code: %w", err)
 		}
-		_, err = handler.db.ExecContext(ctx, "INSERT INTO invite_codes (code, note, invite_type, allow_group_owner, max_uses) VALUES (?, ?, ?, ?, ?)",
-			generated, note, inviteType, allowGroupOwner, maxUses)
+		_, err = handler.db.ExecContext(ctx, "INSERT INTO invite_codes (code, note, invite_type, allow_group_owner, max_uses, assigned_group_name) VALUES (?, ?, ?, ?, ?, ?)",
+			generated, note, inviteType, allowGroupOwner, maxUses, assignedGroupName)
 		if err == nil {
 			return "邀请码已添加：" + generated, nil
 		}
@@ -373,6 +399,37 @@ func (handler AdminManageHandler) addInviteWithReader(ctx context.Context, data 
 		return "", err
 	}
 	return "", fmt.Errorf("failed to allocate a unique invite code after %d attempts", groupCodeWriteMaxAttempts)
+}
+
+func (handler AdminManageHandler) updateInviteGroup(r *http.Request, data map[string]any) (string, error) {
+	id := int64FromMap(data, "invite_id", 0)
+	if id <= 0 {
+		return "", httpx.Unprocessable("邀请码不存在。")
+	}
+	groupName := adminString(data, "assigned_group_name", 100)
+	if err := handler.requireExistingFamilyGroup(r.Context(), groupName); err != nil {
+		return "", err
+	}
+	result, err := handler.db.ExecContext(r.Context(), "UPDATE invite_codes SET assigned_group_name = ? WHERE id = ?", groupName, id)
+	if err != nil {
+		return "", err
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return "", httpx.Unprocessable("邀请码不存在。")
+	}
+	return "邀请码绑定家庭组已更新。", nil
+}
+
+func (handler AdminManageHandler) requireExistingFamilyGroup(ctx context.Context, groupName string) error {
+	if strings.TrimSpace(groupName) == "" {
+		return httpx.Unprocessable("请选择邀请码绑定的家庭组。")
+	}
+	var exists int
+	err := handler.db.QueryRowContext(ctx, "SELECT 1 FROM family_groups WHERE group_name = ? LIMIT 1", groupName).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return httpx.Unprocessable("绑定的家庭组不存在。")
+	}
+	return err
 }
 
 func (handler AdminManageHandler) addUser(r *http.Request, data map[string]any) (string, error) {

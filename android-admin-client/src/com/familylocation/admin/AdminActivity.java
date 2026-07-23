@@ -94,8 +94,8 @@ public class AdminActivity extends Activity {
     private static final String KEY_ACTIVE_UPDATE_DOWNLOAD_ID = "active_update_download_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "https://example.com/";
-    private static final int APP_VERSION_CODE = 97;
-    private static final String APP_VERSION_NAME = "2.3.2";
+    private static final int APP_VERSION_CODE = 98;
+    private static final String APP_VERSION_NAME = "2.3.3";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;

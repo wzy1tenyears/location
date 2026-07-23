@@ -140,8 +140,8 @@ func Load() Config {
 			SessionLifetime:   time.Duration(envInt("LOC_SESSION_LIFETIME_SECONDS", 2592000)) * time.Second,
 		},
 		Admin: AdminConfig{
-			VersionCode: envInt("LOC_ANDROID_ADMIN_VERSION_CODE", 97),
-			VersionName: env("LOC_ANDROID_ADMIN_VERSION_NAME", "2.3.2"),
+			VersionCode: envInt("LOC_ANDROID_ADMIN_VERSION_CODE", 98),
+			VersionName: env("LOC_ANDROID_ADMIN_VERSION_NAME", "2.3.3"),
 			ForceUpdate: envBool("LOC_ANDROID_ADMIN_FORCE_UPDATE", true),
 		},
 		Auth: AuthConfig{

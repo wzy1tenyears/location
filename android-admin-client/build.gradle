@@ -11,8 +11,8 @@ android {
         applicationId = "com.familylocation.admin"
         minSdk = 29
         targetSdk = 35
-        versionCode = 97
-        versionName = "2.3.2"
+        versionCode = 98
+        versionName = "2.3.3"
     }
 
     sourceSets {

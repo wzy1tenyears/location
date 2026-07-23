@@ -1,14 +1,29 @@
 param(
-    [string]$GradleHome = $(if ($env:LOC_GRADLE_HOME) { $env:LOC_GRADLE_HOME } else { "F:\gradle-9.5.0" }),
+    [string]$GradleHome = $(if ($env:LOC_GRADLE_HOME) { $env:LOC_GRADLE_HOME } else { "" }),
     [string]$AndroidHome = $(if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { "F:\android" }),
     [switch]$Offline
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Gradle = Join-Path $GradleHome "bin\gradle.bat"
+$Gradle = ""
+if (-not [string]::IsNullOrWhiteSpace($GradleHome)) {
+    $Gradle = Join-Path $GradleHome "bin\gradle.bat"
+} else {
+    $machineGradleEntries = @(
+        ([Environment]::GetEnvironmentVariable("Path", "Machine") -split ';') |
+            Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_) -and
+                (Test-Path -LiteralPath (Join-Path $_ "gradle.bat") -PathType Leaf)
+            }
+    )
+    if ($machineGradleEntries.Count -ne 1) {
+        throw "Expected exactly one Gradle launcher in the machine Path, found $($machineGradleEntries.Count)."
+    }
+    $Gradle = Join-Path $machineGradleEntries[0] "gradle.bat"
+}
 if (-not (Test-Path -LiteralPath $Gradle -PathType Leaf)) {
-    throw "Gradle 9.5.0 launcher not found: $Gradle"
+    throw "Gradle 9.6.1 launcher not found: $Gradle"
 }
 if (-not (Test-Path -LiteralPath $AndroidHome -PathType Container)) {
     throw "Android SDK not found: $AndroidHome"
@@ -33,8 +48,8 @@ try {
         }
     }
     $versionOutput = (& $Gradle --version 2>&1) -join "`n"
-    if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch '(?m)^Gradle 9\.5\.0$') {
-        throw "The configured launcher is not Gradle 9.5.0: $Gradle"
+    if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch '(?m)^Gradle 9\.6\.1$') {
+        throw "The configured launcher is not Gradle 9.6.1: $Gradle"
     }
     $arguments = @("--no-daemon")
     if ($Offline) {

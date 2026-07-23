@@ -52,7 +52,7 @@ public class KeepAliveService extends Service {
     private static final int DEFAULT_REPORT_INTERVAL_SECONDS = 300;
     private static final int NOTIFICATION_ID = 10001;
     private static final String TAG = "位置服务";
-    private static final String USER_AGENT = "loc-app/2.3.3";
+    private static final String USER_AGENT = "loc-app/2.3.4";
     private static final JsonApiClient API_CLIENT = new JsonApiClient(USER_AGENT, 12_000, 15_000);
 
     private HandlerThread locationThread;

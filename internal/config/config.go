@@ -131,8 +131,8 @@ func Load() Config {
 		App: AppConfig{
 			Name:              env("LOC_APP_NAME", "位置"),
 			UserAgentToken:    env("LOC_APP_USER_AGENT_TOKEN", "loc-app"),
-			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 146),
-			VersionName:       env("LOC_ANDROID_VERSION_NAME", "2.3.2"),
+			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 147),
+			VersionName:       env("LOC_ANDROID_VERSION_NAME", "2.3.3"),
 			ForceUpdate:       envBool("LOC_ANDROID_FORCE_UPDATE", true),
 			DeviceCookieName:  env("LOC_DEVICE_COOKIE_NAME", "loc_device"),
 			SessionCookieName: env("LOC_SESSION_COOKIE_NAME", "family_location_session"),
@@ -140,8 +140,8 @@ func Load() Config {
 			SessionLifetime:   time.Duration(envInt("LOC_SESSION_LIFETIME_SECONDS", 2592000)) * time.Second,
 		},
 		Admin: AdminConfig{
-			VersionCode: envInt("LOC_ANDROID_ADMIN_VERSION_CODE", 96),
-			VersionName: env("LOC_ANDROID_ADMIN_VERSION_NAME", "2.3.1"),
+			VersionCode: envInt("LOC_ANDROID_ADMIN_VERSION_CODE", 97),
+			VersionName: env("LOC_ANDROID_ADMIN_VERSION_NAME", "2.3.2"),
 			ForceUpdate: envBool("LOC_ANDROID_ADMIN_FORCE_UPDATE", true),
 		},
 		Auth: AuthConfig{

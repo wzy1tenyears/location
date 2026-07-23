@@ -94,8 +94,8 @@ public class AdminActivity extends Activity {
     private static final String KEY_ACTIVE_UPDATE_DOWNLOAD_ID = "active_update_download_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "https://example.com/";
-    private static final int APP_VERSION_CODE = 96;
-    private static final String APP_VERSION_NAME = "2.3.1";
+    private static final int APP_VERSION_CODE = 97;
+    private static final String APP_VERSION_NAME = "2.3.2";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
@@ -127,6 +127,7 @@ public class AdminActivity extends Activity {
     private int currentAdminTab = ADMIN_TAB_OVERVIEW;
     private boolean inviteManagerOpen;
     private int inviteManagerScrollY;
+    private int adminDashboardScrollY;
     private ScrollView activeScrollView;
     private String logFilterGroup = "";
     private String logFilterType = "";
@@ -296,7 +297,7 @@ public class AdminActivity extends Activity {
         loginDraftUsername = username.trim();
         loginDraftPassword = password;
         setStatus("正在登录后台");
-        Log.i(TAG, "Admin login started. username=" + username.trim());
+        Log.i(TAG, "Admin login started.");
         runBackground(() -> {
             try {
                 String challengeToken = completeAppChallenge("login");
@@ -1109,6 +1110,9 @@ public class AdminActivity extends Activity {
         loadedAt.setTextColor(colorMuted());
         loadedAt.setIncludeFontPadding(false);
         card.addView(loadedAt, blockParams(12));
+        Button inviteManager = primaryButton("邀请码管理");
+        inviteManager.setOnClickListener(view -> openInviteManagerFromDashboard(response, redirectPath));
+        card.addView(inviteManager, blockParams(14));
         if (stats != null) {
             card.addView(sectionTitle("统计"), blockParams(8));
             card.addView(infoPanel(
@@ -1141,7 +1145,22 @@ public class AdminActivity extends Activity {
         card.addView(checkUpdate, blockParams(10));
         card.addView(refresh, blockParams(10));
         setScreen(card, false);
+        logViewBounds("UI_ADMIN_INVITE_ENTRY_BOUNDS", inviteManager);
+        if (activeScrollView != null && adminDashboardScrollY > 0) {
+            final int targetScrollY = adminDashboardScrollY;
+            activeScrollView.post(() -> {
+                activeScrollView.scrollTo(0, targetScrollY);
+                Log.i(TAG, "UI_ADMIN_INVITE_STATE=dashboard,scroll=" + activeScrollView.getScrollY());
+            });
+        } else {
+            Log.i(TAG, "UI_ADMIN_INVITE_STATE=dashboard,scroll=0");
+        }
         setStatus("");
+    }
+
+    private void openInviteManagerFromDashboard(JSONObject response, String redirectPath) {
+        adminDashboardScrollY = activeScrollView == null ? 0 : activeScrollView.getScrollY();
+        showInviteManager(lastAdminSummary == null ? response : lastAdminSummary, redirectPath);
     }
 
     private String storedAdminUsername() {
@@ -1498,8 +1517,8 @@ public class AdminActivity extends Activity {
         LinearLayout card = screen("邀请码管理");
         Button back = secondaryButton("返回后台首页");
         back.setOnClickListener(view -> {
+            inviteManagerScrollY = activeScrollView == null ? 0 : activeScrollView.getScrollY();
             inviteManagerOpen = false;
-            inviteManagerScrollY = 0;
             showAdminDashboard(lastAdminSummary == null ? response : lastAdminSummary, redirectPath);
         });
         card.addView(back, blockParams(12));
@@ -1508,6 +1527,8 @@ public class AdminActivity extends Activity {
         if (activeScrollView != null && inviteManagerScrollY > 0) {
             activeScrollView.post(() -> activeScrollView.scrollTo(0, inviteManagerScrollY));
         }
+        logViewBounds("UI_ADMIN_INVITE_BACK_BOUNDS", back);
+        Log.i(TAG, "UI_ADMIN_INVITE_STATE=manager");
         setStatus("");
     }
 
@@ -1567,7 +1588,7 @@ public class AdminActivity extends Activity {
                 }
             }
             Button open = secondaryButton("打开邀请码管理");
-            open.setOnClickListener(view -> showInviteManager(lastAdminSummary == null ? response : lastAdminSummary, redirectPath));
+            open.setOnClickListener(view -> openInviteManagerFromDashboard(response, redirectPath));
             panel.addView(open, blockParams(0));
             return panel;
         }
@@ -3739,6 +3760,23 @@ public class AdminActivity extends Activity {
 
         outer.addView(nav, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return outer;
+    }
+
+    private void logViewBounds(String marker, View view) {
+        if (marker == null || marker.trim().isEmpty() || view == null) {
+            return;
+        }
+        view.post(() -> {
+            if (!view.isAttachedToWindow() || view.getWidth() <= 0 || view.getHeight() <= 0) {
+                return;
+            }
+            int[] location = new int[2];
+            view.getLocationOnScreen(location);
+            Log.i(TAG, marker + "="
+                + location[0] + "," + location[1] + ","
+                + (location[0] + view.getWidth()) + ","
+                + (location[1] + view.getHeight()));
+        });
     }
 
     private View adminNavButton(String icon, String label, int tab) {

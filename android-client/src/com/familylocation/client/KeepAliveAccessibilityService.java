@@ -4,9 +4,11 @@ import android.accessibilityservice.AccessibilityService;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.provider.Settings;
+import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 
 public final class KeepAliveAccessibilityService extends AccessibilityService {
+    private static final String TAG = "FamilyLocationNative";
     private static final String PREFS = "family_location";
     private static final String KEY_USER_ROLE = "user_role";
     private static final String KEY_GROUP_NAME = "group_name";
@@ -32,7 +34,14 @@ public final class KeepAliveAccessibilityService extends AccessibilityService {
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
+        Log.i(TAG, "ACCESSIBILITY_KEEP_ALIVE_BOUND=true");
         syncLocationService();
+    }
+
+    @Override
+    public void onDestroy() {
+        Log.i(TAG, "ACCESSIBILITY_KEEP_ALIVE_BOUND=false");
+        super.onDestroy();
     }
 
     @Override

@@ -40,6 +40,10 @@ if ($adminSource -notmatch 'DEFAULT_ADMIN_USERNAME\s*=\s*"admin"' -or
     $adminSource -notmatch 'DEFAULT_SERVER_URL\s*=\s*"https://example\.com/"') {
     Fail "public admin defaults must remain generic placeholders."
 }
+$userSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $Root "android-client\src\com\familylocation\client\MainActivity.java")
+if ($userSource -notmatch 'private void showHome\(\)[\s\S]*setScreen\(card, false\);[\s\S]*appendHomeActionPanel\(\);[\s\S]*requestStartupPermissions\(\);') {
+    Fail "the user report action must render before the first location refresh finishes."
+}
 $networkConfig = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $Root "android-client\res\xml\network_security_config.xml")
 if ($networkConfig -notmatch '<base-config cleartextTrafficPermitted="false"' -or
     $networkConfig -notmatch '<domain includeSubdomains="false">ip-api\.com</domain>' -or

@@ -150,11 +150,11 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 146;
-    private static final String APP_VERSION_NAME = "2.3.2";
+    private static final int APP_VERSION_CODE = 147;
+    private static final String APP_VERSION_NAME = "2.3.3";
     private static final JsonApiClient API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 12_000, 12_000);
     private static final JsonApiClient DIAGNOSTIC_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME + " diagnostics", 1_500, 2_500);
-    private static final JsonApiClient REPORT_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 500, 750);
+    private static final JsonApiClient REPORT_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 700, 1_800);
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -218,6 +218,16 @@ public class MainActivity extends Activity {
         TimeUnit.SECONDS,
         new ArrayBlockingQueue<>(20),
         runnable -> new Thread(runnable, "loc-ip-provider-" + ipProviderThreadIndex.incrementAndGet()),
+        new ThreadPoolExecutor.AbortPolicy()
+    );
+    private final AtomicInteger locationEnrichmentThreadIndex = new AtomicInteger();
+    private final ExecutorService locationEnrichmentExecutor = new ThreadPoolExecutor(
+        1,
+        1,
+        30L,
+        TimeUnit.SECONDS,
+        new ArrayBlockingQueue<>(4),
+        runnable -> new Thread(runnable, "loc-enrichment-" + locationEnrichmentThreadIndex.incrementAndGet()),
         new ThreadPoolExecutor.AbortPolicy()
     );
     private final Object ipGeocodeCacheLock = new Object();
@@ -847,6 +857,8 @@ public class MainActivity extends Activity {
                 int reportIntervalSeconds = response.optInt("report_interval_seconds", 300);
                 runUi(() -> {
                     clearRegisterDraft();
+                    destroyManagedWebViews();
+                    activeChallengeCard = null;
                     currentUser = user;
                     persistUserSession(user, reportIntervalSeconds);
                     showHome();
@@ -898,6 +910,8 @@ public class MainActivity extends Activity {
                 Log.i(TAG, "User login API returned ok. userId=" + user.optInt("id", 0));
                 int reportIntervalSeconds = response.optInt("report_interval_seconds", 300);
                 runUi(() -> {
+                    destroyManagedWebViews();
+                    activeChallengeCard = null;
                     currentUser = user;
                     persistUserSession(user, reportIntervalSeconds);
                     showHome();
@@ -1151,6 +1165,7 @@ public class MainActivity extends Activity {
         reportButton = null;
         refreshButton = null;
         setScreen(card, false);
+        appendHomeActionPanel();
         requestStartupPermissions();
         syncKeepAliveService();
         maybeAutoShowAnnouncement();
@@ -3283,6 +3298,8 @@ public class MainActivity extends Activity {
         card.addView(checkUpdate, blockParams(14));
         card.addView(logout, blockParams(0));
         setScreen(card, false);
+        Log.i(TAG, "UI_ACCESSIBILITY_STATE=" + (accessibilityKeepAliveEnabled ? "enabled" : "disabled"));
+        logViewBounds("UI_ACCESSIBILITY_CONTROL_BOUNDS", accessibilityKeepAliveSettings);
         setStatus("");
     }
 
@@ -3341,6 +3358,7 @@ public class MainActivity extends Activity {
             details.putExtra(Intent.EXTRA_COMPONENT_NAME, component);
             details.setData(Uri.parse("package:" + getPackageName()));
             if (details.resolveActivity(getPackageManager()) != null) {
+                Log.i(TAG, "UI_ACCESSIBILITY_SETTINGS_LAUNCHED=details");
                 startActivity(details);
                 return;
             }
@@ -3348,6 +3366,7 @@ public class MainActivity extends Activity {
             Log.w(TAG, "Accessibility details settings unavailable: " + exception.getMessage());
         }
         try {
+            Log.i(TAG, "UI_ACCESSIBILITY_SETTINGS_LAUNCHED=list");
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
         } catch (Exception exception) {
             accessibilitySettingsLaunched = false;
@@ -3996,6 +4015,18 @@ public class MainActivity extends Activity {
         syncReportButtonState();
 
         addHomeActionRow(reportButton, refreshButton, 6);
+        final Button attachedReportButton = reportButton;
+        attachedReportButton.post(() -> {
+            if (attachedReportButton != reportButton || attachedReportButton.getWidth() <= 0 || attachedReportButton.getHeight() <= 0) {
+                return;
+            }
+            int[] location = new int[2];
+            attachedReportButton.getLocationOnScreen(location);
+            Log.i(TAG, "UI_HOME_REPORT_BUTTON_BOUNDS="
+                + location[0] + "," + location[1] + ","
+                + (location[0] + attachedReportButton.getWidth()) + ","
+                + (location[1] + attachedReportButton.getHeight()));
+        });
         if (guardian && multiGroup) {
             addHomeActionRow(continuousReportButton, crossGroupSyncButton, 6);
         } else if (guardian) {
@@ -4256,9 +4287,11 @@ public class MainActivity extends Activity {
             return;
         }
         WebView map = homeMapWebView;
+        boolean created = false;
         if (map == null) {
             map = locationMapWebView(records);
             homeMapWebView = map;
+            created = true;
         } else {
             ViewGroup parent = map.getParent() instanceof ViewGroup ? (ViewGroup) map.getParent() : null;
             if (parent != null) {
@@ -4272,6 +4305,8 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams params = blockParams(8);
         params.height = uiStyle.mapPreviewHeight(denseUi());
         content.addView(map, params);
+        Log.i(TAG, "UI_HOME_MAP_STATE=" + (created ? "created" : "reused")
+            + ",id=" + Integer.toHexString(System.identityHashCode(map)));
     }
 
     private void updateHomeMapWithHistory(JSONArray mapHistory) {
@@ -4513,6 +4548,9 @@ public class MainActivity extends Activity {
         if (panel == null || sources == null) {
             return;
         }
+        boolean providerEvidence = false;
+        boolean webRtcEvidence = false;
+        boolean androidEvidence = false;
         Map<String, JSONObject> rows = new LinkedHashMap<>();
         for (int index = 0; index < sources.length(); index += 1) {
             JSONObject source = sources.optJSONObject(index);
@@ -4528,6 +4566,9 @@ public class MainActivity extends Activity {
         }
         for (JSONObject source : rows.values()) {
             String type = source.optString("type", "").trim().toLowerCase(Locale.ROOT);
+            if ("webrtc".equals(type)) {
+                webRtcEvidence = true;
+            }
             if ("failed".equals(source.optString("probe_status", ""))) {
                 String reason = diagnosticFailureReasonLabel(source.optString("failure_reason", ""));
                 panel.addView(homeLatestLine(
@@ -4540,12 +4581,22 @@ public class MainActivity extends Activity {
             String label = "ip".equals(type) ? "IP 探测地址" : "WebRTC 探测地址";
             String provider = source.optString("provider", "").trim();
             String suffix = provider.isEmpty() ? "" : "（" + provider + "）";
+            if (provider.contains("安卓")) {
+                androidEvidence = true;
+            }
             panel.addView(homeLatestLine(label + "：" + diagnosticSourceAddress(source) + suffix, false), blockParams(0));
             String attempts = providerAttemptSummary(source);
             if (!attempts.isEmpty()) {
+                providerEvidence = true;
+                if (attempts.contains("安卓")) {
+                    androidEvidence = true;
+                }
                 panel.addView(homeLatestLine("供应商探测：" + attempts, false), blockParams(0));
             }
         }
+        Log.i(TAG, "UI_LOCATION_EVIDENCE=provider:" + providerEvidence
+            + ",webrtc:" + webRtcEvidence
+            + ",android:" + androidEvidence);
     }
 
     private String providerAttemptSummary(JSONObject source) {
@@ -6009,9 +6060,16 @@ public class MainActivity extends Activity {
                 if (!reportAttemptGate.isActive(attemptToken)) {
                     return;
                 }
+                Log.i(TAG, "LOCATION_REPORT_OUTCOME=uploaded");
                 List<String> extraGroupNames = selectedCrossSyncGroups();
                 extraGroupNames.remove(reportGroupName);
                 int pendingSyncCount = extraGroupNames.size();
+                Log.i(TAG, "LOCATION_ENRICH_DISPATCH");
+                scheduleLocationDiagnosticsEnrichment(
+                    reportGroupName,
+                    response.optInt("location_id", 0),
+                    location
+                );
                 runUi(() -> {
                     String message = response.optString("message", "");
                     if (pendingSyncCount > 0) {
@@ -6021,11 +6079,6 @@ public class MainActivity extends Activity {
                         refreshLocations();
                     }
                 });
-                scheduleLocationDiagnosticsEnrichment(
-                    reportGroupName,
-                    response.optInt("location_id", 0),
-                    location
-                );
                 if (extraGroupNames.isEmpty()) {
                     return;
                 }
@@ -6053,6 +6106,7 @@ public class MainActivity extends Activity {
                     refreshLocations();
                 });
             } catch (Throwable throwable) {
+                Log.w(TAG, "LOCATION_REPORT_OUTCOME=failed reason=" + safeThrowableMessage(throwable));
                 runUi(() -> finishReport(attemptToken, safeThrowableMessage(throwable)));
             }
         });
@@ -6222,15 +6276,28 @@ public class MainActivity extends Activity {
         int locationId,
         android.location.Location location
     ) {
-        if (locationId <= 0 || location == null || groupUsesP2P(groupName)) {
+        if (locationId <= 0) {
+            Log.i(TAG, "LOCATION_ENRICH_SKIPPED=missing_location_id");
+            return;
+        }
+        if (location == null) {
+            Log.i(TAG, "LOCATION_ENRICH_SKIPPED=missing_location");
+            return;
+        }
+        if (groupUsesP2P(groupName)) {
+            Log.i(TAG, "LOCATION_ENRICH_SKIPPED=p2p_group");
             return;
         }
         android.location.Location snapshot = new android.location.Location(location);
-        runBackground(() -> {
+        try {
+            locationEnrichmentExecutor.execute(() -> {
             long startedAt = android.os.SystemClock.elapsedRealtime();
+            String outcome = "started";
+            Log.i(TAG, "LOCATION_ENRICH_START");
             try {
                 JSONObject diagnostics = buildAddressDiagnostics(0L, snapshot, ADDRESS_ENRICHMENT_BUDGET_MS);
                 if (diagnostics == null) {
+                    outcome = "no_diagnostics";
                     return;
                 }
                 String fallbackAddress = formatCoordinate(snapshot.getLatitude()) + ", "
@@ -6238,6 +6305,7 @@ public class MainActivity extends Activity {
                 JSONArray sources = diagnostics.optJSONArray("sources");
                 if (fallbackAddress.equals(diagnostics.optString("preferred_address", ""))
                     && (sources == null || sources.length() <= 1)) {
+                    outcome = "fallback_only";
                     return;
                 }
                 JSONObject payload = new JSONObject()
@@ -6245,8 +6313,7 @@ public class MainActivity extends Activity {
                     .put("location_id", locationId)
                     .put("address_diagnostics", diagnostics);
                 postReportJson(ApiPaths.REPORT_LOCATION, payload);
-                long elapsedMs = android.os.SystemClock.elapsedRealtime() - startedAt;
-                Log.i(TAG, "PERF_LOCATION_ENRICH_MS=" + Math.max(0L, elapsedMs));
+                outcome = "uploaded";
                 runUi(() -> {
                     if (currentUser != null
                         && groupName.equals(currentGroupName())
@@ -6255,9 +6322,17 @@ public class MainActivity extends Activity {
                     }
                 });
             } catch (Throwable throwable) {
+                outcome = "failed";
                 Log.w(TAG, "Deferred location diagnostics failed: " + safeThrowableMessage(throwable));
+            } finally {
+                long elapsedMs = android.os.SystemClock.elapsedRealtime() - startedAt;
+                Log.i(TAG, "PERF_LOCATION_ENRICH_MS=" + Math.max(0L, elapsedMs));
+                Log.i(TAG, "LOCATION_ENRICH_OUTCOME=" + outcome);
             }
-        });
+            });
+        } catch (RejectedExecutionException exception) {
+            Log.w(TAG, "Deferred location diagnostics queue is busy.");
+        }
     }
 
     private JSONObject reverseAddressByAmapWebView(double latitude, double longitude, long attemptToken) {
@@ -8517,6 +8592,8 @@ public class MainActivity extends Activity {
         syncReportButtonState();
         if (accessibilitySettingsLaunched) {
             accessibilitySettingsLaunched = false;
+            Log.i(TAG, "UI_ACCESSIBILITY_SETTINGS_RETURN="
+                + (KeepAliveAccessibilityService.isEnabled(this) ? "enabled" : "disabled"));
             syncKeepAliveService();
             if (currentUser != null && currentTab == TAB_MINE) {
                 showSettings();
@@ -8549,6 +8626,10 @@ public class MainActivity extends Activity {
         cancelActiveReportForBackground();
         restoreHomeMapOnResume = restoreHomeMapOnResume
             || (currentUser != null && currentTab == TAB_POSITION && homeMapWebView != null);
+        if (homeMapWebView != null) {
+            Log.i(TAG, "UI_HOME_MAP_STATE=released,id="
+                + Integer.toHexString(System.identityHashCode(homeMapWebView)));
+        }
         frontendRuntime.onStop();
         homeMapWebView = null;
         eventStreamWebView = null;
@@ -8562,6 +8643,7 @@ public class MainActivity extends Activity {
         backgroundExecutor.shutdownNow();
         addressProbeExecutor.shutdownNow();
         ipProviderExecutor.shutdownNow();
+        locationEnrichmentExecutor.shutdownNow();
         destroyManagedWebViews();
         if (updateReceiver != null) {
             try {
@@ -9070,7 +9152,25 @@ public class MainActivity extends Activity {
 
         item.addView(iconView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         item.addView(labelView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        logViewBounds("UI_NAV_BUTTON_BOUNDS_" + tab, item);
         return item;
+    }
+
+    private void logViewBounds(String marker, View view) {
+        if (marker == null || marker.trim().isEmpty() || view == null) {
+            return;
+        }
+        view.post(() -> {
+            if (!view.isAttachedToWindow() || view.getWidth() <= 0 || view.getHeight() <= 0) {
+                return;
+            }
+            int[] location = new int[2];
+            view.getLocationOnScreen(location);
+            Log.i(TAG, marker + "="
+                + location[0] + "," + location[1] + ","
+                + (location[0] + view.getWidth()) + ","
+                + (location[1] + view.getHeight()));
+        });
     }
 
     private void showPopupDialog(String title, String[][] sections, String primaryText, Runnable primaryAction, String secondaryText) {
@@ -9154,6 +9254,9 @@ public class MainActivity extends Activity {
             int width = Math.min(getResources().getDisplayMetrics().widthPixels - dp(44), dp(560));
             shownWindow.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
             animateDialog(shownWindow.getDecorView());
+        }
+        if ("无障碍保活".equals(title) && "前往系统设置".equals(primaryText)) {
+            logViewBounds("UI_ACCESSIBILITY_DIALOG_ACTION_BOUNDS", primary);
         }
     }
 

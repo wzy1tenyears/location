@@ -109,8 +109,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 87;
-    private static final String APP_VERSION_NAME = "2.1.1";
+    private static final int APP_VERSION_CODE = 88;
+    private static final String APP_VERSION_NAME = "2.1.2";
     private static final String PREFS = "family_location";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_USER_ROLE = "user_role";
@@ -730,9 +730,13 @@ public class MainActivity extends Activity {
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setUserAgentString(settings.getUserAgentString() + " loc-app/" + APP_VERSION_NAME);
+        TextView challengeStatus = body("请完成 Cloudflare 验证，完成后会自动继续登录。\n正在加载验证…");
+        challengeStatus.setGravity(Gravity.CENTER);
+        statusView = challengeStatus;
         challengeView.addJavascriptInterface(new Object() {
             @JavascriptInterface
             public void complete() {
+                runUi(() -> challengeStatus.setText("请完成 Cloudflare 验证，完成后会自动继续登录。\n验证已完成，正在继续登录…"));
                 challengeCompleted.countDown();
             }
         }, "LocChallenge");
@@ -744,26 +748,43 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                challengeStatus.setText("请完成 Cloudflare 验证，完成后会自动继续登录。\n正在加载验证…");
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
                 captureWebViewCookies(url);
+                if (challengeCompleted.getCount() > 0) {
+                    challengeStatus.setText("请完成 Cloudflare 验证，完成后会自动继续登录。\n若验证未显示，可点“重新加载验证”。");
+                }
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || request == null || request.isForMainFrame()) {
+                    challengeStatus.setText("请完成 Cloudflare 验证，完成后会自动继续登录。\n验证加载失败，请重新加载验证。");
+                }
             }
 
             @Override
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                challengeStatus.setText("请完成 Cloudflare 验证，完成后会自动继续登录。\n验证视图已重启，请重新加载验证。");
                 return handleWebViewRendererGone(view, "");
             }
         });
+        card.addView(challengeStatus, blockParams(10));
         challengeView.loadUrl(challengeUrl);
         LinearLayout.LayoutParams params = blockParams(10);
         params.height = dp(220);
         card.addView(challengeView, params);
-        Button back = secondaryButton("返回登录 / 修改密码");
-        back.setOnClickListener(view -> {
-            if (onBack != null) {
-                onBack.run();
-            }
+        Button reload = secondaryButton("重新加载验证");
+        reload.setOnClickListener(view -> {
+            challengeStatus.setText("请完成 Cloudflare 验证，完成后会自动继续登录。\n正在重新加载验证…");
+            syncCookiesToWebView(challengeUrl);
+            challengeView.loadUrl(challengeUrl);
         });
-        card.addView(back, blockParams(0));
+        card.addView(reload, blockParams(0));
         setScreen(card, true);
     }
 

@@ -188,9 +188,12 @@ $AdminUpdateApiText = Get-Content -Raw -Encoding UTF8 -LiteralPath $AdminUpdateA
 $AdminApkApiText = Get-Content -Raw -Encoding UTF8 -LiteralPath $AdminApkApi
 
 # Public builds must not report installed package names or embed private endpoints.
-Assert-Contains 'User manifest' $UserManifestText 'android:versionCode="87"' 'the accessibility keep-alive client release must use versionCode 87.'
-Assert-Contains 'User app source' $UserMainText 'APP_VERSION_CODE = 87;' 'the client update constant must match the manifest.'
-Assert-Contains 'PHP update gate' $PrivateConfigText 'ANDROID_VERSION_CODE = 87;' 'the server update gate must match the manifest.'
+Assert-Contains 'User manifest' $UserManifestText 'android:versionCode="88"' 'the challenge UI client release must use versionCode 88.'
+Assert-Contains 'User app source' $UserMainText 'APP_VERSION_CODE = 88;' 'the client update constant must match the manifest.'
+Assert-Contains 'PHP update gate' $PrivateConfigText 'ANDROID_VERSION_CODE = 88;' 'the server update gate must match the manifest.'
+Assert-Contains 'User app source' $UserMainText '请完成 Cloudflare 验证，完成后会自动继续登录。\\n' 'challenge state must be shown in the top prompt.'
+Assert-Contains 'User app source' $UserMainText 'secondaryButton\("重新加载验证"\)' 'challenge UI must retain the reload action.'
+Assert-NotContains 'User app source' $UserMainText '返回登录 / 修改密码' 'the challenge UI must not expose the removed login/password-return action.'
 Assert-Contains 'User manifest' $UserManifestText 'android:name="\.KeepAliveAccessibilityService"[\s\S]*android:exported="true"[\s\S]*android:permission="android\.permission\.BIND_ACCESSIBILITY_SERVICE"' 'the keep-alive accessibility service must be protected by the system binding permission.'
 Assert-Contains 'User manifest' $UserManifestText 'android:name="android\.accessibilityservice"[\s\S]*android:resource="@xml/accessibility_keep_alive_service"' 'the keep-alive accessibility service must use restricted metadata.'
 Assert-Contains 'Accessibility service config' $AccessibilityServiceConfigText 'android:packageNames="com\.familylocation\.client"' 'accessibility events must be scoped to this app.'
@@ -281,7 +284,7 @@ if ((Get-Content -Raw -Encoding UTF8 -LiteralPath $AdminServerUrl).Trim() -ne ""
     Fail "public admin server-url.txt must be empty by default."
 }
 foreach ($credentialName in @('DB_PASS', 'ADMIN_PASSWORD', 'APP_USER_AGENT_TOKEN')) {
-    Assert-Contains 'PHP public config' $PrivateConfigText ("(?m)^const[ \t]+" + [regex]::Escape($credentialName) + "[ \t]*=[ \t]*'';[ \t]*$") "public default must be empty: $credentialName"
+    Assert-Contains 'PHP public config' $PrivateConfigText ("(?m)^const[ \t]+" + [regex]::Escape($credentialName) + "[ \t]*=[ \t]*'';[ \t]*\r?$") "public default must be empty: $credentialName"
 }
 Assert-MatchCount 'PHP app-token guard' $BootstrapText '\$token === ''''' 2 'both API and WebView app-token guards must fail closed when the token is empty.'
 Assert-Contains 'PHP app-token guard' $BootstrapText 'App client token is not configured\.' 'an empty app token must return a configuration error.'

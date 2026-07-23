@@ -32,20 +32,60 @@ func allowProviderFetch(_ context.Context, _ string) error {
 	return nil
 }
 
-func TestLookupIPGeoDisablesCleartextIPAPI(t *testing.T) {
+func TestLookupIPGeoUsesFixedCleartextIPAPIWhenExplicitlyEnabled(t *testing.T) {
 	var calls atomic.Int32
-	client := &http.Client{Transport: ipGeoRoundTripFunc(func(_ *http.Request) (*http.Response, error) {
+	var budgetCalls atomic.Int32
+	client := &http.Client{Transport: ipGeoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		calls.Add(1)
-		return ipGeoJSONResponse(`{"status":"success"}`), nil
+		if request.URL.Scheme != "http" || request.URL.Hostname() != "ip-api.com" || request.URL.Path != "/json/8.8.8.8" {
+			t.Fatalf("outbound URL = %s, want fixed HTTP ip-api host and IP path", request.URL)
+		}
+		return ipGeoJSONResponse(`{"status":"success","country":"中国","regionName":"广东省","city":"广州市","lat":23.1,"lon":113.2}`), nil
 	})}
 	service := newIPGeoService(client, time.Hour, 32)
-
-	payload, ok, err := service.lookupIPGeoWithBudget(context.Background(), "8.8.8.8", "ip-api", config.ExternalConfig{}, allowProviderFetch)
-	if err != nil || ok || payload != nil {
-		t.Fatalf("lookupIPGeo(ip-api) = %#v, %v, %v; want disabled provider", payload, ok, err)
+	budget := func(_ context.Context, provider string) error {
+		budgetCalls.Add(1)
+		if provider != "ip-api" {
+			t.Fatalf("budget provider = %q, want ip-api", provider)
+		}
+		return nil
 	}
-	if calls.Load() != 0 {
-		t.Fatalf("disabled ip-api provider made %d outbound requests", calls.Load())
+
+	payload, ok, err := service.lookupIPGeoWithBudget(context.Background(), "8.8.8.8", "ip-api", config.ExternalConfig{}, budget)
+	if err != nil || !ok || payload["city"] != "广州市" {
+		t.Fatalf("lookupIPGeo(ip-api) = %#v, %v, %v", payload, ok, err)
+	}
+	if calls.Load() != 1 || budgetCalls.Load() != 1 {
+		t.Fatalf("ip-api calls/budget = %d/%d, want 1/1", calls.Load(), budgetCalls.Load())
+	}
+}
+
+func TestLookupPublicIPGeoProvidersNormalizeResponses(t *testing.T) {
+	tests := []struct {
+		provider string
+		host     string
+		body     string
+		wantCity string
+	}{
+		{provider: "uapis", host: "uapis.cn", body: `{"ip":"8.8.8.8","region":"中国 广东 广州","latitude":23.1,"longitude":113.2}`, wantCity: "广州"},
+		{provider: "baidu", host: "opendata.baidu.com", body: `{"status":"0","data":[{"location":"中国广东省广州市 电信"}]}`, wantCity: "广州市"},
+		{provider: "iping", host: "api.iping.cc", body: `{"code":200,"data":{"ip":"8.8.8.8","country":"中国","region":"广东省","city":"广州市","latitude":"23.1","longitude":"113.2"}}`, wantCity: "广州市"},
+		{provider: "xxapi", host: "v2.xxapi.cn", body: `{"code":200,"data":{"address":"中国广东省广州市","lat":"23.1","lng":"113.2"}}`, wantCity: "广州市"},
+	}
+	for _, test := range tests {
+		t.Run(test.provider, func(t *testing.T) {
+			client := &http.Client{Transport: ipGeoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Scheme != "https" || request.URL.Hostname() != test.host {
+					t.Fatalf("outbound URL = %s, want HTTPS %s", request.URL, test.host)
+				}
+				return ipGeoJSONResponse(test.body), nil
+			})}
+			service := newIPGeoService(client, time.Hour, 32)
+			payload, ok, err := service.lookupIPGeoWithBudget(context.Background(), "8.8.8.8", test.provider, config.ExternalConfig{}, allowProviderFetch)
+			if err != nil || !ok || payload["city"] != test.wantCity || payload["source_region"] != "server" {
+				t.Fatalf("lookup %s = %#v, %v, %v", test.provider, payload, ok, err)
+			}
+		})
 	}
 }
 
@@ -360,5 +400,11 @@ func TestValidateIPGeoEndpointRejectsUntrustedTargets(t *testing.T) {
 	}
 	if err := validateIPGeoEndpoint("https://api.ipdata.co/8.8.8.8"); err != nil {
 		t.Fatalf("validateIPGeoEndpoint(allowed) error = %v", err)
+	}
+	if err := validateIPGeoEndpoint("http://ip-api.com/json/8.8.8.8"); err != nil {
+		t.Fatalf("validateIPGeoEndpoint(explicit HTTP ip-api) error = %v", err)
+	}
+	if err := validateIPGeoEndpoint("https://ip-api.com/json/8.8.8.8"); err == nil {
+		t.Fatal("unexpected ip-api HTTPS transport succeeded")
 	}
 }

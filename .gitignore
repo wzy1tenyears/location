@@ -3,3 +3,17 @@
 /bin/
 /tmp/
 .env
+/.gradle-user-home/
+/.gradle/
+/.android-home/
+/.task-tmp/
+/.go-work/
+/**/build/
+*.apk
+*.aab
+*.jks
+*.keystore
+*.pem
+*.key
+*.p12
+*.pfx

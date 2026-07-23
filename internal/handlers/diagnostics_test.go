@@ -79,10 +79,45 @@ func TestDiagnosticProviderQuotaRejectsExhaustedUser(t *testing.T) {
 	}
 }
 
+func TestValidateIPGeoProviderReportsSafeAvailabilityReason(t *testing.T) {
+	cfg := config.ExternalConfig{
+		IP2LocationKey: "configured",
+		IPDataKey:      "configured",
+		IPRegistryKey:  "configured",
+	}
+	if provider, err := validateIPGeoProvider(cfg, " IPDATA "); err != nil || provider != "ipdata" {
+		t.Fatalf("validate configured provider = %q, %v; want ipdata", provider, err)
+	}
+	for _, provider := range []string{"ip-api", "uapis", "baidu", "iping", "xxapi"} {
+		if normalized, err := validateIPGeoProvider(cfg, provider); err != nil || normalized != provider {
+			t.Fatalf("validate public provider %q = %q, %v", provider, normalized, err)
+		}
+	}
+
+	tests := []struct {
+		name     string
+		cfg      config.ExternalConfig
+		provider string
+		code     string
+	}{
+		{name: "missing key", cfg: config.ExternalConfig{}, provider: "ip2location", code: "not_configured"},
+		{name: "unsupported", cfg: cfg, provider: "unknown", code: "unsupported_provider"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := validateIPGeoProvider(test.cfg, test.provider)
+			var apiErr httpx.APIError
+			if !errors.As(err, &apiErr) || apiErr.Code != test.code {
+				t.Fatalf("validateIPGeoProvider() error = %#v, want code %q", err, test.code)
+			}
+		})
+	}
+}
+
 func TestDiagnosticEndpointQuotaAllowsSupportedAndroidCadence(t *testing.T) {
 	limits := &diagnosticCountingRateLimiter{}
 	handler := DiagnosticHandler{rates: limits}
-	const supportedCalls = 8 * 60
+	const supportedCalls = 9 * 60
 	if diagnosticProviderQuotaMaxHits <= supportedCalls {
 		t.Fatalf("endpoint quota = %d, must exceed supported %d calls/hour", diagnosticProviderQuotaMaxHits, supportedCalls)
 	}
@@ -180,6 +215,9 @@ func TestDiagnosticProviderMissQuotaFailsClosedWithoutTrustedConfig(t *testing.T
 	var apiErr httpx.APIError
 	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable {
 		t.Fatalf("missing provider quota error = %#v, want HTTP 503", err)
+	}
+	if apiErr.Code != "quota_unconfigured" {
+		t.Fatalf("missing provider quota code = %q, want quota_unconfigured", apiErr.Code)
 	}
 	if len(limits.calls) != 0 {
 		t.Fatalf("missing provider quota made %d rate-limit calls", len(limits.calls))

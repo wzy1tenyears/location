@@ -27,6 +27,11 @@ var ipGeoAllowedHosts = map[string]struct{}{
 	"api.ipdata.co":      {},
 	"api.ipinfo.io":      {},
 	"api.ipregistry.co":  {},
+	"api.iping.cc":       {},
+	"ip-api.com":         {},
+	"opendata.baidu.com": {},
+	"uapis.cn":           {},
+	"v2.xxapi.cn":        {},
 }
 
 type ipGeoCacheEntry struct {
@@ -100,8 +105,40 @@ func (service *ipGeoService) lookupIPGeoWithBudget(ctx context.Context, ip strin
 
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "ip-api":
-		// The free ip-api endpoint does not support TLS, so it is intentionally unavailable.
-		return nil, false, nil
+		return service.cached(ctx, "ip-api|"+ip, func(ctx context.Context) (IPGeoPayload, bool, error) {
+			if err := authorizeProviderFetch(ctx, budget, "ip-api"); err != nil {
+				return nil, false, err
+			}
+			return service.lookupIPAPI(ctx, ip)
+		})
+	case "uapis":
+		return service.cached(ctx, "uapis|"+ip, func(ctx context.Context) (IPGeoPayload, bool, error) {
+			if err := authorizeProviderFetch(ctx, budget, "uapis"); err != nil {
+				return nil, false, err
+			}
+			return service.lookupUAPIs(ctx, ip)
+		})
+	case "baidu":
+		return service.cached(ctx, "baidu|"+ip, func(ctx context.Context) (IPGeoPayload, bool, error) {
+			if err := authorizeProviderFetch(ctx, budget, "baidu"); err != nil {
+				return nil, false, err
+			}
+			return service.lookupBaiduIP(ctx, ip)
+		})
+	case "iping":
+		return service.cached(ctx, "iping|"+ip, func(ctx context.Context) (IPGeoPayload, bool, error) {
+			if err := authorizeProviderFetch(ctx, budget, "iping"); err != nil {
+				return nil, false, err
+			}
+			return service.lookupIPing(ctx, ip)
+		})
+	case "xxapi":
+		return service.cached(ctx, "xxapi|"+ip, func(ctx context.Context) (IPGeoPayload, bool, error) {
+			if err := authorizeProviderFetch(ctx, budget, "xxapi"); err != nil {
+				return nil, false, err
+			}
+			return service.lookupXXAPI(ctx, ip)
+		})
 	case "ip2location":
 		if strings.TrimSpace(cfg.IP2LocationKey) == "" {
 			return nil, false, nil
@@ -160,13 +197,14 @@ func (service *ipGeoService) lookupIPInfoLiteWithBudget(ctx context.Context, ip 
 		}
 
 		return IPGeoPayload{
-			"ip":        ip,
-			"country":   stringValue(data, "country", "country_code"),
-			"region":    stringValue(data, "region"),
-			"city":      stringValue(data, "city"),
-			"latitude":  numericOrNil(data["latitude"]),
-			"longitude": numericOrNil(data["longitude"]),
-			"provider":  "IPinfo Lite",
+			"ip":            ip,
+			"country":       stringValue(data, "country", "country_code"),
+			"region":        stringValue(data, "region"),
+			"city":          stringValue(data, "city"),
+			"latitude":      numericOrNil(data["latitude"]),
+			"longitude":     numericOrNil(data["longitude"]),
+			"provider":      "IPinfo Lite",
+			"source_region": "server",
 		}, true, nil
 	})
 }
@@ -190,6 +228,104 @@ func (service *ipGeoService) lookupIP2Location(ctx context.Context, ip string, k
 		"isp": data["isp"],
 		"org": data["as"],
 	}), true, nil
+}
+
+func (service *ipGeoService) lookupIPAPI(ctx context.Context, ip string) (IPGeoPayload, bool, error) {
+	var data map[string]any
+	endpoint := "http://ip-api.com/json/" + url.PathEscape(ip) + "?lang=zh-CN"
+	if err := service.getJSON(ctx, endpoint, &data); err != nil {
+		return nil, false, err
+	}
+	if !strings.EqualFold(stringValue(data, "status"), "success") {
+		return nil, false, nil
+	}
+	payload := ipGeoPayload(ip, "ip-api", data["country"], data["regionName"], data["city"], data["lat"], data["lon"], map[string]any{
+		"asn": data["as"], "isp": data["isp"], "org": data["org"], "mobile_network": data["mobile"],
+	})
+	payload["postal_code"] = stringValue(data, "zip")
+	return payload, true, nil
+}
+
+func (service *ipGeoService) lookupUAPIs(ctx context.Context, ip string) (IPGeoPayload, bool, error) {
+	var data map[string]any
+	endpoint := "https://uapis.cn/api/v1/network/ipinfo?ip=" + url.QueryEscape(ip)
+	if err := service.getJSON(ctx, endpoint, &data); err != nil {
+		return nil, false, err
+	}
+	if stringValue(data, "ip") == "" {
+		return nil, false, nil
+	}
+	country, region, city := splitIPGeoRegionText(stringValue(data, "region"))
+	payload := ipGeoPayload(ip, "UApi", country, region, city, data["latitude"], data["longitude"], map[string]any{
+		"asn": data["asn"], "isp": data["isp"], "org": data["llc"],
+	})
+	payload["address"] = stringValue(data, "region")
+	return payload, true, nil
+}
+
+func (service *ipGeoService) lookupBaiduIP(ctx context.Context, ip string) (IPGeoPayload, bool, error) {
+	var data map[string]any
+	endpoint := "https://opendata.baidu.com/api.php?query=" + url.QueryEscape(ip) + "&co=&resource_id=6086&oe=utf8"
+	if err := service.getJSON(ctx, endpoint, &data); err != nil {
+		return nil, false, err
+	}
+	items, ok := data["data"].([]any)
+	if !ok || len(items) == 0 {
+		return nil, false, nil
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		return nil, false, nil
+	}
+	address := stringValue(item, "location", "address")
+	if address == "" {
+		return nil, false, nil
+	}
+	country, region, city := splitIPGeoRegionText(address)
+	payload := ipGeoPayload(ip, "百度开放数据", country, region, city, nil, nil, map[string]any{"isp": item["isp"]})
+	payload["address"] = address
+	return payload, true, nil
+}
+
+func (service *ipGeoService) lookupIPing(ctx context.Context, ip string) (IPGeoPayload, bool, error) {
+	var response map[string]any
+	endpoint := "https://api.iping.cc/v1/query?ip=" + url.QueryEscape(ip) + "&language=zh"
+	if err := service.getJSON(ctx, endpoint, &response); err != nil {
+		return nil, false, err
+	}
+	if fmt.Sprint(response["code"]) != "200" {
+		return nil, false, nil
+	}
+	data := nestedMap(response, "data")
+	if stringValue(data, "ip") == "" {
+		return nil, false, nil
+	}
+	payload := ipGeoPayload(ip, "IPing", data["country"], data["region"], data["city"], data["latitude"], data["longitude"], map[string]any{
+		"asn": data["asn"], "isp": data["isp"], "org": firstAny(data["company"], data["as_owner"]),
+	})
+	payload["proxy"] = stringValue(data, "is_proxy")
+	payload["risk_tag"] = stringValue(data, "risk_tag")
+	return payload, true, nil
+}
+
+func (service *ipGeoService) lookupXXAPI(ctx context.Context, ip string) (IPGeoPayload, bool, error) {
+	var response map[string]any
+	endpoint := "https://v2.xxapi.cn/api/ip?ip=" + url.QueryEscape(ip)
+	if err := service.getJSON(ctx, endpoint, &response); err != nil {
+		return nil, false, err
+	}
+	if fmt.Sprint(response["code"]) != "200" {
+		return nil, false, nil
+	}
+	data := nestedMap(response, "data")
+	address := stringValue(data, "address")
+	if address == "" {
+		return nil, false, nil
+	}
+	country, region, city := splitIPGeoRegionText(address)
+	payload := ipGeoPayload(ip, "XXAPI", country, region, city, data["lat"], data["lng"], map[string]any{"isp": data["isp"]})
+	payload["address"] = address
+	return payload, true, nil
 }
 
 func (service *ipGeoService) lookupIPData(ctx context.Context, ip string, key string) (IPGeoPayload, bool, error) {
@@ -323,7 +459,11 @@ func validateIPGeoEndpoint(endpoint string) error {
 	}
 	host := strings.ToLower(parsed.Hostname())
 	_, allowed := ipGeoAllowedHosts[host]
-	if parsed.Scheme != "https" || !allowed || parsed.User != nil || (parsed.Port() != "" && parsed.Port() != "443") {
+	trustedTransport := parsed.Scheme == "https" && (parsed.Port() == "" || parsed.Port() == "443")
+	if host == "ip-api.com" {
+		trustedTransport = parsed.Scheme == "http" && (parsed.Port() == "" || parsed.Port() == "80")
+	}
+	if !trustedTransport || !allowed || parsed.User != nil {
 		return fmt.Errorf("untrusted IP geolocation endpoint")
 	}
 	return nil
@@ -366,7 +506,70 @@ func ipGeoPayload(ip string, provider string, country any, region any, city any,
 		"org":            org,
 		"carrier":        carrier,
 		"mobile_network": mobileNetwork,
+		"source_region":  "server",
 	}
+}
+
+func splitIPGeoRegionText(value string) (string, string, string) {
+	text := strings.TrimSpace(strings.NewReplacer(",", " ", "，", " ", "|", " ").Replace(value))
+	fields := strings.Fields(text)
+	if len(fields) >= 3 && isIPGeoCountryToken(fields[0]) {
+		return fields[0], fields[1], strings.Join(fields[2:], " ")
+	}
+	if len(fields) == 2 && isIPGeoCountryToken(fields[0]) {
+		return fields[0], fields[1], ""
+	}
+	country := ""
+	rest := text
+	for _, prefix := range []string{"中国", "美国", "英国", "日本", "韩国", "加拿大", "法国", "德国"} {
+		if strings.HasPrefix(rest, prefix) {
+			country = prefix
+			rest = strings.TrimSpace(strings.TrimPrefix(rest, prefix))
+			break
+		}
+	}
+	region, remainder := takeIPGeoPlacePart(rest, []string{"特别行政区", "自治区", "省"})
+	if region == "" {
+		for _, municipality := range []string{"北京市", "上海市", "天津市", "重庆市"} {
+			if strings.HasPrefix(rest, municipality) {
+				region = municipality
+				remainder = strings.TrimPrefix(rest, municipality)
+				break
+			}
+		}
+	}
+	city, _ := takeIPGeoPlacePart(remainder, []string{"自治州", "地区", "市", "盟"})
+	if region == "" {
+		region = rest
+	}
+	return country, region, city
+}
+
+func isIPGeoCountryToken(value string) bool {
+	for _, country := range []string{"中国", "美国", "英国", "日本", "韩国", "加拿大", "法国", "德国"} {
+		if value == country {
+			return true
+		}
+	}
+	return false
+}
+
+func takeIPGeoPlacePart(value string, suffixes []string) (string, string) {
+	best := -1
+	bestLength := 0
+	for _, suffix := range suffixes {
+		if index := strings.Index(value, suffix); index >= 0 {
+			end := index + len(suffix)
+			if best < 0 || end < best {
+				best = end
+				bestLength = end
+			}
+		}
+	}
+	if best < 0 {
+		return "", value
+	}
+	return strings.TrimSpace(value[:bestLength]), strings.TrimSpace(value[bestLength:])
 }
 
 func numericOrNil(value any) any {

@@ -82,6 +82,11 @@ var defaultIPGeoProviderQuotas = map[string]IPGeoProviderQuota{
 	"ip2location": {MaxRequests: 1000, ReserveRequests: 500, UserMaxMisses: 50, Window: 30 * 24 * time.Hour},
 	"ipdata":      {MaxRequests: 200, ReserveRequests: 100, UserMaxMisses: 25, Window: 24 * time.Hour},
 	"ipregistry":  {MaxRequests: 1000, ReserveRequests: 500, UserMaxMisses: 50, Window: 30 * 24 * time.Hour},
+	"ip-api":      {MaxRequests: 45, ReserveRequests: 10, UserMaxMisses: 5, Window: time.Minute},
+	"uapis":       {MaxRequests: 200, ReserveRequests: 50, UserMaxMisses: 20, Window: 24 * time.Hour},
+	"baidu":       {MaxRequests: 1000, ReserveRequests: 100, UserMaxMisses: 50, Window: 24 * time.Hour},
+	"iping":       {MaxRequests: 1000, ReserveRequests: 100, UserMaxMisses: 50, Window: 24 * time.Hour},
+	"xxapi":       {MaxRequests: 5000, ReserveRequests: 500, UserMaxMisses: 100, Window: 24 * time.Hour},
 }
 
 func (quota IPGeoProviderQuota) AvailableRequests() int {
@@ -126,8 +131,8 @@ func Load() Config {
 		App: AppConfig{
 			Name:              env("LOC_APP_NAME", "位置"),
 			UserAgentToken:    env("LOC_APP_USER_AGENT_TOKEN", "loc-app"),
-			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 144),
-			VersionName:       env("LOC_ANDROID_VERSION_NAME", "2.3.0"),
+			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 146),
+			VersionName:       env("LOC_ANDROID_VERSION_NAME", "2.3.2"),
 			ForceUpdate:       envBool("LOC_ANDROID_FORCE_UPDATE", true),
 			DeviceCookieName:  env("LOC_DEVICE_COOKIE_NAME", "loc_device"),
 			SessionCookieName: env("LOC_SESSION_COOKIE_NAME", "family_location_session"),
@@ -135,8 +140,8 @@ func Load() Config {
 			SessionLifetime:   time.Duration(envInt("LOC_SESSION_LIFETIME_SECONDS", 2592000)) * time.Second,
 		},
 		Admin: AdminConfig{
-			VersionCode: envInt("LOC_ANDROID_ADMIN_VERSION_CODE", 95),
-			VersionName: env("LOC_ANDROID_ADMIN_VERSION_NAME", "2.3.0"),
+			VersionCode: envInt("LOC_ANDROID_ADMIN_VERSION_CODE", 96),
+			VersionName: env("LOC_ANDROID_ADMIN_VERSION_NAME", "2.3.1"),
 			ForceUpdate: envBool("LOC_ANDROID_ADMIN_FORCE_UPDATE", true),
 		},
 		Auth: AuthConfig{
@@ -159,6 +164,11 @@ func Load() Config {
 				"ip2location": loadIPGeoProviderQuota("LOC_IP2LOCATION", defaultIPGeoProviderQuotas["ip2location"]),
 				"ipdata":      loadIPGeoProviderQuota("LOC_IPDATA", defaultIPGeoProviderQuotas["ipdata"]),
 				"ipregistry":  loadIPGeoProviderQuota("LOC_IPREGISTRY", defaultIPGeoProviderQuotas["ipregistry"]),
+				"ip-api":      loadIPGeoProviderQuota("LOC_IP_API", defaultIPGeoProviderQuotas["ip-api"]),
+				"uapis":       loadIPGeoProviderQuota("LOC_UAPIS", defaultIPGeoProviderQuotas["uapis"]),
+				"baidu":       loadIPGeoProviderQuota("LOC_BAIDU_IP", defaultIPGeoProviderQuotas["baidu"]),
+				"iping":       loadIPGeoProviderQuota("LOC_IPING", defaultIPGeoProviderQuotas["iping"]),
+				"xxapi":       loadIPGeoProviderQuota("LOC_XXAPI", defaultIPGeoProviderQuotas["xxapi"]),
 			},
 			TurnstileSiteKey:   env("LOC_CF_TURNSTILE_SITE_KEY", ""),
 			TurnstileSecretKey: env("LOC_CF_TURNSTILE_SECRET_KEY", ""),
@@ -209,16 +219,26 @@ func Validate(cfg Config) error {
 	for _, provider := range []struct {
 		name       string
 		credential string
+		alwaysOn   bool
 	}{
 		{name: "ipinfo-lite", credential: cfg.External.IPInfoLiteToken},
 		{name: "ip2location", credential: cfg.External.IP2LocationKey},
 		{name: "ipdata", credential: cfg.External.IPDataKey},
 		{name: "ipregistry", credential: cfg.External.IPRegistryKey},
+		{name: "ip-api", alwaysOn: true},
+		{name: "uapis", alwaysOn: true},
+		{name: "baidu", alwaysOn: true},
+		{name: "iping", alwaysOn: true},
+		{name: "xxapi", alwaysOn: true},
 	} {
-		if strings.TrimSpace(provider.credential) == "" {
+		quota, ok := cfg.External.IPGeoQuota(provider.name)
+		if provider.alwaysOn {
+			if !ok {
+				continue
+			}
+		} else if strings.TrimSpace(provider.credential) == "" {
 			continue
 		}
-		quota, ok := cfg.External.IPGeoQuota(provider.name)
 		if !ok {
 			return fmt.Errorf("%s provider quota is required when its credential is configured", provider.name)
 		}

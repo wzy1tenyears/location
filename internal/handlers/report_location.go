@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -560,6 +561,13 @@ func sanitizeAddressDiagnostics(diagnostics map[string]any) map[string]any {
 			} {
 				addString(clean, key, truncateString(fmt.Sprint(source[key]), limit))
 			}
+			probeStatus := strings.ToLower(truncateString(fmt.Sprint(source["probe_status"]), 16))
+			if probeStatus == "success" || probeStatus == "failed" {
+				clean["probe_status"] = probeStatus
+			}
+			if reason := sanitizeDiagnosticFailureReason(source["failure_reason"]); reason != "" {
+				clean["failure_reason"] = reason
+			}
 			clean["domestic_source"] = truthyAny(source["domestic_source"])
 			clean["mobile_network"] = truthyAny(source["mobile_network"])
 			if value, ok := numericAny(source["latitude"]); ok && value >= -90 && value <= 90 {
@@ -626,10 +634,10 @@ func sanitizeProviderAttempts(value any) []map[string]any {
 	if !ok {
 		return []map[string]any{}
 	}
-	clean := make([]map[string]any, 0, 8)
+	clean := make([]map[string]any, 0, 20)
 	for _, raw := range items {
 		item, ok := raw.(map[string]any)
-		if !ok || len(clean) >= 8 {
+		if !ok || len(clean) >= 20 {
 			continue
 		}
 		provider := truncateString(fmt.Sprint(item["provider"]), 40)
@@ -643,9 +651,31 @@ func sanitizeProviderAttempts(value any) []map[string]any {
 		default:
 			precision = "none"
 		}
-		clean = append(clean, map[string]any{"provider": provider, "status": status, "precision": precision})
+		attempt := map[string]any{"provider": provider, "status": status, "precision": precision}
+		if ip := truncateString(fmt.Sprint(item["ip"]), 80); net.ParseIP(strings.Trim(ip, "[]")) != nil {
+			attempt["ip"] = ip
+		}
+		if status == "failed" {
+			if reason := sanitizeDiagnosticFailureReason(item["reason"]); reason != "" {
+				attempt["reason"] = reason
+			}
+		}
+		clean = append(clean, attempt)
 	}
 	return clean
+}
+
+func sanitizeDiagnosticFailureReason(value any) string {
+	reason := strings.ToLower(truncateString(fmt.Sprint(value), 40))
+	switch reason {
+	case "insecure_transport_disabled", "not_configured", "unsupported_provider", "no_result",
+		"quota_unconfigured", "rate_limited", "provider_busy", "upstream_error", "timeout",
+		"network_error", "invalid_response", "cancelled", "foreground_unavailable",
+		"probe_timeout", "no_public_candidate", "webrtc_unavailable", "server_unavailable":
+		return reason
+	default:
+		return ""
+	}
 }
 
 func sanitizeProbeList(value any, kind string) []map[string]any {

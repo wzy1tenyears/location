@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -139,6 +140,11 @@ func (handler DiagnosticHandler) IPGeo(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, httpx.Unprocessable("IP 地址不正确。"))
 		return
 	}
+	provider, providerErr := validateIPGeoProvider(handler.cfg.External, req.Provider)
+	if providerErr != nil {
+		httpx.Error(w, providerErr)
+		return
+	}
 	if err := handler.consumeProviderQuota(r.Context(), scope.User.ID); err != nil {
 		httpx.Error(w, err)
 		return
@@ -147,16 +153,21 @@ func (handler DiagnosticHandler) IPGeo(w http.ResponseWriter, r *http.Request) {
 	payload, ok, err := services.LookupIPGeoContextWithBudget(
 		r.Context(),
 		req.IP,
-		req.Provider,
+		provider,
 		handler.cfg.External,
 		handler.providerFetchBudget(scope.User.ID),
 	)
 	if err != nil {
-		httpx.Error(w, err)
+		var apiErr httpx.APIError
+		if errors.As(err, &apiErr) {
+			httpx.Error(w, apiErr)
+		} else {
+			httpx.Error(w, httpx.APIError{Status: http.StatusBadGateway, Message: "IP 查询源请求失败。", Code: "upstream_error"})
+		}
 		return
 	}
 	if !ok {
-		httpx.Error(w, httpx.APIError{Status: http.StatusNotFound, Message: "IP 查询源未配置或无结果。"})
+		httpx.Error(w, httpx.APIError{Status: http.StatusNotFound, Message: "IP 查询源没有可用结果。", Code: "no_result"})
 		return
 	}
 	payload["ok"] = true
@@ -193,15 +204,43 @@ func (handler DiagnosticHandler) IPInfoLite(w http.ResponseWriter, r *http.Reque
 		handler.providerFetchBudget(scope.User.ID),
 	)
 	if err != nil {
-		httpx.Error(w, err)
+		var apiErr httpx.APIError
+		if errors.As(err, &apiErr) {
+			httpx.Error(w, apiErr)
+		} else {
+			httpx.Error(w, httpx.APIError{Status: http.StatusBadGateway, Message: "IPinfo Lite 请求失败。", Code: "upstream_error"})
+		}
 		return
 	}
 	if !ok {
-		httpx.Error(w, httpx.APIError{Status: http.StatusInternalServerError, Message: "IPinfo Lite 未配置。"})
+		httpx.Error(w, httpx.APIError{Status: http.StatusServiceUnavailable, Message: "IPinfo Lite 未配置。", Code: "not_configured"})
 		return
 	}
 	payload["ok"] = true
 	httpx.OK(w, payload)
+}
+
+func validateIPGeoProvider(cfg config.ExternalConfig, provider string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(provider))
+	switch normalized {
+	case "ip-api", "uapis", "baidu", "iping", "xxapi":
+		// These providers use fixed public endpoints and do not require a secret.
+	case "ip2location":
+		if strings.TrimSpace(cfg.IP2LocationKey) == "" {
+			return "", httpx.APIError{Status: http.StatusServiceUnavailable, Message: "IP2Location 未配置。", Code: "not_configured"}
+		}
+	case "ipdata":
+		if strings.TrimSpace(cfg.IPDataKey) == "" {
+			return "", httpx.APIError{Status: http.StatusServiceUnavailable, Message: "ipdata 未配置。", Code: "not_configured"}
+		}
+	case "ipregistry":
+		if strings.TrimSpace(cfg.IPRegistryKey) == "" {
+			return "", httpx.APIError{Status: http.StatusServiceUnavailable, Message: "ipregistry 未配置。", Code: "not_configured"}
+		}
+	default:
+		return "", httpx.APIError{Status: http.StatusUnprocessableEntity, Message: "不支持的 IP 查询源。", Code: "unsupported_provider"}
+	}
+	return normalized, nil
 }
 
 func (handler DiagnosticHandler) consumeProviderQuota(ctx context.Context, userID int64) error {
@@ -216,7 +255,7 @@ func (handler DiagnosticHandler) consumeProviderQuota(ctx context.Context, userI
 		return err
 	}
 	if !allowed {
-		return httpx.APIError{Status: http.StatusTooManyRequests, Message: "IP 查询过于频繁，请稍后再试。"}
+		return httpx.APIError{Status: http.StatusTooManyRequests, Message: "IP 查询过于频繁，请稍后再试。", Code: "rate_limited"}
 	}
 	return nil
 }
@@ -231,7 +270,7 @@ func (handler DiagnosticHandler) consumeProviderMissQuotas(ctx context.Context, 
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	quota, ok := handler.cfg.External.IPGeoQuota(provider)
 	if !ok || quota.AvailableRequests() <= 0 || quota.UserMaxMisses <= 0 || quota.Window <= 0 {
-		return httpx.APIError{Status: http.StatusServiceUnavailable, Message: "IP 查询源配额未配置。"}
+		return httpx.APIError{Status: http.StatusServiceUnavailable, Message: "IP 查询源配额未配置。", Code: "quota_unconfigured"}
 	}
 
 	allowed, err := handler.rates.Hit(
@@ -245,7 +284,7 @@ func (handler DiagnosticHandler) consumeProviderMissQuotas(ctx context.Context, 
 		return err
 	}
 	if !allowed {
-		return httpx.APIError{Status: http.StatusTooManyRequests, Message: "IP 查询次数过多，请稍后再试。"}
+		return httpx.APIError{Status: http.StatusTooManyRequests, Message: "IP 查询次数过多，请稍后再试。", Code: "rate_limited"}
 	}
 
 	allowed, err = handler.rates.Hit(
@@ -259,7 +298,7 @@ func (handler DiagnosticHandler) consumeProviderMissQuotas(ctx context.Context, 
 		return err
 	}
 	if !allowed {
-		return httpx.APIError{Status: http.StatusTooManyRequests, Message: "IP 查询服务繁忙，请稍后再试。"}
+		return httpx.APIError{Status: http.StatusTooManyRequests, Message: "IP 查询服务繁忙，请稍后再试。", Code: "provider_busy"}
 	}
 	return nil
 }

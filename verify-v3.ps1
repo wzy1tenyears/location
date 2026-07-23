@@ -6,6 +6,23 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$GoWorkRoot = Join-Path $Root '.go-work'
+$GoPath = if ($env:LOC_GO_PATH) { $env:LOC_GO_PATH } else { Join-Path $GoWorkRoot 'go' }
+$GoModCache = if ($env:LOC_GO_MOD_CACHE) { $env:LOC_GO_MOD_CACHE } else { Join-Path $GoPath 'pkg\mod' }
+$GoBuildCache = if ($env:LOC_GO_BUILD_CACHE) { $env:LOC_GO_BUILD_CACHE } else { Join-Path $GoWorkRoot 'build-cache' }
+$GoTmp = if ($env:LOC_GO_TMP) { $env:LOC_GO_TMP } else { Join-Path $GoWorkRoot 'tmp' }
+foreach ($directory in @($GoPath, $GoModCache, $GoBuildCache, $GoTmp)) {
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    }
+}
+$env:GOPATH = $GoPath
+$env:GOMODCACHE = $GoModCache
+$env:GOCACHE = $GoBuildCache
+$env:GOTMPDIR = $GoTmp
+$env:GOENV = 'off'
+$env:GOTOOLCHAIN = 'local'
+$env:GOTELEMETRY = 'off'
 $RequiredFiles = @(
     'go.mod',
     'cmd/server/main.go',
@@ -210,7 +227,12 @@ $IPGeoQuotaPrefixes = @(
     'LOC_IPINFO_LITE',
     'LOC_IP2LOCATION',
     'LOC_IPDATA',
-    'LOC_IPREGISTRY'
+    'LOC_IPREGISTRY',
+    'LOC_IP_API',
+    'LOC_UAPIS',
+    'LOC_BAIDU_IP',
+    'LOC_IPING',
+    'LOC_XXAPI'
 )
 $IPGeoQuotaSuffixes = @(
     '_QUOTA_MAX_REQUESTS',

@@ -1,0 +1,5 @@
+<resources>
+    <string name="accessibility_keep_alive_service_label">位置保活辅助服务</string>
+    <string name="accessibility_keep_alive_service_summary">仅用于保持位置上报服务连接</string>
+    <string name="accessibility_keep_alive_service_description">仅用于保持位置上报服务连接，不读取屏幕内容，不查看其他应用，不记录操作，也不执行手势。</string>
+</resources>

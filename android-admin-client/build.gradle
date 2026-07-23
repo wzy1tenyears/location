@@ -1,0 +1,54 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace = "com.familylocation.admin"
+    compileSdk = 35
+    buildToolsVersion = "36.0.0"
+
+    defaultConfig {
+        applicationId = "com.familylocation.admin"
+        minSdk = 29
+        targetSdk = 35
+        versionCode = 96
+        versionName = "2.3.1"
+    }
+
+    sourceSets {
+        main {
+            manifest.srcFile("AndroidManifest.xml")
+            java.srcDirs("src")
+            res.srcDirs("res")
+            assets.srcDirs("assets")
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled = true
+            shrinkResources = true
+            proguardFiles("proguard-rules.pro")
+        }
+        // Private device-only variant; the production release identity and
+        // signing configuration remain unchanged.
+        smoke {
+            initWith(release)
+            applicationIdSuffix = ".smoke"
+            versionNameSuffix = "-smoke"
+            debuggable = false
+            minifyEnabled = true
+            matchingFallbacks = ["release"]
+            signingConfig = signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+    implementation(project(":android-common"))
+}

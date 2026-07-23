@@ -15,8 +15,8 @@ func TestSanitizeAddressDiagnosticsKeepsSafeProviderAttemptSummary(t *testing.T)
 		"sources": []any{map[string]any{
 			"type": "ip",
 			"provider_attempts": []any{
-				map[string]any{"provider": "ipdata", "status": "success", "precision": "district", "raw_response": "secret"},
-				map[string]any{"provider": "ipregistry", "status": "failed", "precision": "invalid"},
+				map[string]any{"provider": "ipdata", "status": "success", "precision": "district", "ip": "203.0.113.7", "raw_response": "secret"},
+				map[string]any{"provider": "ipregistry", "status": "failed", "precision": "invalid", "reason": "not_configured", "raw_error": "secret"},
 			},
 		}},
 	})
@@ -27,6 +27,31 @@ func TestSanitizeAddressDiagnosticsKeepsSafeProviderAttemptSummary(t *testing.T)
 	}
 	if _, exists := attempts[0]["raw_response"]; exists {
 		t.Fatal("provider attempt leaked raw response")
+	}
+	if attempts[0]["ip"] != "203.0.113.7" {
+		t.Fatalf("safe provider observed IP = %#v", attempts[0]["ip"])
+	}
+	if attempts[1]["reason"] != "not_configured" {
+		t.Fatalf("safe provider failure reason = %#v, want not_configured", attempts[1]["reason"])
+	}
+	if _, exists := attempts[1]["raw_error"]; exists {
+		t.Fatal("provider attempt leaked raw error")
+	}
+}
+
+func TestSanitizeAddressDiagnosticsKeepsSafeWebRTCFailure(t *testing.T) {
+	diagnostics := sanitizeAddressDiagnostics(map[string]any{
+		"sources": []any{map[string]any{
+			"type": "webrtc", "probe_status": "failed", "failure_reason": "probe_timeout",
+			"raw_error": "renderer details",
+		}},
+	})
+	source := diagnostics["sources"].([]map[string]any)[0]
+	if source["probe_status"] != "failed" || source["failure_reason"] != "probe_timeout" {
+		t.Fatalf("sanitized WebRTC failure = %#v", source)
+	}
+	if _, exists := source["raw_error"]; exists {
+		t.Fatal("WebRTC source leaked raw error")
 	}
 }
 

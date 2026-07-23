@@ -80,7 +80,14 @@
           pc = new PeerConnection({ iceServers: [{ urls: server.urls }] });
           pc.createDataChannel('loc');
           pc.onicecandidate = (event) => {
-            if (event && event.candidate && event.candidate.candidate) add(event.candidate.candidate);
+            if (event && event.candidate && event.candidate.candidate) {
+              add(event.candidate.candidate);
+              return;
+            }
+            finish();
+          };
+          pc.onicegatheringstatechange = () => {
+            if (pc && pc.iceGatheringState === 'complete') finish();
           };
           pc.createOffer()
             .then((offer) => {
@@ -88,7 +95,7 @@
               return pc.setLocalDescription(offer);
             })
             .catch(finish);
-          window.setTimeout(finish, 4200);
+          window.setTimeout(finish, 2200);
         } catch (error) {
           finish();
         }

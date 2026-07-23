@@ -20,13 +20,16 @@ v3 是独立的 Go 后端目录，当前目标是承接线上全部 API，并让
 
 ## 目录定位
 
-本仓库仅包含可公开的 Go 后端源码、测试与通用部署样例，不包含 Android 私有源码、APK 或线上基础设施配置。
+`main` 同时包含可公开的 Go 后端、原生 Android 用户端、原生 Android 管理端、测试与通用部署样例，不包含 APK、签名材料、私有域名、真实服务器地址或线上基础设施配置。Android 源码中的默认服务器为 `https://example.com/`，部署者需要改成自己的 HTTPS 地址。
 
-公开 Android 源码保留在 `v2.0` 分支。该分支的用户端“我的”页提供可选无障碍保活入口：只在用户点击并经系统设置手动确认后启用，服务限制为本应用窗口状态且不读取内容、不执行手势或截图。
+用户端“我的”页提供可选无障碍保活入口：只在用户点击并经系统设置手动确认后启用，服务限制为本应用窗口状态且不读取内容、不执行手势或截图。
 
 - `cmd/server/`：Go 服务入口。
 - `internal/`：业务、数据访问、会话、HTTP 与数据库迁移。
 - `deploy/`：不包含私有服务器信息的 systemd 与 Nginx 样例。
+- `android-client/`：原生 Android 用户端源码。
+- `android-admin-client/`：原生 Android 管理端源码。
+- `android-common/`：两个 App 共用的网络和轻量 MD3 组件。
 
 ## 配置
 
@@ -50,6 +53,8 @@ IP 地理位置供应商凭据按需配置：
 - `LOC_IP2LOCATION_IO_KEY`
 - `LOC_IPDATA_API_KEY`
 - `LOC_IPREGISTRY_API_KEY`
+
+无需密钥的 `ip-api`、UApi、百度、IPing、XXAPI 也会参与服务端探测；Android 用户端会额外直连这些公开接口一次，用来交叉核对设备网络出口。`ip-api` 免费 JSON 接口只提供 HTTP，因此客户端仅对精确域名 `ip-api.com` 放行明文流量。
 
 每个已启用供应商都有保守的默认上游预算。现有部署只配置凭据即可继续启动；实际套餐不同时，可用供应商前缀加以下后缀覆盖：
 
@@ -87,6 +92,13 @@ powershell.exe -ExecutionPolicy Bypass -File .\verify-v3.ps1
 ```
 
 发布验证必须找到 Go 工具链并执行 `go test ./...`。仅需要检查目录、路由和敏感字面量时，可显式传入 `-StaticOnly`；该模式不能作为发布通过依据。
+
+包含公开边界和 Android 源码检查的入口：
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\verify-public.ps1
+powershell.exe -ExecutionPolicy Bypass -File .\verify-public.ps1 -BuildAndroid -Offline
+```
 
 ## 构建
 

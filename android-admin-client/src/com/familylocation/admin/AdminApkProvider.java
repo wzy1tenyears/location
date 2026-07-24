@@ -6,7 +6,6 @@ import android.content.Context;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.net.Uri;
-import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
 
@@ -90,10 +89,7 @@ public class AdminApkProvider extends ContentProvider {
 
     private File apkDirectory() {
         Context context = getContext();
-        File directory = context == null ? null : context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
-        if (directory == null && context != null) {
-            directory = new File(context.getFilesDir(), "updates");
-        }
+        File directory = context == null ? null : new File(context.getFilesDir(), "updates");
         if (directory != null && !directory.exists()) {
             directory.mkdirs();
         }

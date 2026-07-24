@@ -168,3 +168,34 @@ func TestHistoryMapCarriesMergedStayFieldsToEveryMarker(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoryMapUsesStableMemberColorsAndDistinctHistoryPoints(t *testing.T) {
+	for _, required := range []string{
+		"function fallbackMemberColor(userKey, lightness)",
+		"record.member_color",
+		"record.history_point_color",
+		"strokeColor: group[0].color",
+		"strokeWeight: TRACK_STROKE_WIDTH",
+		"const HISTORY_POINT_DIAMETER = TRACK_STROKE_WIDTH * 2;",
+		"node.style.setProperty('--marker-color', latest ? color : historyPointColor);",
+	} {
+		if !strings.Contains(historyMapHTML, required) {
+			t.Fatalf("history map stable member styling is missing %q", required)
+		}
+	}
+	if strings.Contains(historyMapHTML, "colors[groupIndex % colors.length]") {
+		t.Fatal("history map member colors still depend on group iteration order")
+	}
+}
+
+func TestHistoryMapHistoryPointSelectsNativeDetail(t *testing.T) {
+	for _, required := range []string{
+		"record.history_selection_key",
+		"record.history_page",
+		"window.LocMapSelection.selectHistoryRecord(item.selectionKey, item.historyPage);",
+	} {
+		if !strings.Contains(historyMapHTML, required) {
+			t.Fatalf("history map native detail selection is missing %q", required)
+		}
+	}
+}

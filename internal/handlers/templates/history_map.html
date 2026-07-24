@@ -10,6 +10,7 @@
     .map-state { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; padding: 18px; box-sizing: border-box; text-align: center; color: #5b6f69; font-size: 13px; background: linear-gradient(180deg, rgba(244,249,247,.92), rgba(238,243,241,.76)); }
     .marker { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; border-radius: 50%; border: 2px solid #fff; background: var(--marker-color, #0d5f54); color: #fff; font-size: 14px; font-weight: 900; box-shadow: 0 5px 15px rgba(0,0,0,.26); white-space: nowrap; overflow: hidden; text-align: center; box-sizing: border-box; }
     .marker.gps.latest { box-shadow: 0 0 0 7px rgba(13,95,84,.16), 0 6px 18px rgba(0,0,0,.3); }
+    .marker.gps.history { padding: 0; border-width: 2px; font-size: 0; box-shadow: 0 2px 7px rgba(0,0,0,.28); }
     .marker-label { padding: 4px 7px; border-radius: 8px; background: rgba(255,255,255,.94); color: #173b35; border: 1px solid rgba(13,95,84,.16); box-shadow: 0 4px 12px rgba(0,0,0,.16); font-size: 11px; line-height: 1.35; max-width: 210px; white-space: normal; }
     .amap-info-content { color: #173b35; font-size: 13px; line-height: 1.5; }
   </style>
@@ -27,7 +28,8 @@
     let currentPolylines = [];
     let infoWindow = null;
     let fallbackScriptStarted = false;
-    const colors = ['#0d5f54', '#1677ff', '#059669', '#dc2626', '#0891b2', '#be185d'];
+    const TRACK_STROKE_WIDTH = 5;
+    const HISTORY_POINT_DIAMETER = TRACK_STROKE_WIDTH * 2;
 
     function state(message) {
       let node = document.querySelector('.map-state');
@@ -157,10 +159,15 @@
       return 'gps';
     }
 
-    function makeMarkerContent(type, latest, text, title) {
+    function makeMarkerContent(type, latest, text, title, color, historyPointColor) {
       const node = document.createElement('div');
-      node.className = `marker ${sourceClass(type)}${latest ? ' latest' : ''}`;
-      node.textContent = text;
+      node.className = `marker ${sourceClass(type)}${latest ? ' latest' : ' history'}`;
+      node.style.setProperty('--marker-color', latest ? color : historyPointColor);
+      if (!latest) {
+        node.style.width = `${HISTORY_POINT_DIAMETER}px`;
+        node.style.height = `${HISTORY_POINT_DIAMETER}px`;
+      }
+      node.textContent = latest ? text : '';
       node.title = firstText(title, text);
       node.setAttribute('aria-label', firstText(title, text));
       return node;
@@ -203,6 +210,17 @@
       return parts.join('');
     }
 
+    function fallbackMemberColor(userKey, lightness) {
+      const text = firstText(userKey, 'member');
+      let hash = 0;
+      for (let index = 0; index < text.length; index += 1) {
+        hash = (Math.imul(hash, 31) + text.charCodeAt(index)) | 0;
+      }
+      hash = (hash ^ (hash >>> 16)) | 0;
+      const hue = ((Math.imul(hash, 137) % 360) + 360) % 360;
+      return `hsl(${hue} 68% ${lightness}%)`;
+    }
+
     function normalizeRecord(record, index) {
       if (!record || typeof record !== 'object') return null;
       const lat = Number(record.latitude);
@@ -214,6 +232,7 @@
       const gpsSource = firstGpsSource(diagnostics);
       const firstReportedAt = firstText(record.first_reported_at, record.created_at, record.updated_at);
       const lastReportedAt = firstText(record.last_reported_at, record.updated_at, record.created_at, firstReportedAt);
+      const userKey = firstText(record.user_id, record.username, String(index));
       return {
         type: 'gps',
         name,
@@ -233,7 +252,11 @@
         stayDurationSeconds: Math.max(0, Number(record.stay_duration_seconds) || 0),
         reportCount: Math.max(1, Math.floor(Number(record.report_count) || 1)),
         accuracy: Number(record.accuracy),
-        userKey: firstText(record.user_id, record.username, String(index)),
+        userKey,
+        color: firstText(record.member_color, fallbackMemberColor(userKey, 34)),
+        historyPointColor: firstText(record.history_point_color, fallbackMemberColor(userKey, 23)),
+        selectionKey: firstText(record.history_selection_key, record.id),
+        historyPage: Math.max(0, Math.floor(Number(record.history_page) || 0)),
         sourceIndex: 0,
       };
     }
@@ -285,15 +308,15 @@
         if (!gpsByUser.has(item.userKey)) gpsByUser.set(item.userKey, []);
         gpsByUser.get(item.userKey).push(item);
       });
-      Array.from(gpsByUser.values()).forEach((group, groupIndex) => {
+      Array.from(gpsByUser.values()).forEach((group) => {
         group.sort((left, right) => String(left.time).localeCompare(String(right.time)));
         const path = group.map((item) => [item.lng, item.lat]);
         if (path.length > 1) {
           const line = new AMap.Polyline({
             path,
-            strokeColor: colors[groupIndex % colors.length],
+            strokeColor: group[0].color,
             strokeOpacity: 0.82,
-            strokeWeight: 5,
+            strokeWeight: TRACK_STROKE_WIDTH,
             strokeStyle: 'solid',
             lineJoin: 'round',
             lineCap: 'round',
@@ -307,13 +330,18 @@
         const latest = group[group.length - 1] === item;
         const marker = new AMap.Marker({
           position: [item.lng, item.lat],
-          content: makeMarkerContent(item.type, latest, item.label, item.name),
-          offset: new AMap.Pixel(-18, -18),
+          content: makeMarkerContent(item.type, latest, item.label, item.name, item.color, item.historyPointColor),
+          offset: latest
+            ? new AMap.Pixel(-18, -18)
+            : new AMap.Pixel(-HISTORY_POINT_DIAMETER / 2, -HISTORY_POINT_DIAMETER / 2),
           zIndex: latest ? 120 : 100,
         });
         marker.on('click', () => {
           infoWindow.setContent(markerInfo(item));
           infoWindow.open(map, marker.getPosition());
+          if (!latest && item.selectionKey && window.LocMapSelection && typeof window.LocMapSelection.selectHistoryRecord === 'function') {
+            window.LocMapSelection.selectHistoryRecord(item.selectionKey, item.historyPage);
+          }
         });
         marker.setMap(map);
         currentMarkers.push(marker);

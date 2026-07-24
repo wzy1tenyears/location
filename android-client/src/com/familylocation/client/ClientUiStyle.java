@@ -10,6 +10,7 @@ import android.graphics.drawable.RippleDrawable;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.Switch;
 
 import com.familylocation.net.Material3Tokens;
 
@@ -142,6 +143,26 @@ final class ClientUiStyle {
                 new int[]{-android.R.attr.state_checked},
             },
             new int[]{colorPrimary(), colorMuted()}
+        ));
+    }
+
+    void styleSwitch(Switch view, boolean dense) {
+        view.setTextColor(colorMuted());
+        view.setTextSize(dense ? 12f : 13f);
+        view.setShowText(false);
+        view.setThumbTintList(new ColorStateList(
+            new int[][]{
+                new int[]{android.R.attr.state_checked},
+                new int[]{-android.R.attr.state_checked},
+            },
+            new int[]{colorPrimary(), colorMuted()}
+        ));
+        view.setTrackTintList(new ColorStateList(
+            new int[][]{
+                new int[]{android.R.attr.state_checked},
+                new int[]{-android.R.attr.state_checked},
+            },
+            new int[]{colorAccentMuted(), colorSurfaceContainer()}
         ));
     }
 

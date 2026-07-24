@@ -28,6 +28,7 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.provider.Settings;
 import android.text.InputType;
 import android.text.Editable;
@@ -63,7 +64,11 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -78,6 +83,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.zip.ZipFile;
 
 public class AdminActivity extends Activity {
     private static final class ChallengeCancelledException extends Exception {
@@ -94,8 +100,8 @@ public class AdminActivity extends Activity {
     private static final String KEY_ACTIVE_UPDATE_DOWNLOAD_ID = "active_update_download_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "https://example.com/";
-    private static final int APP_VERSION_CODE = 99;
-    private static final String APP_VERSION_NAME = "2.3.4";
+    private static final int APP_VERSION_CODE = 100;
+    private static final String APP_VERSION_NAME = "2.3.5";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
@@ -478,7 +484,7 @@ public class AdminActivity extends Activity {
             request.setMimeType("application/vnd.android.package-archive");
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             prepareUpdateApkFile();
-            request.setDestinationUri(Uri.fromFile(updateApkFile()));
+            request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, updateDownloadFile().getName());
             request.addRequestHeader("User-Agent", USER_AGENT);
             String cookies = cookieHeader();
             if (!cookies.trim().isEmpty()) {
@@ -586,6 +592,7 @@ public class AdminActivity extends Activity {
                 }
                 throw new IllegalStateException("后台 APK 仍在下载中，请稍后再试。");
             }
+            materializeDownloadedUpdate(manager, downloadId);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
                 pendingInstallDownloadId = downloadId;
                 prefs().edit()
@@ -598,7 +605,7 @@ public class AdminActivity extends Activity {
                 return;
             }
             File apkFile = updateApkFile();
-            if (!apkFile.isFile()) {
+            if (!isValidApk(apkFile)) {
                 throw new IllegalStateException("无法读取已下载 APK。");
             }
             Uri apkUri = updateApkUri();
@@ -631,22 +638,109 @@ public class AdminActivity extends Activity {
     }
 
     private void prepareUpdateApkFile() throws Exception {
-        File apkFile = updateApkFile();
-        File parent = apkFile.getParentFile();
-        if (parent != null && !parent.exists() && !parent.mkdirs()) {
-            throw new IllegalStateException("无法创建更新缓存目录。");
-        }
-        if (apkFile.exists() && !apkFile.delete()) {
-            throw new IllegalStateException("无法清理旧更新包，请手动删除后重试。");
+        for (File file : new File[] {updateApkFile(), updateApkPartFile(), updateDownloadFile()}) {
+            File parent = file.getParentFile();
+            if (parent != null && !parent.exists() && !parent.mkdirs()) {
+                throw new IllegalStateException("无法创建更新缓存目录。");
+            }
+            if (file.exists() && !file.delete()) {
+                throw new IllegalStateException("无法清理旧更新包，请手动删除后重试。");
+            }
         }
     }
 
     private File updateApkFile() {
+        return new File(new File(getFilesDir(), "updates"), ADMIN_APK_NAME);
+    }
+
+    private File updateApkPartFile() {
+        return new File(updateApkFile().getParentFile(), ADMIN_APK_NAME + ".part");
+    }
+
+    private File updateDownloadFile() {
         File directory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
         if (directory == null) {
-            directory = new File(getFilesDir(), "updates");
+            throw new IllegalStateException("外部下载目录不可用。");
         }
-        return new File(directory, ADMIN_APK_NAME);
+        return new File(directory, ADMIN_APK_NAME + ".download");
+    }
+
+    private void materializeDownloadedUpdate(DownloadManager manager, long downloadId) throws Exception {
+        File target = updateApkFile();
+        if (isValidApk(target)) {
+            return;
+        }
+        if (target.exists()) {
+            target.delete();
+        }
+
+        File downloaded = updateDownloadFile();
+        if (downloaded.isFile()) {
+            try (InputStream input = new BufferedInputStream(new FileInputStream(downloaded))) {
+                copyValidatedApk(input, target);
+            }
+            return;
+        }
+
+        ParcelFileDescriptor descriptor = manager.openDownloadedFile(downloadId);
+        if (descriptor == null) {
+            throw new IllegalStateException("系统下载服务未返回后台 APK 文件。");
+        }
+        try (InputStream input = new BufferedInputStream(new ParcelFileDescriptor.AutoCloseInputStream(descriptor))) {
+            copyValidatedApk(input, target);
+        }
+    }
+
+    private void copyValidatedApk(InputStream input, File target) throws Exception {
+        File part = updateApkPartFile();
+        File parent = target.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            throw new IllegalStateException("无法创建更新缓存目录。");
+        }
+        if (part.exists() && !part.delete()) {
+            throw new IllegalStateException("无法清理更新暂存文件。");
+        }
+        long total = 0L;
+        byte[] buffer = new byte[32 * 1024];
+        try (FileOutputStream fileOutput = new FileOutputStream(part);
+             BufferedOutputStream output = new BufferedOutputStream(fileOutput)) {
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                total += count;
+                if (total > MAX_CACHE_BYTES) {
+                    throw new IllegalStateException("后台 APK 超过允许大小。");
+                }
+                output.write(buffer, 0, count);
+            }
+            output.flush();
+            fileOutput.getFD().sync();
+        } catch (Exception exception) {
+            part.delete();
+            throw exception;
+        }
+        if (!isValidApk(part)) {
+            part.delete();
+            throw new IllegalStateException("下载内容不是有效的后台 APK。");
+        }
+        if (target.exists() && !target.delete()) {
+            part.delete();
+            throw new IllegalStateException("无法替换旧后台 APK。");
+        }
+        if (!part.renameTo(target)) {
+            part.delete();
+            throw new IllegalStateException("无法保存后台 APK。");
+        }
+    }
+
+    private boolean isValidApk(File file) {
+        if (file == null || !file.isFile() || file.length() <= 0L || file.length() > MAX_CACHE_BYTES) {
+            return false;
+        }
+        try (ZipFile archive = new ZipFile(file)) {
+            return archive.getEntry("AndroidManifest.xml") != null;
+        } catch (Exception exception) {
+            return false;
+        }
     }
 
     private Uri updateApkUri() {

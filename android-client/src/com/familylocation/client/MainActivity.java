@@ -74,6 +74,7 @@ import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -150,8 +151,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 149;
-    private static final String APP_VERSION_NAME = "2.3.5";
+    private static final int APP_VERSION_CODE = 150;
+    private static final String APP_VERSION_NAME = "2.3.6";
     private static final JsonApiClient API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 12_000, 12_000);
     private static final JsonApiClient DIAGNOSTIC_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME + " diagnostics", 1_500, 2_500);
     private static final JsonApiClient REPORT_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 700, 1_800);
@@ -170,6 +171,7 @@ public class MainActivity extends Activity {
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
     private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String KEY_SEEN_ANNOUNCEMENT_PREFIX = "announcement_seen_";
+    private static final String KEY_SHOW_HISTORY_TRAIL = "show_history_trail";
     private static final String KEY_ENVIRONMENT_REPORT_LAST_UPLOAD_PREFIX = "environment_report_last_upload_";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String ACTION_ACCESSIBILITY_DETAILS_SETTINGS =
@@ -273,7 +275,9 @@ public class MainActivity extends Activity {
     private long screenGeneration;
     private long lastNavigationActionAtElapsedMs;
     private JSONArray homeMapBaseRecords = new JSONArray();
+    private JSONArray homeMapHistoryRecords = new JSONArray();
     private JSONArray shareableLocationRecords = new JSONArray();
+    private String pendingHistorySelectionKey = "";
     private ScrollView activeScrollView;
     private FrontendRuntimeController frontendRuntime;
     private ClientUiStyle uiStyle;
@@ -1161,7 +1165,7 @@ public class MainActivity extends Activity {
 
     private void showHome() {
         currentTab = TAB_POSITION;
-        LinearLayout card = screenWithAction(homeScreenTitle(currentUser), homeHeaderLine(currentUser), announcementIconButton());
+        LinearLayout card = screenWithAction(homeScreenTitle(currentUser), homeHeaderLine(currentUser), homeHeaderActions());
         reportButton = null;
         refreshButton = null;
         setScreen(card, false);
@@ -1170,6 +1174,16 @@ public class MainActivity extends Activity {
         syncKeepAliveService();
         maybeAutoShowAnnouncement();
         startEventStreamIfNeeded();
+    }
+
+    private boolean showHistoryTrail() {
+        return prefs().getBoolean(KEY_SHOW_HISTORY_TRAIL, true);
+    }
+
+    private void setShowHistoryTrail(boolean enabled) {
+        prefs().edit().putBoolean(KEY_SHOW_HISTORY_TRAIL, enabled).apply();
+        renderHomeMapForTrailPreference();
+        setStatus(enabled ? "已显示历史位置轨迹" : "已隐藏历史轨迹，仅显示当前位置");
     }
 
     private String currentUserRole() {
@@ -1485,10 +1499,18 @@ public class MainActivity extends Activity {
         }
     }
     private WebView locationMapWebView(JSONArray records) {
-        return locationMapWebView(records, null);
+        return locationMapWebView(records, null, null);
     }
 
     private WebView locationMapWebView(JSONArray records, Runnable onMapReady) {
+        return locationMapWebView(records, onMapReady, null);
+    }
+
+    private interface HistoryMapSelectionAction {
+        void select(String recordKey, int historyPage);
+    }
+
+    private WebView locationMapWebView(JSONArray records, Runnable onMapReady, HistoryMapSelectionAction onHistorySelection) {
         WebView map = managedWebView();
         map.setTag("dynamic");
         WebSettings settings = map.getSettings();
@@ -1523,6 +1545,14 @@ public class MainActivity extends Activity {
                     runUi(onMapReady);
                 }
             }, "LocMapCapture");
+        }
+        if (onHistorySelection != null) {
+            map.addJavascriptInterface(new Object() {
+                @JavascriptInterface
+                public void selectHistoryRecord(String recordKey, int targetPage) {
+                    runUi(() -> onHistorySelection.select(recordKey, targetPage));
+                }
+            }, "LocMapSelection");
         }
         map.setWebViewClient(new WebViewClient() {
             @Override
@@ -1599,6 +1629,10 @@ public class MainActivity extends Activity {
             }
             try {
                 JSONObject mapRecord = new JSONObject(record.toString());
+                String memberKey = memberStableKey(record);
+                mapRecord.put("member_color", MemberColorPolicy.trackColorHex(memberKey));
+                mapRecord.put("history_point_color", MemberColorPolicy.historyPointColorHex(memberKey));
+                mapRecord.put("history_selection_key", historyRecordKey(record));
                 mapRecord.remove("address");
                 mapRecord.remove("location_address");
                 mapRecord.remove("city");
@@ -1656,6 +1690,8 @@ public class MainActivity extends Activity {
         panel.setBackground(historyCardBackground(false));
         panel.setTag(viewTag);
         panel.setTag(0x4c0c010, false);
+        panel.setTag(0x4c0c012, historyRecordKey(location));
+        panel.setTag(0x4c0c013, location);
 
         LinearLayout header = summaryCardHeader(
             location.optString("display_name", location.optString("username", "成员")),
@@ -1663,7 +1699,7 @@ public class MainActivity extends Activity {
             location.optString("role", "")
         );
         View dot = new View(this);
-        dot.setBackground(roundedDrawable(historyRoleColor(location.optString("role", "")), dp(999)));
+        dot.setBackground(roundedDrawable(MemberColorPolicy.trackColorInt(memberStableKey(location)), dp(999)));
         LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(8), dp(8));
         dotParams.setMargins(0, 0, dp(8), 0);
         header.addView(dot, 0, dotParams);
@@ -1718,6 +1754,82 @@ public class MainActivity extends Activity {
         panel.addView(map, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         panel.setTag(0x4c0c010, true);
         panel.setBackground(historyCardBackground(true));
+    }
+
+    private String memberStableKey(JSONObject location) {
+        if (location == null) {
+            return MemberColorPolicy.stableKey(0L, "", "");
+        }
+        return MemberColorPolicy.stableKey(
+            location.optLong("user_id", 0L),
+            location.optString("username", ""),
+            location.optString("display_name", "")
+        );
+    }
+
+    private String historyRecordKey(JSONObject location) {
+        if (location == null) {
+            return "";
+        }
+        String id = location.optString("id", "").trim();
+        if (!id.isEmpty() && !"0".equals(id)) {
+            return "id:" + id;
+        }
+        return memberStableKey(location)
+            + "|" + firstText(
+                location.optString("last_reported_at", ""),
+                location.optString("created_at", ""),
+                location.optString("updated_at", "")
+            )
+            + "|" + String.format(Locale.ROOT, "%.6f", location.optDouble("latitude", 0.0d))
+            + "|" + String.format(Locale.ROOT, "%.6f", location.optDouble("longitude", 0.0d));
+    }
+
+    private void selectHomeHistoryRecord(String recordKey, int targetPage) {
+        String key = recordKey == null ? "" : recordKey.trim();
+        if (key.isEmpty() || content == null || currentTab != TAB_POSITION) {
+            return;
+        }
+        pendingHistorySelectionKey = key;
+        int normalizedTargetPage = Math.max(0, targetPage);
+        if (normalizedTargetPage > 0 && normalizedTargetPage != historyPage) {
+            historyPage = normalizedTargetPage;
+            loadHomeHistorySummary();
+            return;
+        }
+        focusPendingHomeHistoryRecord();
+    }
+
+    private void focusPendingHomeHistoryRecord() {
+        if (pendingHistorySelectionKey.isEmpty() || content == null || currentTab != TAB_POSITION) {
+            return;
+        }
+        LinearLayout selectedPanel = null;
+        for (int index = 0; index < content.getChildCount(); index += 1) {
+            View child = content.getChildAt(index);
+            if (child instanceof LinearLayout && pendingHistorySelectionKey.equals(child.getTag(0x4c0c012))) {
+                selectedPanel = (LinearLayout) child;
+                break;
+            }
+        }
+        if (selectedPanel == null) {
+            return;
+        }
+        Object locationTag = selectedPanel.getTag(0x4c0c013);
+        if (!Boolean.TRUE.equals(selectedPanel.getTag(0x4c0c010)) && locationTag instanceof JSONObject) {
+            toggleHistoryDetail(selectedPanel, (JSONObject) locationTag);
+        }
+        pendingHistorySelectionKey = "";
+        LinearLayout targetPanel = selectedPanel;
+        if (activeScrollView != null) {
+            activeScrollView.post(() -> {
+                Rect bounds = new Rect();
+                targetPanel.getDrawingRect(bounds);
+                activeScrollView.offsetDescendantRectToMyCoords(targetPanel, bounds);
+                activeScrollView.smoothScrollTo(0, Math.max(0, bounds.top - dp(12)));
+            });
+        }
+        setStatus("已展开所选历史定位详情");
     }
 
     private LinearLayout historyDetailPanel(JSONObject location) {
@@ -3971,6 +4083,7 @@ public class MainActivity extends Activity {
 
         removeDynamicRows();
         homeMapBaseRecords = new JSONArray();
+        homeMapHistoryRecords = new JSONArray();
         shareableLocationRecords = new JSONArray();
         JSONArray groups = currentUser == null ? new JSONArray() : currentUser.optJSONArray("groups");
         appendHomeOverviewPanel(groups);
@@ -4219,6 +4332,8 @@ public class MainActivity extends Activity {
                 targetContent,
                 targetGroupName
             ));
+        } else {
+            focusPendingHomeHistoryRecord();
         }
     }
 
@@ -4289,7 +4404,7 @@ public class MainActivity extends Activity {
         WebView map = homeMapWebView;
         boolean created = false;
         if (map == null) {
-            map = locationMapWebView(records);
+            map = locationMapWebView(records, null, this::selectHomeHistoryRecord);
             homeMapWebView = map;
             created = true;
         } else {
@@ -4310,15 +4425,20 @@ public class MainActivity extends Activity {
     }
 
     private void updateHomeMapWithHistory(JSONArray mapHistory) {
+        homeMapHistoryRecords = displayableLocations(mapHistory);
+        renderHomeMapForTrailPreference();
+    }
+
+    private void renderHomeMapForTrailPreference() {
         if (homeMapWebView == null) {
             return;
         }
         JSONArray combined = new JSONArray();
         appendMapRecords(combined, homeMapBaseRecords);
-        appendMapRecords(combined, displayableLocations(mapHistory));
-        if (combined.length() > 0) {
-            renderMapRecords(homeMapWebView, combined);
+        if (showHistoryTrail()) {
+            appendMapRecords(combined, homeMapHistoryRecords);
         }
+        renderMapRecords(homeMapWebView, combined);
     }
 
     private void appendMapRecords(JSONArray target, JSONArray records) {
@@ -4457,7 +4577,11 @@ public class MainActivity extends Activity {
         for (int index : LocationHistorySnapshotPolicy.mapIndices(partitionKeys, mapPerUser)) {
             JSONObject location = merged.optJSONObject(index);
             if (location != null) {
-                mapHistory.put(location);
+                try {
+                    mapHistory.put(new JSONObject(location.toString()).put("history_page", index / Math.max(1, perPage) + 1));
+                } catch (Exception exception) {
+                    mapHistory.put(location);
+                }
             }
         }
 
@@ -8915,6 +9039,25 @@ public class MainActivity extends Activity {
         statusView.setVisibility(View.GONE);
         card.addView(statusView, blockParams(dense ? 10 : 16));
         return card;
+    }
+
+    private View homeHeaderActions() {
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setGravity(Gravity.CENTER_VERTICAL);
+
+        Switch historyTrail = new Switch(this);
+        historyTrail.setText("轨迹");
+        historyTrail.setContentDescription("显示历史位置轨迹");
+        historyTrail.setChecked(showHistoryTrail());
+        historyTrail.setMinHeight(0);
+        historyTrail.setMinimumHeight(dp(32));
+        historyTrail.setPadding(0, 0, dp(6), 0);
+        uiStyle.styleSwitch(historyTrail, denseUi());
+        historyTrail.setOnCheckedChangeListener((button, checked) -> setShowHistoryTrail(checked));
+        actions.addView(historyTrail, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        actions.addView(announcementIconButton(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return actions;
     }
 
     private Button announcementIconButton() {

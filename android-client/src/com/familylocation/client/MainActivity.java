@@ -151,8 +151,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 150;
-    private static final String APP_VERSION_NAME = "2.3.6";
+    private static final int APP_VERSION_CODE = 151;
+    private static final String APP_VERSION_NAME = "2.3.7";
     private static final JsonApiClient API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 12_000, 12_000);
     private static final JsonApiClient DIAGNOSTIC_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME + " diagnostics", 1_500, 2_500);
     private static final JsonApiClient REPORT_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 700, 1_800);
@@ -2004,10 +2004,6 @@ public class MainActivity extends Activity {
             if (diagnosticsMobileIpCityUncertain(diagnostics, source)) {
                 builder.append(" / 移动网络出口城市不一致");
             }
-            String attempts = providerAttemptSummary(source);
-            if (!attempts.isEmpty()) {
-                builder.append(" / 探测：").append(attempts);
-            }
         }
     }
 
@@ -2041,10 +2037,6 @@ public class MainActivity extends Activity {
             }
             if (diagnosticsMobileIpCityUncertain(diagnostics, source)) {
                 detail += "\n移动网络出口城市不一致";
-            }
-            String attempts = providerAttemptSummary(source);
-            if (!attempts.isEmpty()) {
-                detail += "\n供应商探测：" + attempts;
             }
             addDetailRow(panel, label, detail);
         }
@@ -4704,18 +4696,16 @@ public class MainActivity extends Activity {
             }
             String label = "ip".equals(type) ? "IP 探测地址" : "WebRTC 探测地址";
             String provider = source.optString("provider", "").trim();
-            String suffix = provider.isEmpty() ? "" : "（" + provider + "）";
             if (provider.contains("安卓")) {
                 androidEvidence = true;
             }
-            panel.addView(homeLatestLine(label + "：" + diagnosticSourceAddress(source) + suffix, false), blockParams(0));
+            panel.addView(homeLatestLine(label + "：" + diagnosticSourceAddress(source), false), blockParams(0));
             String attempts = providerAttemptSummary(source);
             if (!attempts.isEmpty()) {
                 providerEvidence = true;
                 if (attempts.contains("安卓")) {
                     androidEvidence = true;
                 }
-                panel.addView(homeLatestLine("供应商探测：" + attempts, false), blockParams(0));
             }
         }
         Log.i(TAG, "UI_LOCATION_EVIDENCE=provider:" + providerEvidence

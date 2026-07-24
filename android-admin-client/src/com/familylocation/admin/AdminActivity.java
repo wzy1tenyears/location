@@ -100,8 +100,8 @@ public class AdminActivity extends Activity {
     private static final String KEY_ACTIVE_UPDATE_DOWNLOAD_ID = "active_update_download_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "https://example.com/";
-    private static final int APP_VERSION_CODE = 100;
-    private static final String APP_VERSION_NAME = "2.3.5";
+    private static final int APP_VERSION_CODE = 101;
+    private static final String APP_VERSION_NAME = "2.3.6";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
@@ -1354,6 +1354,23 @@ public class AdminActivity extends Activity {
         });
         card.addView(buttonRow(filter, clear), blockParams(12));
 
+        Button previous = secondaryButton("上一页");
+        previous.setEnabled(locationHistoryPage > 1);
+        previous.setOnClickListener(view -> {
+            locationHistoryPage = Math.max(1, locationHistoryPage - 1);
+            loadAdminLocationHistory();
+        });
+        Button next = secondaryButton("下一页");
+        next.setEnabled(totalPages > 0 && locationHistoryPage < totalPages);
+        next.setOnClickListener(view -> {
+            locationHistoryPage += 1;
+            loadAdminLocationHistory();
+        });
+        card.addView(buttonRow(previous, next), blockParams(8));
+        Button refresh = secondaryButton("刷新记录");
+        refresh.setOnClickListener(view -> loadAdminLocationHistory());
+        card.addView(refresh, blockParams(12));
+
         if (locations == null || locations.length() == 0) {
             card.addView(infoPanel("暂无符合条件的历史定位记录。"), blockParams(12));
         } else {
@@ -1384,22 +1401,6 @@ public class AdminActivity extends Activity {
             }
         }
 
-        Button previous = secondaryButton("上一页");
-        previous.setEnabled(locationHistoryPage > 1);
-        previous.setOnClickListener(view -> {
-            locationHistoryPage = Math.max(1, locationHistoryPage - 1);
-            loadAdminLocationHistory();
-        });
-        Button next = secondaryButton("下一页");
-        next.setEnabled(totalPages > 0 && locationHistoryPage < totalPages);
-        next.setOnClickListener(view -> {
-            locationHistoryPage += 1;
-            loadAdminLocationHistory();
-        });
-        card.addView(buttonRow(previous, next), blockParams(8));
-        Button refresh = secondaryButton("刷新记录");
-        refresh.setOnClickListener(view -> loadAdminLocationHistory());
-        card.addView(refresh, blockParams(0));
         setScreen(card, false);
         setStatus("");
     }
@@ -2800,6 +2801,9 @@ public class AdminActivity extends Activity {
             loadAdminSummary(redirectPath);
         });
         card.addView(buttonRow(filter, clear), blockParams(12));
+        Button refresh = secondaryButton("刷新日志");
+        refresh.setOnClickListener(view -> loadAdminSummary(redirectPath));
+        card.addView(refresh, blockParams(12));
         if (logs == null || logs.length() == 0) {
             card.addView(infoPanel(hasLogFilters() ? "暂无符合筛选的日志。" : "暂无日志。"), blockParams(12));
         } else {
@@ -2821,9 +2825,6 @@ public class AdminActivity extends Activity {
                 card.addView(detailLog, blockParams(10));
             }
         }
-        Button refresh = secondaryButton("刷新日志");
-        refresh.setOnClickListener(view -> loadAdminSummary(redirectPath));
-        card.addView(refresh, blockParams(0));
         setScreen(card, false);
         setStatus("");
     }

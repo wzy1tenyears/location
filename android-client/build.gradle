@@ -11,8 +11,8 @@ android {
         applicationId = "com.familylocation.client"
         minSdk = 29
         targetSdk = 35
-        versionCode = 150
-        versionName = "2.3.6"
+        versionCode = 151
+        versionName = "2.3.7"
     }
 
     sourceSets {
@@ -25,6 +25,10 @@ android {
         smoke {
             res.srcDirs("res-smoke")
         }
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {

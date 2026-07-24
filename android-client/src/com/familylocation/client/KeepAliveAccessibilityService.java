@@ -2,16 +2,14 @@ package com.familylocation.client;
 
 import android.accessibilityservice.AccessibilityService;
 import android.content.Context;
-import android.content.SharedPreferences;
+import android.content.Intent;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 
 public final class KeepAliveAccessibilityService extends AccessibilityService {
     private static final String TAG = "FamilyLocationNative";
-    private static final String PREFS = "family_location";
-    private static final String KEY_USER_ROLE = "user_role";
-    private static final String KEY_GROUP_NAME = "group_name";
+    private static final long MODE_TRANSITION_DELAY_MS = 1_000L;
 
     static boolean isEnabled(Context context) {
         try {
@@ -41,7 +39,14 @@ public final class KeepAliveAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         Log.i(TAG, "ACCESSIBILITY_KEEP_ALIVE_BOUND=false");
+        new BackgroundLocationController().requestRestart(this, MODE_TRANSITION_DELAY_MS);
         super.onDestroy();
+    }
+
+    @Override
+    public boolean onUnbind(Intent intent) {
+        new BackgroundLocationController().requestRestart(this, MODE_TRANSITION_DELAY_MS);
+        return super.onUnbind(intent);
     }
 
     @Override
@@ -55,22 +60,6 @@ public final class KeepAliveAccessibilityService extends AccessibilityService {
     }
 
     private void syncLocationService() {
-        SharedPreferences preferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        new BackgroundLocationController().sync(this, new BackgroundLocationController.State() {
-            @Override
-            public String role() {
-                return preferences.getString(KEY_USER_ROLE, "");
-            }
-
-            @Override
-            public String groupName() {
-                return preferences.getString(KEY_GROUP_NAME, "");
-            }
-
-            @Override
-            public boolean guardianContinuousEnabled(String groupName) {
-                return preferences.getBoolean("guardian_continuous_reporting_" + groupName, false);
-            }
-        });
+        new BackgroundLocationController().syncFromPreferences(this);
     }
 }

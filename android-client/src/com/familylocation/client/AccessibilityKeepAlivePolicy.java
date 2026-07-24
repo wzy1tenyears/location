@@ -26,6 +26,17 @@ final class AccessibilityKeepAlivePolicy {
         return false;
     }
 
+    static boolean usesForegroundNotification(boolean accessibilityEnabled) {
+        return !accessibilityEnabled;
+    }
+
+    static boolean notificationPermissionSatisfied(
+        boolean accessibilityEnabled,
+        boolean notificationPermissionGranted
+    ) {
+        return accessibilityEnabled || notificationPermissionGranted;
+    }
+
     private static String[] serviceIds(String enabledServices) {
         String value = enabledServices == null ? "" : enabledServices.trim();
         return value.isEmpty() ? new String[0] : value.split(":");

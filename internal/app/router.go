@@ -71,6 +71,7 @@ func NewRouter(cfg config.Config, db *sql.DB) http.Handler {
 	mux.Handle("GET /api/webrtc-probe", middleware.Chain(http.HandlerFunc(webviews.WebRTCProbe), appOnly))
 	mux.Handle("POST /api/admin/manage", middleware.Chain(http.HandlerFunc(adminManage.Handle), appOnly))
 	mux.Handle("GET /api/admin/summary", middleware.Chain(http.HandlerFunc(adminSummary.Summary), appOnly))
+	mux.Handle("GET /api/admin/location-history", middleware.Chain(http.HandlerFunc(adminSummary.LocationHistory), appOnly))
 	mux.Handle("POST /api/logout", middleware.Chain(http.HandlerFunc(sessionHandler.Logout), appOnly))
 	mux.Handle("GET /api/logout", middleware.Chain(http.HandlerFunc(sessionHandler.Logout), appOnly))
 	mux.Handle("POST /api/heartbeat", middleware.Chain(http.HandlerFunc(heartbeat.Touch), appOnly))

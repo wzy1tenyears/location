@@ -20,6 +20,22 @@ public final class AccessibilityKeepAlivePolicyTest {
             "third-party risk"
         );
         require(AccessibilityKeepAlivePolicy.hasOtherEnabledService("malformed", packageName), "malformed risk");
+        require(
+            !AccessibilityKeepAlivePolicy.usesForegroundNotification(true),
+            "accessibility mode has no foreground notification"
+        );
+        require(
+            AccessibilityKeepAlivePolicy.usesForegroundNotification(false),
+            "notification mode uses foreground notification"
+        );
+        require(
+            AccessibilityKeepAlivePolicy.notificationPermissionSatisfied(true, false),
+            "accessibility mode does not require notification permission"
+        );
+        require(
+            !AccessibilityKeepAlivePolicy.notificationPermissionSatisfied(false, false),
+            "notification mode requires notification permission"
+        );
     }
 
     private static void require(boolean value, String name) {

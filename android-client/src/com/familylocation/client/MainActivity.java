@@ -150,8 +150,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 148;
-    private static final String APP_VERSION_NAME = "2.3.4";
+    private static final int APP_VERSION_CODE = 149;
+    private static final String APP_VERSION_NAME = "2.3.5";
     private static final JsonApiClient API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 12_000, 12_000);
     private static final JsonApiClient DIAGNOSTIC_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME + " diagnostics", 1_500, 2_500);
     private static final JsonApiClient REPORT_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 700, 1_800);
@@ -3245,8 +3245,8 @@ public class MainActivity extends Activity {
         LinearLayout accessibilityKeepAlive = simpleSummaryPanel(
             "无障碍保活",
             accessibilityKeepAliveEnabled
-                ? "已开启。系统正在绑定位置保活辅助服务。"
-                : "未开启。需由你在系统无障碍设置中手动授权。"
+                ? "已开启。持续定位由无障碍服务保活，不显示保活通知。"
+                : "未开启。持续定位使用不可划掉的常驻通知保活。"
         );
         Button accessibilityKeepAliveSettings = secondaryButton(
             accessibilityKeepAliveEnabled ? "查看无障碍设置" : "开启无障碍保活"
@@ -3333,7 +3333,7 @@ public class MainActivity extends Activity {
             new String[][] {
                 new String[] {
                     "用途",
-                    "开启后，Android 会持续绑定本应用的保活辅助服务，以降低位置上报进程在后台被回收的概率。"
+                    "开启后，Android 会持续绑定本应用的保活辅助服务；划掉后台任务后仍继续定位上报，且不显示保活通知。"
                 },
                 new String[] {
                     "隐私边界",
@@ -3341,7 +3341,7 @@ public class MainActivity extends Activity {
                 },
                 new String[] {
                     "如何开启",
-                    "进入系统页面后选择“位置保活辅助服务”并开启。你可随时回到同一页面关闭。"
+                    "进入系统页面后选择“位置保活辅助服务”并开启。关闭后会自动切回不可划掉的常驻通知保活。"
                 }
             },
             "前往系统设置",

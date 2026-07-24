@@ -51,8 +51,9 @@ public class KeepAliveService extends Service {
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final int DEFAULT_REPORT_INTERVAL_SECONDS = 300;
     private static final int NOTIFICATION_ID = 10001;
+    private static final long RESTART_DELAY_MS = 1_000L;
     private static final String TAG = "位置服务";
-    private static final String USER_AGENT = "loc-app/2.3.4";
+    private static final String USER_AGENT = "loc-app/2.3.5";
     private static final JsonApiClient API_CLIENT = new JsonApiClient(USER_AGENT, 12_000, 15_000);
 
     private HandlerThread locationThread;
@@ -70,6 +71,9 @@ public class KeepAliveService extends Service {
     private long lastSettingsAttemptAt;
     private int consecutiveFailures;
     private boolean networkCallbackRegistered;
+    private boolean foregroundActive;
+    private boolean foregroundLocationMode;
+    private boolean intentionalStop;
 
     private static final class ReportTarget {
         final String groupName;
@@ -127,8 +131,12 @@ public class KeepAliveService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        boolean foregroundHandshake = intent != null
+            && intent.getBooleanExtra(BackgroundLocationController.EXTRA_FOREGROUND_START, false);
         try {
-            startForegroundCompat();
+            if (foregroundHandshake) {
+                startForegroundCompat(false);
+            }
         } catch (Exception exception) {
             Log.w(TAG, "进入前台服务失败：" + exception.getMessage());
             stopSelf();
@@ -139,12 +147,22 @@ public class KeepAliveService extends Service {
             stopServiceCleanly();
             return START_NOT_STICKY;
         }
+        try {
+            reconcileExecutionMode();
+        } catch (Exception exception) {
+            Log.w(TAG, "切换后台保活模式失败：" + exception.getMessage());
+            new BackgroundLocationController().requestRestart(this, RESTART_DELAY_MS);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        new BackgroundLocationController().cancelRestart(this);
         scheduleTick(0L);
         return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
+        boolean restartRequired = !intentionalStop && shouldReport();
         if (handler != null && tickRunnable != null) {
             handler.removeCallbacks(tickRunnable);
         }
@@ -161,12 +179,16 @@ public class KeepAliveService extends Service {
             locationThread = null;
         }
         super.onDestroy();
+        if (restartRequired) {
+            new BackgroundLocationController().requestRestart(this, RESTART_DELAY_MS);
+        }
     }
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
         if (shouldReport()) {
             scheduleTick(0L);
+            new BackgroundLocationController().requestRestart(this, RESTART_DELAY_MS);
         }
         super.onTaskRemoved(rootIntent);
     }
@@ -180,6 +202,13 @@ public class KeepAliveService extends Service {
         nextTickAtElapsed = 0L;
         if (!shouldReport()) {
             stopServiceCleanly();
+            return;
+        }
+        try {
+            reconcileExecutionMode();
+        } catch (Exception exception) {
+            Log.w(TAG, "刷新后台保活模式失败：" + exception.getMessage());
+            new BackgroundLocationController().requestRestart(this, RESTART_DELAY_MS);
             return;
         }
 
@@ -424,16 +453,41 @@ public class KeepAliveService extends Service {
         }
     }
 
-    private void startForegroundCompat() {
+    private void startForegroundCompat(boolean locationMode) {
         Notification notification = buildNotification("后台定位上报运行中。");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
+            int serviceType = locationMode
+                ? ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                : ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+            startForeground(NOTIFICATION_ID, notification, serviceType);
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
+        foregroundActive = true;
+        foregroundLocationMode = locationMode;
+    }
+
+    private void reconcileExecutionMode() {
+        boolean notificationMode = AccessibilityKeepAlivePolicy.usesForegroundNotification(
+            KeepAliveAccessibilityService.isEnabled(this)
+        );
+        if (notificationMode) {
+            if (!foregroundActive || !foregroundLocationMode) {
+                startForegroundCompat(true);
+            }
+            return;
+        }
+        removeForegroundNotification();
     }
 
     private void updateNotification(String message) {
+        if (!foregroundActive
+            || !foregroundLocationMode
+            || !AccessibilityKeepAlivePolicy.usesForegroundNotification(
+                KeepAliveAccessibilityService.isEnabled(this)
+            )) {
+            return;
+        }
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) {
             manager.notify(NOTIFICATION_ID, buildNotification(message));
@@ -441,15 +495,27 @@ public class KeepAliveService extends Service {
     }
 
     private void stopServiceCleanly() {
+        intentionalStop = true;
+        new BackgroundLocationController().cancelRestart(this);
         if (locationSampler != null) {
             locationSampler.cancel();
         }
+        removeForegroundNotification();
+        stopSelf();
+    }
+
+    private void removeForegroundNotification() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE);
         } else {
             stopForeground(true);
         }
-        stopSelf();
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) {
+            manager.cancel(NOTIFICATION_ID);
+        }
+        foregroundActive = false;
+        foregroundLocationMode = false;
     }
 
     private JSONArray mergeServerGroupsWithContinuity(JSONArray groups) {
@@ -543,10 +609,14 @@ public class KeepAliveService extends Service {
     }
 
     private boolean shouldReport() {
+        boolean accessibilityEnabled = KeepAliveAccessibilityService.isEnabled(this);
         return !reportTargets().isEmpty()
             && hasLocationPermission()
             && hasBackgroundLocationPermission()
-            && hasNotificationPermission()
+            && AccessibilityKeepAlivePolicy.notificationPermissionSatisfied(
+                accessibilityEnabled,
+                hasNotificationPermission()
+            )
             && !value(prefs().getString(KEY_SESSION_COOKIE, "")).isEmpty();
     }
 
@@ -658,7 +728,7 @@ public class KeepAliveService extends Service {
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
             ? new Notification.Builder(this, CHANNEL_ID)
             : new Notification.Builder(this);
-        return builder
+        Notification notification = builder
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
             .setContentTitle("位置")
             .setContentText(message)
@@ -669,5 +739,7 @@ public class KeepAliveService extends Service {
             .setCategory(Notification.CATEGORY_SERVICE)
             .setPriority(Notification.PRIORITY_LOW)
             .build();
+        notification.flags |= Notification.FLAG_ONGOING_EVENT | Notification.FLAG_NO_CLEAR;
+        return notification;
     }
 }

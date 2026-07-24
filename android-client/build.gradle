@@ -11,8 +11,8 @@ android {
         applicationId = "com.familylocation.client"
         minSdk = 29
         targetSdk = 35
-        versionCode = 148
-        versionName = "2.3.4"
+        versionCode = 149
+        versionName = "2.3.5"
     }
 
     sourceSets {

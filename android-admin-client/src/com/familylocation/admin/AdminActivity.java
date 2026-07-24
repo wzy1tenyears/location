@@ -94,8 +94,8 @@ public class AdminActivity extends Activity {
     private static final String KEY_ACTIVE_UPDATE_DOWNLOAD_ID = "active_update_download_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "https://example.com/";
-    private static final int APP_VERSION_CODE = 98;
-    private static final String APP_VERSION_NAME = "2.3.3";
+    private static final int APP_VERSION_CODE = 99;
+    private static final String APP_VERSION_NAME = "2.3.4";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
@@ -134,6 +134,11 @@ public class AdminActivity extends Activity {
     private String logFilterKeyword = "";
     private int logFilterUserId = 0;
     private int logFilterLimit = 60;
+    private boolean locationHistoryOpen;
+    private String locationHistoryGroup = "";
+    private int locationHistoryUserId;
+    private int locationHistoryPage = 1;
+    private final int locationHistoryLimit = 50;
     private boolean adminLoggedIn;
     private long updateDownloadId = -1L;
     private long pendingInstallDownloadId = -1L;
@@ -1100,6 +1105,7 @@ public class AdminActivity extends Activity {
 
     private void showAdminDashboard(JSONObject response, String redirectPath) {
         inviteManagerOpen = false;
+        locationHistoryOpen = false;
         currentAdminTab = ADMIN_TAB_OVERVIEW;
         lastAdminSummary = response;
         currentRedirectPath = redirectPath == null ? ADMIN_UPDATE_PATH : redirectPath;
@@ -1124,6 +1130,10 @@ public class AdminActivity extends Activity {
                     " / 未关闭工单：" + stats.optInt("open_tickets")
             ), blockParams(16));
         }
+
+        Button openLocationHistory = secondaryButton("查看所有历史定位记录");
+        openLocationHistory.setOnClickListener(view -> openLocationHistoryFromDashboard(response, redirectPath));
+        card.addView(openLocationHistory, blockParams(16));
 
         card.addView(sectionHeading("在线用户", stats == null ? "" : stats.optInt("online_users") + " 在线"), blockParams(8));
         card.addView(compactInfoPanel(onlineUserSummary(response.optJSONArray("users"))), blockParams(16));
@@ -1161,6 +1171,205 @@ public class AdminActivity extends Activity {
     private void openInviteManagerFromDashboard(JSONObject response, String redirectPath) {
         adminDashboardScrollY = activeScrollView == null ? 0 : activeScrollView.getScrollY();
         showInviteManager(lastAdminSummary == null ? response : lastAdminSummary, redirectPath);
+    }
+
+    private void openLocationHistoryFromDashboard(JSONObject response, String redirectPath) {
+        adminDashboardScrollY = activeScrollView == null ? 0 : activeScrollView.getScrollY();
+        lastAdminSummary = lastAdminSummary == null ? response : lastAdminSummary;
+        currentRedirectPath = redirectPath == null ? ADMIN_UPDATE_PATH : redirectPath;
+        locationHistoryOpen = true;
+        locationHistoryPage = 1;
+        loadAdminLocationHistory();
+    }
+
+    private void loadAdminLocationHistory() {
+        if (!locationHistoryOpen) {
+            return;
+        }
+        setStatus("正在加载历史定位记录。");
+        boolean scheduled = runBackground(() -> {
+            try {
+                JSONObject response = getJson(adminLocationHistoryEndpoint());
+                runUi(() -> showAdminLocationHistory(response));
+            } catch (Exception exception) {
+                runUi(() -> {
+                    if (isAdminLoginExpired(exception)) {
+                        handleAdminLoginExpired();
+                        return;
+                    }
+                    setStatus(exception.getMessage());
+                });
+            }
+        });
+        if (!scheduled) {
+            setStatus("请求过多，请稍候再试。");
+        }
+    }
+
+    private String adminLocationHistoryEndpoint() throws Exception {
+        List<String> params = new ArrayList<>();
+        appendQueryParam(params, "group_name", locationHistoryGroup);
+        if (locationHistoryUserId > 0) {
+            appendQueryParam(params, "user_id", String.valueOf(locationHistoryUserId));
+        }
+        appendQueryParam(params, "page", String.valueOf(locationHistoryPage));
+        appendQueryParam(params, "limit", String.valueOf(locationHistoryLimit));
+        return AdminApiPaths.ADMIN_LOCATION_HISTORY + "?" + joinParts(params, "&");
+    }
+
+    private void showAdminLocationHistory(JSONObject response) {
+        if (!locationHistoryOpen) {
+            return;
+        }
+        int total = Math.max(0, response.optInt("total", 0));
+        int totalPages = Math.max(0, response.optInt("total_pages", 0));
+        if (totalPages > 0 && locationHistoryPage > totalPages) {
+            locationHistoryPage = totalPages;
+            loadAdminLocationHistory();
+            return;
+        }
+
+        LinearLayout card = screen("历史定位记录");
+        Button back = secondaryButton("返回后台概览");
+        back.setOnClickListener(view -> {
+            locationHistoryOpen = false;
+            showAdminDashboard(lastAdminSummary, currentRedirectPath);
+        });
+        card.addView(back, blockParams(10));
+
+        JSONArray users = lastAdminSummary == null ? null : lastAdminSummary.optJSONArray("users");
+        JSONArray groups = lastAdminSummary == null ? null : lastAdminSummary.optJSONArray("groups");
+        JSONArray locations = response.optJSONArray("locations");
+        int visible = locations == null ? 0 : locations.length();
+        card.addView(compactInfoPanel(
+            locationHistoryFilterSummary(users, groups)
+                + "\n显示：" + visible + " / " + total + " 条"
+                + "\n页码：" + locationHistoryPage + " / " + Math.max(1, totalPages)
+                + " · 更新：" + response.optString("server_time", "")
+        ), blockParams(8));
+
+        Button filter = secondaryButton("筛选记录");
+        filter.setOnClickListener(view -> showLocationHistoryFilterDialog(users, groups));
+        Button clear = secondaryButton("清空筛选");
+        clear.setEnabled(locationHistoryUserId > 0 || !locationHistoryGroup.trim().isEmpty());
+        clear.setOnClickListener(view -> {
+            locationHistoryUserId = 0;
+            locationHistoryGroup = "";
+            locationHistoryPage = 1;
+            loadAdminLocationHistory();
+        });
+        card.addView(buttonRow(filter, clear), blockParams(12));
+
+        if (locations == null || locations.length() == 0) {
+            card.addView(infoPanel("暂无符合条件的历史定位记录。"), blockParams(12));
+        } else {
+            for (int index = 0; index < locations.length(); index += 1) {
+                JSONObject location = locations.optJSONObject(index);
+                if (location == null) {
+                    continue;
+                }
+                long locationId = location.optLong("id", 0L);
+                LinearLayout panel = detailListPanel();
+                addDetailRow(panel, "记录 ID", String.valueOf(locationId));
+                addDetailRow(panel, "用户", displayName(location));
+                addDetailRow(panel, "家庭组", location.optString("group_name", ""));
+                addDetailRow(panel, "时间", firstText(location.optString("created_at", ""), location.optString("updated_at", "")));
+                addDetailRow(panel, "坐标", formatCoordinate(location.optDouble("latitude")) + ", " + formatCoordinate(location.optDouble("longitude")));
+                addDetailRow(panel, "地址", firstText(locationAddress(location), "未解析"));
+                card.addView(panel, blockParams(6));
+
+                Button detail = secondaryButton("查看详情");
+                detail.setOnClickListener(view -> showLocationDetail(location));
+                Button delete = secondaryButton("删除记录");
+                delete.setEnabled(locationId > 0);
+                delete.setOnClickListener(view -> confirmDanger(
+                    "确定删除定位记录 #" + locationId + "？删除后会自动重算该用户在家庭组中的最新位置。",
+                    () -> deleteLocationHistoryRecord(locationId)
+                ));
+                card.addView(buttonRow(detail, delete), blockParams(10));
+            }
+        }
+
+        Button previous = secondaryButton("上一页");
+        previous.setEnabled(locationHistoryPage > 1);
+        previous.setOnClickListener(view -> {
+            locationHistoryPage = Math.max(1, locationHistoryPage - 1);
+            loadAdminLocationHistory();
+        });
+        Button next = secondaryButton("下一页");
+        next.setEnabled(totalPages > 0 && locationHistoryPage < totalPages);
+        next.setOnClickListener(view -> {
+            locationHistoryPage += 1;
+            loadAdminLocationHistory();
+        });
+        card.addView(buttonRow(previous, next), blockParams(8));
+        Button refresh = secondaryButton("刷新记录");
+        refresh.setOnClickListener(view -> loadAdminLocationHistory());
+        card.addView(refresh, blockParams(0));
+        setScreen(card, false);
+        setStatus("");
+    }
+
+    private void deleteLocationHistoryRecord(long locationId) {
+        JSONObject payload = adminPayload("delete_location");
+        putJson(payload, "location_id", locationId);
+        postAdminActionInline(payload, message -> {
+            showTransientFeedback(message);
+            loadAdminLocationHistory();
+        }, this::setStatus);
+    }
+
+    private String locationHistoryFilterSummary(JSONArray users, JSONArray groups) {
+        String user = "全部用户";
+        if (locationHistoryUserId > 0 && users != null) {
+            for (int index = 0; index < users.length(); index += 1) {
+                JSONObject item = users.optJSONObject(index);
+                if (item != null && item.optInt("id", 0) == locationHistoryUserId) {
+                    user = displayName(item);
+                    break;
+                }
+            }
+        }
+        String group = "全部家庭组";
+        if (!locationHistoryGroup.trim().isEmpty() && groups != null) {
+            for (int index = 0; index < groups.length(); index += 1) {
+                JSONObject item = groups.optJSONObject(index);
+                if (item != null && locationHistoryGroup.equals(item.optString("group_name", ""))) {
+                    group = firstText(item.optString("display_name", ""), locationHistoryGroup);
+                    break;
+                }
+            }
+        }
+        return "筛选：" + user + " / " + group;
+    }
+
+    private void showLocationHistoryFilterDialog(JSONArray users, JSONArray groups) {
+        Dialog dialog = new Dialog(this);
+        LinearLayout form = dialogCard(dialog, "筛选历史定位记录");
+        final int[] nextUserId = new int[] {locationHistoryUserId};
+        final String[] nextGroup = new String[] {locationHistoryGroup};
+
+        Button user = secondaryButton("");
+        updateLogUserFilterButton(user, users, nextUserId[0]);
+        user.setOnClickListener(view -> showLogUserPicker(users, nextUserId, user));
+        Button group = secondaryButton("");
+        updateLogGroupFilterButton(group, groups, nextGroup[0]);
+        group.setOnClickListener(view -> showLogGroupPicker(groups, nextGroup, group));
+        form.addView(user, blockParams(6));
+        form.addView(group, blockParams(12));
+
+        Button cancel = secondaryButton("取消");
+        cancel.setOnClickListener(view -> dialog.dismiss());
+        Button apply = primaryButton("应用筛选");
+        apply.setOnClickListener(view -> {
+            locationHistoryUserId = Math.max(0, nextUserId[0]);
+            locationHistoryGroup = nextGroup[0] == null ? "" : nextGroup[0].trim();
+            locationHistoryPage = 1;
+            dialog.dismiss();
+            loadAdminLocationHistory();
+        });
+        form.addView(buttonRow(cancel, apply), blockParams(0));
+        showCardDialog(dialog);
     }
 
     private String storedAdminUsername() {

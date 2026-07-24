@@ -3,12 +3,8 @@ package com.familylocation.client;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.os.Build;
-import android.util.Log;
 
 public class BootReceiver extends BroadcastReceiver {
-    private static final String TAG = "FamilyLocationBoot";
-
     @Override
     public void onReceive(Context context, Intent intent) {
         String action = intent == null ? "" : intent.getAction();
@@ -18,15 +14,6 @@ public class BootReceiver extends BroadcastReceiver {
             return;
         }
 
-        try {
-            Intent serviceIntent = new Intent(context, KeepAliveService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(serviceIntent);
-            } else {
-                context.startService(serviceIntent);
-            }
-        } catch (Exception exception) {
-            Log.w(TAG, "Start service after boot failed: " + exception.getMessage());
-        }
+        new BackgroundLocationController().syncFromPreferences(context);
     }
 }

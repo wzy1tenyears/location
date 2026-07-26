@@ -131,8 +131,8 @@ func Load() Config {
 		App: AppConfig{
 			Name:              env("LOC_APP_NAME", "位置"),
 			UserAgentToken:    env("LOC_APP_USER_AGENT_TOKEN", "loc-app"),
-			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 151),
-			VersionName:       env("LOC_ANDROID_VERSION_NAME", "2.3.7"),
+			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 152),
+			VersionName:       env("LOC_ANDROID_VERSION_NAME", "2.3.8"),
 			ForceUpdate:       envBool("LOC_ANDROID_FORCE_UPDATE", true),
 			DeviceCookieName:  env("LOC_DEVICE_COOKIE_NAME", "loc_device"),
 			SessionCookieName: env("LOC_SESSION_COOKIE_NAME", "family_location_session"),

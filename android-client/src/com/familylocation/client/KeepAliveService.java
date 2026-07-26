@@ -43,6 +43,8 @@ public class KeepAliveService extends Service {
     private static final String KEY_USER_ROLE = "user_role";
     private static final String KEY_GROUP_NAME = "group_name";
     private static final String KEY_GUARDIAN_CONTINUOUS_REPORTING = "guardian_continuous_reporting";
+    private static final String KEY_GUARDIAN_CONTINUOUS_REPORTING_PREFIX =
+        "guardian_continuous_reporting_";
     private static final String KEY_GROUP_SESSIONS = "group_sessions_json";
     private static final String KEY_REPORT_INTERVAL_SECONDS = "report_interval_seconds";
     private static final String KEY_DEVICE_COOKIE = "device_cookie";
@@ -544,15 +546,15 @@ public class KeepAliveService extends Service {
     }
 
     private boolean continuousForGroup(JSONArray sessions, String groupName) {
+        boolean snapshotEnabled = false;
         for (int index = 0; index < sessions.length(); index++) {
             JSONObject session = sessions.optJSONObject(index);
             if (session != null && groupName.equals(session.optString("group_name", ""))) {
-                return session.optBoolean("continuous", false);
+                snapshotEnabled = session.optBoolean("continuous", false);
+                break;
             }
         }
-        String currentGroupName = prefs().getString(KEY_GROUP_NAME, "");
-        return groupName.equals(currentGroupName)
-            && prefs().getBoolean(KEY_GUARDIAN_CONTINUOUS_REPORTING, false);
+        return guardianContinuousEnabled(groupName, snapshotEnabled);
     }
 
     private List<ReportTarget> reportTargets() {
@@ -575,7 +577,7 @@ public class KeepAliveService extends Service {
         String groupName = value(prefs().getString(KEY_GROUP_NAME, ""));
         String role = normalizeRole(prefs().getString(KEY_USER_ROLE, ""));
         boolean enabled = "monitor".equals(role)
-            || ("guardian".equals(role) && prefs().getBoolean(KEY_GUARDIAN_CONTINUOUS_REPORTING, false));
+            || ("guardian".equals(role) && guardianContinuousEnabled(groupName, false));
         if (enabled && !groupName.isEmpty()) {
             targets.add(new ReportTarget(groupName, role));
         }
@@ -600,12 +602,34 @@ public class KeepAliveService extends Service {
     }
 
     private boolean sessionShouldReport(JSONObject session) {
-        if (session == null || session.optString("group_name", "").trim().isEmpty()) {
+        if (session == null) {
+            return false;
+        }
+        String groupName = session.optString("group_name", "").trim();
+        if (groupName.isEmpty()) {
             return false;
         }
         String role = normalizeRole(session.optString("role", ""));
         return "monitor".equals(role)
-            || ("guardian".equals(role) && session.optBoolean("continuous", false));
+            || ("guardian".equals(role)
+                && guardianContinuousEnabled(groupName, session.optBoolean("continuous", false)));
+    }
+
+    private boolean guardianContinuousEnabled(String groupName, boolean snapshotEnabled) {
+        String normalizedGroupName = value(groupName);
+        if (normalizedGroupName.isEmpty()) {
+            return false;
+        }
+        SharedPreferences preferences = prefs();
+        String perGroupKey = KEY_GUARDIAN_CONTINUOUS_REPORTING_PREFIX + normalizedGroupName;
+        return GuardianContinuousReportingPolicy.resolve(
+            preferences.contains(perGroupKey),
+            preferences.getBoolean(perGroupKey, false),
+            normalizedGroupName.equals(value(preferences.getString(KEY_GROUP_NAME, ""))),
+            preferences.contains(KEY_GUARDIAN_CONTINUOUS_REPORTING),
+            preferences.getBoolean(KEY_GUARDIAN_CONTINUOUS_REPORTING, false),
+            snapshotEnabled
+        );
     }
 
     private boolean shouldReport() {

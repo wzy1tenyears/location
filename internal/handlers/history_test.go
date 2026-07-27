@@ -270,6 +270,17 @@ func TestHistoryMemberOverflowReturnsBoundedSelectionEntryWithoutScanningHistory
 	}
 }
 
+func TestNormalizeHistoryMapPerUserSupportsCompactTrails(t *testing.T) {
+	for _, value := range []int{5, 10, 20, 50, 100} {
+		if got := normalizeHistoryMapPerUser(value); got != value {
+			t.Fatalf("normalizeHistoryMapPerUser(%d) = %d", value, got)
+		}
+	}
+	if got := normalizeHistoryMapPerUser(7); got != 20 {
+		t.Fatalf("unsupported map history size normalized to %d", got)
+	}
+}
+
 func handlerHistoryLocation(id int64, northMeters float64, createdAt time.Time) models.Location {
 	const earthRadiusMetersForTest = 6371008.8
 	return models.Location{

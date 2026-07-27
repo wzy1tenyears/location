@@ -9,20 +9,30 @@ type SettingRepository struct {
 	db *sql.DB
 }
 
+const AppChallengeRequiredSettingKey = "require_cf_challenge"
+
 func NewSettingRepository(db *sql.DB) SettingRepository {
 	return SettingRepository{db: db}
 }
 
 func (repo SettingRepository) Bool(ctx context.Context, key string) (bool, error) {
+	return repo.BoolDefault(ctx, key, false)
+}
+
+func (repo SettingRepository) BoolDefault(ctx context.Context, key string, defaultValue bool) (bool, error) {
 	var value string
 	err := repo.db.QueryRowContext(ctx, "SELECT setting_value FROM app_settings WHERE setting_key = ? LIMIT 1", key).Scan(&value)
 	if err == sql.ErrNoRows {
-		return false, nil
+		return defaultValue, nil
 	}
 	if err != nil {
 		return false, err
 	}
 	return value == "1" || value == "true" || value == "yes" || value == "on", nil
+}
+
+func (repo SettingRepository) AppChallengeRequired(ctx context.Context) (bool, error) {
+	return repo.BoolDefault(ctx, AppChallengeRequiredSettingKey, true)
 }
 
 func (repo SettingRepository) SecurityPolicy(ctx context.Context) (map[string]bool, error) {

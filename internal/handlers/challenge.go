@@ -32,7 +32,12 @@ type ChallengeHandler struct {
 	cfg               config.Config
 	rates             hitLimiter
 	store             repositories.AppChallengeRepository
+	settings          appChallengeSettingReader
 	turnstileVerifier func(token string, secret string, remoteIP string) (bool, error)
+}
+
+type appChallengeSettingReader interface {
+	AppChallengeRequired(ctx context.Context) (bool, error)
 }
 
 func NewChallengeHandler(cfg config.Config, db *sql.DB) ChallengeHandler {
@@ -40,6 +45,7 @@ func NewChallengeHandler(cfg config.Config, db *sql.DB) ChallengeHandler {
 		cfg:               cfg,
 		rates:             repositories.NewRateLimitRepository(db),
 		store:             repositories.NewAppChallengeRepository(db),
+		settings:          repositories.NewSettingRepository(db),
 		turnstileVerifier: verifyTurnstileSiteToken,
 	}
 }
@@ -88,6 +94,15 @@ func (handler ChallengeHandler) start(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, httpx.Unprocessable("Invalid challenge purpose."))
 		return
 	}
+	required, err := appChallengeRequired(r.Context(), handler.settings)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	if !required {
+		httpx.OK(w, map[string]any{"ok": true, "challenge_required": false, "app_challenge_token": ""})
+		return
+	}
 	if strings.TrimSpace(handler.cfg.External.TurnstileSecretKey) == "" {
 		httpx.OK(w, map[string]any{"ok": true, "challenge_required": false, "app_challenge_token": ""})
 		return
@@ -132,6 +147,13 @@ func (handler ChallengeHandler) start(w http.ResponseWriter, r *http.Request) {
 		"challenge_url":      handler.publicURL(r, challengeID, deviceFingerprint),
 		"expires_in":         300,
 	})
+}
+
+func appChallengeRequired(ctx context.Context, settings appChallengeSettingReader) (bool, error) {
+	if settings == nil {
+		return true, nil
+	}
+	return settings.AppChallengeRequired(ctx)
 }
 
 func (handler ChallengeHandler) poll(w http.ResponseWriter, r *http.Request) {

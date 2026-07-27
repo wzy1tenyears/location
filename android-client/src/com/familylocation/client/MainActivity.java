@@ -148,11 +148,23 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static final class AddressDisplayTarget {
+        final JSONObject location;
+        final TextView view;
+        final String prefix;
+
+        AddressDisplayTarget(JSONObject location, TextView view, String prefix) {
+            this.location = location;
+            this.view = view;
+            this.prefix = prefix == null ? "" : prefix;
+        }
+    }
+
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 154;
-    private static final String APP_VERSION_NAME = "2.3.10";
+    private static final int APP_VERSION_CODE = 155;
+    private static final String APP_VERSION_NAME = "2.3.11";
     private static final JsonApiClient API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 12_000, 12_000);
     private static final JsonApiClient DIAGNOSTIC_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME + " diagnostics", 1_500, 2_500);
     private static final JsonApiClient REPORT_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 700, 1_800);
@@ -172,6 +184,7 @@ public class MainActivity extends Activity {
     private static final String KEY_SESSION_COOKIE = "session_cookie";
     private static final String KEY_SEEN_ANNOUNCEMENT_PREFIX = "announcement_seen_";
     private static final String KEY_SHOW_HISTORY_TRAIL = "show_history_trail";
+    private static final String KEY_HISTORY_TRAIL_POINTS = "history_trail_points";
     private static final String KEY_ENVIRONMENT_REPORT_LAST_UPLOAD_PREFIX = "environment_report_last_upload_";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String ACTION_ACCESSIBILITY_DETAILS_SETTINGS =
@@ -180,8 +193,6 @@ public class MainActivity extends Activity {
     private static final String UPDATE_APK_NAME = "location-release.apk";
     private static final long MAX_CACHE_BYTES = 50L * 1024L * 1024L;
     private static final long ENVIRONMENT_REPORT_INTERVAL_MS = 24L * 60L * 60L * 1000L;
-    private static final long REPORT_WATCHDOG_MS = 2_900L;
-    private static final long ADDRESS_DIAGNOSTICS_BUDGET_MS = 300L;
     private static final long ADDRESS_ENRICHMENT_BUDGET_MS = 5_000L;
     private static final long LOGIN_PROBE_STARTUP_DEFER_MS = 300L;
     private static final long STARTUP_CONTENT_DEFER_MS = 32L;
@@ -234,6 +245,11 @@ public class MainActivity extends Activity {
     );
     private final Object ipGeocodeCacheLock = new Object();
     private final LinkedHashMap<String, JSONObject> ipGeocodeCache = new LinkedHashMap<>();
+    private final Object displayAddressLock = new Object();
+    private final LinkedHashMap<String, JSONObject> displayAddressCache = new LinkedHashMap<>();
+    private final LinkedHashMap<String, List<AddressDisplayTarget>> displayAddressWaiters = new LinkedHashMap<>();
+    private final AtomicInteger displayAddressThreadIndex = new AtomicInteger();
+    private ExecutorService displayAddressExecutor;
     private final LatestRequestGate historyRequestGate = new LatestRequestGate();
     private final LatestRequestGate ticketListRequestGate = new LatestRequestGate();
     private final LatestRequestGate ticketThreadRequestGate = new LatestRequestGate();
@@ -254,7 +270,7 @@ public class MainActivity extends Activity {
     private JSONObject legalDocuments;
     private String selectedGroupName = "";
     private int historyPage = 1;
-    private int historyPageSize = 20;
+    private int historyPageSize;
     private int historyUserId = 0;
     private int historyRangeHours = 24;
     private int currentTab = TAB_POSITION;
@@ -1180,10 +1196,26 @@ public class MainActivity extends Activity {
         return prefs().getBoolean(KEY_SHOW_HISTORY_TRAIL, true);
     }
 
+    private int historyTrailPointCount() {
+        int configured = prefs().getInt(
+            KEY_HISTORY_TRAIL_POINTS,
+            getResources().getInteger(R.integer.history_trail_default_points)
+        );
+        return normalizedHistoryCount(configured, R.integer.history_trail_default_points);
+    }
+
     private void setShowHistoryTrail(boolean enabled) {
         prefs().edit().putBoolean(KEY_SHOW_HISTORY_TRAIL, enabled).apply();
         renderHomeMapForTrailPreference();
         setStatus(enabled ? "已显示历史位置轨迹" : "已隐藏历史轨迹，仅显示当前位置");
+    }
+
+    private void setHistoryTrailPointCount(int value) {
+        int normalized = normalizedHistoryCount(value, R.integer.history_trail_default_points);
+        prefs().edit().putInt(KEY_HISTORY_TRAIL_POINTS, normalized).apply();
+        historyPage = 1;
+        loadHomeHistorySummary();
+        setStatus("历史轨迹显示点数已调整为 " + normalized + " 点");
     }
 
     private String currentUserRole() {
@@ -1338,7 +1370,23 @@ public class MainActivity extends Activity {
     }
 
     private int normalizedHistoryPageSize(int value) {
-        return value == 50 || value == 100 ? value : 20;
+        return normalizedHistoryCount(value, R.integer.history_page_default_size);
+    }
+
+    private int normalizedHistoryCount(int value, int defaultResourceId) {
+        int[] options = getResources().getIntArray(R.array.history_count_options);
+        for (int option : options) {
+            if (value == option) {
+                return option;
+            }
+        }
+        int configuredDefault = getResources().getInteger(defaultResourceId);
+        for (int option : options) {
+            if (configuredDefault == option) {
+                return option;
+            }
+        }
+        return options[0];
     }
 
     private int normalizedHistoryRangeHours(int value) {
@@ -1430,12 +1478,12 @@ public class MainActivity extends Activity {
         });
         body.addView(button, blockParams(8));
     }
-    private void showHistorySizePicker(String title, int currentSize, HistorySizeAction action) {
+    private void showHistorySizePicker(String title, String unit, int currentSize, HistorySizeAction action) {
         Dialog dialog = choiceDialog(title);
         LinearLayout body = choiceDialogBody(dialog);
-        int[] sizes = new int[] {20, 50, 100};
+        int[] sizes = getResources().getIntArray(R.array.history_count_options);
         for (int size : sizes) {
-            Button button = secondaryButton((currentSize == size ? "✓ " : "") + size + " 条");
+            Button button = secondaryButton((currentSize == size ? "✓ " : "") + size + " " + unit);
             button.setOnClickListener(view -> {
                 dialog.dismiss();
                 action.apply(size);
@@ -1737,6 +1785,7 @@ public class MainActivity extends Activity {
         position.setTextSize(uiStyle.compactBodyTextSize(denseUi()));
         position.setLineSpacing(dp(2), 1f);
         panel.addView(position, blockParams(4));
+        queueDisplayAddressEnrichment(location, position, "位置： ");
 
         TextView time = body(historyTimeLabel(location) + "： " + historyTimeText(location));
         time.setTextColor(colorMuted());
@@ -4235,7 +4284,7 @@ public class MainActivity extends Activity {
         appendHomeHistoryLoading();
         runBackground(() -> {
             try {
-                final int mapPerUser = 20;
+                final int mapPerUser = historyTrailPointCount();
                 JSONObject request = new JSONObject()
                     .put("group_name", targetGroupName)
                     .put("page", page)
@@ -4376,7 +4425,7 @@ public class MainActivity extends Activity {
 
         Button pageSizeButton = historyControlButton("每页 " + historyPageSize + " 条");
         pageSizeButton.setTag(VIEW_TAG_HOME_HISTORY);
-        pageSizeButton.setOnClickListener(view -> showHistorySizePicker("每页历史条数", historyPageSize, size -> {
+        pageSizeButton.setOnClickListener(view -> showHistorySizePicker("每页历史条数", "条", historyPageSize, size -> {
             historyPageSize = size;
             historyPage = 1;
             loadHomeHistorySummary();
@@ -4671,7 +4720,9 @@ public class MainActivity extends Activity {
 
         panel.addView(summaryCardHeader(memberName, memberRole, roleKey), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         panel.addView(detailDivider(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
-        panel.addView(homeLatestLine(displayLocation, false), blockParams(4));
+        TextView locationLine = homeLatestLine(displayLocation, false);
+        panel.addView(locationLine, blockParams(4));
+        queueDisplayAddressEnrichment(location, locationLine, "");
         panel.addView(homeLatestLine("更新时间：" + updatedAt, false), blockParams(0));
         if (hasMeaningfulText(city)) {
             panel.addView(homeLatestLine("城市：" + city, false), blockParams(0));
@@ -5860,6 +5911,162 @@ public class MainActivity extends Activity {
         return bestAddress;
     }
 
+    private void queueDisplayAddressEnrichment(JSONObject location, TextView targetView, String prefix) {
+        if (location == null || targetView == null || !hasUsableCoordinates(location)
+            || hasConcreteGpsAddress(location.optJSONObject("address_diagnostics"))) {
+            return;
+        }
+        String key = formatCoordinate(location.optDouble("latitude", 0.0d))
+            + "," + formatCoordinate(location.optDouble("longitude", 0.0d));
+        JSONObject cached;
+        boolean startLookup = false;
+        synchronized (displayAddressLock) {
+            cached = displayAddressCache.get(key);
+            if (cached == null) {
+                List<AddressDisplayTarget> waiters = displayAddressWaiters.get(key);
+                if (waiters == null) {
+                    waiters = new ArrayList<>();
+                    displayAddressWaiters.put(key, waiters);
+                    startLookup = true;
+                }
+                waiters.add(new AddressDisplayTarget(location, targetView, prefix));
+            }
+        }
+        if (cached != null) {
+            applyDisplayAddress(location, targetView, prefix, cached);
+            return;
+        }
+        if (!startLookup) {
+            return;
+        }
+        try {
+            displayAddressExecutor().execute(() -> {
+                JSONObject resolved = resolveDisplayGpsAddress(
+                    location.optDouble("latitude", 0.0d),
+                    location.optDouble("longitude", 0.0d)
+                );
+                runUi(() -> completeDisplayAddressLookup(key, resolved));
+            });
+        } catch (RejectedExecutionException exception) {
+            synchronized (displayAddressLock) {
+                displayAddressWaiters.remove(key);
+            }
+        }
+    }
+
+    private JSONObject resolveDisplayGpsAddress(double latitude, double longitude) {
+        JSONObject resolved = reverseAddressByMeituan(latitude, longitude);
+        if (resolved != null && addressPrecisionScore(resolved) >= 3) {
+            return resolved;
+        }
+        resolved = reverseAddressByBigDataCloud(latitude, longitude);
+        return resolved != null && addressPrecisionScore(resolved) >= 3 ? resolved : null;
+    }
+
+    private ExecutorService displayAddressExecutor() {
+        synchronized (displayAddressLock) {
+            if (displayAddressExecutor == null || displayAddressExecutor.isShutdown()) {
+                int workers = getResources().getInteger(R.integer.display_address_workers);
+                int queueSize = getResources().getInteger(R.integer.display_address_queue_size);
+                displayAddressExecutor = new ThreadPoolExecutor(
+                    workers,
+                    workers,
+                    30L,
+                    TimeUnit.SECONDS,
+                    new ArrayBlockingQueue<>(queueSize),
+                    runnable -> new Thread(runnable, "loc-display-address-" + displayAddressThreadIndex.incrementAndGet()),
+                    new ThreadPoolExecutor.AbortPolicy()
+                );
+            }
+            return displayAddressExecutor;
+        }
+    }
+
+    private void completeDisplayAddressLookup(String key, JSONObject resolved) {
+        List<AddressDisplayTarget> waiters;
+        synchronized (displayAddressLock) {
+            waiters = displayAddressWaiters.remove(key);
+            if (resolved != null) {
+                displayAddressCache.put(key, resolved);
+                int maxEntries = getResources().getInteger(R.integer.display_address_cache_entries);
+                while (displayAddressCache.size() > maxEntries) {
+                    String oldest = displayAddressCache.keySet().iterator().next();
+                    displayAddressCache.remove(oldest);
+                }
+            }
+        }
+        if (resolved == null || waiters == null) {
+            return;
+        }
+        for (AddressDisplayTarget waiter : waiters) {
+            applyDisplayAddress(waiter.location, waiter.view, waiter.prefix, resolved);
+        }
+    }
+
+    private void applyDisplayAddress(JSONObject location, TextView targetView, String prefix, JSONObject resolved) {
+        if (location == null || targetView == null || resolved == null) {
+            return;
+        }
+        try {
+            JSONObject existing = location.optJSONObject("address_diagnostics");
+            JSONObject diagnostics = existing == null ? new JSONObject() : new JSONObject(existing.toString());
+            JSONArray mergedSources = new JSONArray().put(new JSONObject(resolved.toString()));
+            JSONArray existingSources = existing == null ? null : existing.optJSONArray("sources");
+            if (existingSources != null) {
+                for (int index = 0; index < existingSources.length(); index += 1) {
+                    JSONObject source = existingSources.optJSONObject(index);
+                    if (source != null && !"gps".equals(source.optString("type", ""))) {
+                        mergedSources.put(new JSONObject(source.toString()));
+                    }
+                }
+            }
+            diagnostics.put("preferred_source", "gps")
+                .put("preferred_address", resolved.optString("address", ""))
+                .put("preferred_country", resolved.optString("country", ""))
+                .put("preferred_region", resolved.optString("region", ""))
+                .put("preferred_city", resolved.optString("city", ""))
+                .put("preferred_district", resolved.optString("district", ""))
+                .put("preferred_street", resolved.optString("street", ""))
+                .put("preferred_detail", resolved.optString("detail", ""))
+                .put("preferred_poi", resolved.optString("poi", ""))
+                .put("preferred_latitude", location.optDouble("latitude", 0.0d))
+                .put("preferred_longitude", location.optDouble("longitude", 0.0d))
+                .put("preferred_coordinate_system", "wgs84")
+                .put("sources", mergedSources);
+            location.put("address_diagnostics", diagnostics);
+            targetView.setText((prefix == null ? "" : prefix) + locationDisplayText(
+                location,
+                diagnostics,
+                diagnostics.optString("preferred_address", "")
+            ));
+        } catch (Exception ignored) {
+        }
+    }
+
+    private boolean hasConcreteGpsAddress(JSONObject diagnostics) {
+        if (diagnostics == null) {
+            return false;
+        }
+        if (addressPrecisionScore(preferredAddressCandidate(
+            diagnostics,
+            diagnostics.optString("preferred_address", "")
+        )) >= 3) {
+            return true;
+        }
+        JSONArray sources = diagnostics.optJSONArray("sources");
+        if (sources == null) {
+            return false;
+        }
+        for (int index = 0; index < sources.length(); index += 1) {
+            JSONObject source = sources.optJSONObject(index);
+            if (source != null && "gps".equals(source.optString("type", ""))
+                && addressPrecisionScore(source) >= 3) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private JSONObject preferredAddressCandidate(JSONObject diagnostics, String address) {
         JSONObject candidate = new JSONObject();
         if (diagnostics == null) {
@@ -6125,8 +6332,12 @@ public class MainActivity extends Activity {
             mainHandler.removeCallbacks(reportWatchdog);
         }
         reportWatchdog = () -> finishReport(attemptToken, "上报超时，已解除按钮锁定；请检查定位和网络后重试。");
-        mainHandler.postDelayed(reportWatchdog, REPORT_WATCHDOG_MS);
+        mainHandler.postDelayed(reportWatchdog, reportWatchdogMs());
         return attemptToken;
+    }
+
+    private long reportWatchdogMs() {
+        return getResources().getInteger(R.integer.report_watchdog_ms);
     }
 
     private void syncReportButtonState() {
@@ -6202,7 +6413,7 @@ public class MainActivity extends Activity {
                     return;
                 }
                 String reportGroupName = currentGroupName();
-                JSONObject addressDiagnostics = buildAddressDiagnostics(attemptToken, location);
+                JSONObject addressDiagnostics = buildImmediateAddressDiagnostics(location);
                 if (!reportAttemptGate.isActive(attemptToken)) {
                     return;
                 }
@@ -6302,8 +6513,37 @@ public class MainActivity extends Activity {
         }
     }
 
-    private JSONObject buildAddressDiagnostics(long attemptToken, android.location.Location location) {
-        return buildAddressDiagnostics(attemptToken, location, ADDRESS_DIAGNOSTICS_BUDGET_MS);
+    private JSONObject buildImmediateAddressDiagnostics(android.location.Location location) {
+        if (location == null) {
+            return null;
+        }
+        double latitude = location.getLatitude();
+        double longitude = location.getLongitude();
+        try {
+            JSONObject source = addressSource(
+                "gps",
+                "定位地址",
+                "坐标",
+                "",
+                formatCoordinate(latitude) + ", " + formatCoordinate(longitude),
+                "",
+                "",
+                "",
+                latitude,
+                longitude
+            ).put("coordinate_system", "wgs84");
+            return new JSONObject()
+                .put("complete", false)
+                .put("mismatch", false)
+                .put("preferred_source", "gps")
+                .put("preferred_address", source.optString("address", ""))
+                .put("preferred_latitude", latitude)
+                .put("preferred_longitude", longitude)
+                .put("preferred_coordinate_system", "wgs84")
+                .put("sources", new JSONArray().put(source));
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private JSONObject buildAddressDiagnostics(long attemptToken, android.location.Location location, long budgetMs) {
@@ -8793,6 +9033,13 @@ public class MainActivity extends Activity {
         invalidateScreenRequests();
         backgroundExecutor.shutdownNow();
         addressProbeExecutor.shutdownNow();
+        synchronized (displayAddressLock) {
+            if (displayAddressExecutor != null) {
+                displayAddressExecutor.shutdownNow();
+                displayAddressExecutor = null;
+            }
+            displayAddressWaiters.clear();
+        }
         ipProviderExecutor.shutdownNow();
         locationEnrichmentExecutor.shutdownNow();
         destroyManagedWebViews();
@@ -9083,6 +9330,24 @@ public class MainActivity extends Activity {
         uiStyle.styleSwitch(historyTrail, denseUi());
         historyTrail.setOnCheckedChangeListener((button, checked) -> setShowHistoryTrail(checked));
         actions.addView(historyTrail, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        Button trailPoints = secondaryButton(historyTrailPointCount() + "点");
+        trailPoints.setContentDescription("设置历史轨迹显示点数");
+        trailPoints.setTextSize(12);
+        trailPoints.setMinWidth(0);
+        trailPoints.setMinimumWidth(dp(48));
+        trailPoints.setMinHeight(0);
+        trailPoints.setMinimumHeight(dp(32));
+        trailPoints.setPadding(dp(8), 0, dp(8), 0);
+        trailPoints.setOnClickListener(view -> showHistorySizePicker(
+            "历史轨迹显示点数",
+            "点",
+            historyTrailPointCount(),
+            size -> {
+                trailPoints.setText(size + "点");
+                setHistoryTrailPointCount(size);
+            }
+        ));
+        actions.addView(trailPoints, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         actions.addView(announcementIconButton(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return actions;
     }

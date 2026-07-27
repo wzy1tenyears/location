@@ -100,8 +100,8 @@ public class AdminActivity extends Activity {
     private static final String KEY_ACTIVE_UPDATE_DOWNLOAD_ID = "active_update_download_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "https://example.com/";
-    private static final int APP_VERSION_CODE = 101;
-    private static final String APP_VERSION_NAME = "2.3.6";
+    private static final int APP_VERSION_CODE = 102;
+    private static final String APP_VERSION_NAME = "2.3.7";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
@@ -1206,6 +1206,7 @@ public class AdminActivity extends Activity {
         LinearLayout card = screen("定位后台管理");
         JSONObject stats = response.optJSONObject("stats");
         JSONObject settings = response.optJSONObject("security_settings");
+        JSONObject challengeSettings = response.optJSONObject("challenge_settings");
         TextView loadedAt = body("后台数据已加载：" + response.optString("server_time", ""));
         loadedAt.setTextColor(colorMuted());
         loadedAt.setIncludeFontPadding(false);
@@ -1234,6 +1235,9 @@ public class AdminActivity extends Activity {
 
         card.addView(sectionTitle("安全策略"), blockParams(8));
         card.addView(buildSecuritySettingsPanel(settings, redirectPath, false), blockParams(16));
+
+        card.addView(sectionTitle("Cloudflare 质询"), blockParams(8));
+        card.addView(buildChallengeSettingsPanel(challengeSettings, redirectPath), blockParams(16));
 
         card.addView(sectionTitle("公告管理"), blockParams(8));
         card.addView(buildAnnouncementManagerPanel(response, redirectPath, false), blockParams(16));
@@ -1561,8 +1565,32 @@ public class AdminActivity extends Activity {
         LinearLayout card = screen("安全策略");
         JSONObject settings = response.optJSONObject("security_settings");
         card.addView(buildSecuritySettingsPanel(settings, redirectPath, true), blockParams(0));
+        card.addView(sectionTitle("Cloudflare 质询"), blockParams(8));
+        card.addView(buildChallengeSettingsPanel(response.optJSONObject("challenge_settings"), redirectPath), blockParams(0));
         setScreen(card, false);
         setStatus("");
+    }
+
+    private LinearLayout buildChallengeSettingsPanel(JSONObject settings, String redirectPath) {
+        JSONObject safeSettings = settings == null ? new JSONObject() : settings;
+        LinearLayout panel = detailListPanel();
+        boolean configured = safeSettings.optBoolean("configured", false);
+        CheckBox required = policyCheckBox("登录和注册启用 CF 质询", safeSettings.optBoolean("required", true));
+        TextView summary = body(configured
+            ? "Turnstile 密钥已配置。关闭后双端将直接进入账号认证，登录和注册频率限制仍然生效。"
+            : "Turnstile 密钥尚未完整配置；即使开关为开启，服务端也会自动跳过质询。登录和注册频率限制仍然生效。");
+        summary.setTextColor(colorMuted());
+        summary.setPadding(0, dp(2), 0, dp(10));
+        panel.addView(summary, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        panel.addView(compactPolicyRow("要求人机验证", required), blockParams(8));
+        Button save = primaryButton("保存 CF 质询设置");
+        save.setOnClickListener(view -> {
+            JSONObject payload = adminPayload("update_cf_challenge");
+            putJson(payload, "required", required.isChecked());
+            postAdminAction(payload, redirectPath);
+        });
+        panel.addView(save, blockParams(0));
+        return panel;
     }
 
     private LinearLayout buildSecuritySettingsPanel(JSONObject settings, String redirectPath, boolean includeDescription) {

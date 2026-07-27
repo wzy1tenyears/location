@@ -53,6 +53,7 @@ $RequiredFiles = @(
     'internal/session/session.go',
     'internal/handlers/updates.go',
     'internal/handlers/challenge.go',
+    'internal/handlers/challenge_setting_test.go',
     'internal/handlers/login.go',
     'internal/handlers/register.go',
     'internal/handlers/groups.go',
@@ -198,6 +199,26 @@ $ExpectedRoutes = @(
 foreach ($Route in $ExpectedRoutes) {
     if ($RouterText -notmatch [regex]::Escape($Route)) {
         throw "v3 router is missing route: $Route"
+    }
+}
+
+$ChallengeToggleText = @(
+    (Get-Content -LiteralPath (Join-Path $Root 'internal/repositories/settings.go') -Raw -Encoding UTF8),
+    (Get-Content -LiteralPath (Join-Path $Root 'internal/handlers/challenge.go') -Raw -Encoding UTF8),
+    (Get-Content -LiteralPath (Join-Path $Root 'internal/handlers/login.go') -Raw -Encoding UTF8),
+    (Get-Content -LiteralPath (Join-Path $Root 'internal/handlers/register.go') -Raw -Encoding UTF8),
+    (Get-Content -LiteralPath (Join-Path $Root 'internal/handlers/admin_manage.go') -Raw -Encoding UTF8),
+    (Get-Content -LiteralPath (Join-Path $Root 'internal/handlers/admin_summary.go') -Raw -Encoding UTF8)
+) -join "`n"
+foreach ($Control in @(
+    'AppChallengeRequiredSettingKey',
+    'AppChallengeRequired(ctx context.Context)',
+    'update_cf_challenge',
+    'challenge_settings',
+    'appChallengeRequired(r.Context(), handler.settings)'
+)) {
+    if ($ChallengeToggleText -notmatch [regex]::Escape($Control)) {
+        throw "v3 Cloudflare challenge toggle is missing control: $Control"
     }
 }
 

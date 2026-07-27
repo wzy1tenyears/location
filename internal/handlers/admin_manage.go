@@ -64,6 +64,18 @@ func (handler AdminManageHandler) Handle(w http.ResponseWriter, r *http.Request)
 
 func (handler AdminManageHandler) execute(r *http.Request, action string, data map[string]any) (string, error) {
 	switch action {
+	case "update_cf_challenge":
+		value := "0"
+		if truthyAny(data["required"]) {
+			value = "1"
+		}
+		if err := handler.settings.Set(r.Context(), repositories.AppChallengeRequiredSettingKey, value); err != nil {
+			return "", err
+		}
+		if value == "1" {
+			return "Cloudflare 质询已启用。", nil
+		}
+		return "Cloudflare 质询已停用，登录和注册仍受频率限制。", nil
 	case "update_security_settings":
 		for _, key := range repositories.SecuritySettingKeys() {
 			value := "0"

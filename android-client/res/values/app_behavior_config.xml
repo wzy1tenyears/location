@@ -1,0 +1,15 @@
+<resources>
+    <integer name="report_watchdog_ms">10000</integer>
+    <integer name="history_page_default_size">20</integer>
+    <integer name="history_trail_default_points">20</integer>
+    <integer name="display_address_cache_entries">128</integer>
+    <integer name="display_address_workers">3</integer>
+    <integer name="display_address_queue_size">128</integer>
+    <integer-array name="history_count_options">
+        <item>5</item>
+        <item>10</item>
+        <item>20</item>
+        <item>50</item>
+        <item>100</item>
+    </integer-array>
+</resources>

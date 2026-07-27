@@ -131,9 +131,7 @@ func (handler HistoryHandler) List(w http.ResponseWriter, r *http.Request) {
 	if !containsInt([]int{20, 50, 100}, req.PerPage) {
 		req.PerPage = 20
 	}
-	if !containsInt([]int{20, 50, 100}, req.MapPerUser) {
-		req.MapPerUser = 20
-	}
+	req.MapPerUser = normalizeHistoryMapPerUser(req.MapPerUser)
 	req.RangeHours = normalizeHistoryRangeHours(req.RangeHours)
 
 	scope, _, err := handler.scope.requireScope(r, selectedGroupName(r, req.GroupName))
@@ -390,6 +388,13 @@ func normalizeHistoryRangeHours(value int) int {
 		return value
 	}
 	return 24
+}
+
+func normalizeHistoryMapPerUser(value int) int {
+	if containsInt([]int{5, 10, 20, 50, 100}, value) {
+		return value
+	}
+	return 20
 }
 
 func historyRowsAtOrAfter(rows []models.Location, since time.Time) []models.Location {

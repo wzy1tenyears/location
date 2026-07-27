@@ -111,14 +111,24 @@ func (handler AdminSummaryHandler) Summary(w http.ResponseWriter, r *http.Reques
 		httpx.Error(w, err)
 		return
 	}
+	challengeRequired, err := handler.settings.AppChallengeRequired(r.Context())
+	if err != nil {
+		log.Printf("admin summary challenge setting failed: %v", err)
+		httpx.Error(w, err)
+		return
+	}
 
 	httpx.OK(w, map[string]any{
-		"ok":                  true,
-		"admin_username":      handler.cfg.Auth.AdminUsername,
-		"stats":               stats,
-		"groups":              groups,
-		"memberships":         memberships,
-		"security_settings":   securitySettings,
+		"ok":                true,
+		"admin_username":    handler.cfg.Auth.AdminUsername,
+		"stats":             stats,
+		"groups":            groups,
+		"memberships":       memberships,
+		"security_settings": securitySettings,
+		"challenge_settings": map[string]any{
+			"required":   challengeRequired,
+			"configured": strings.TrimSpace(handler.cfg.External.TurnstileSiteKey) != "" && strings.TrimSpace(handler.cfg.External.TurnstileSecretKey) != "",
+		},
 		"users":               users,
 		"locations":           locations,
 		"environment_reports": environmentReports,

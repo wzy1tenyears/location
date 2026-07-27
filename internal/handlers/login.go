@@ -25,6 +25,7 @@ type LoginHandler struct {
 	limits             adminLoginAttemptLimiter
 	rates              resettableRateLimiter
 	challenges         repositories.AppChallengeRepository
+	settings           appChallengeSettingReader
 	sessions           session.Store
 	checkUserPassword  func(string, string) bool
 	checkAdminPassword func(string) bool
@@ -44,6 +45,7 @@ func NewLoginHandler(cfg config.Config, db *sql.DB, sessions session.Reader) Log
 		limits:            repositories.NewAuthLimitRepository(db),
 		rates:             repositories.NewRateLimitRepository(db),
 		challenges:        repositories.NewAppChallengeRepository(db),
+		settings:          repositories.NewSettingRepository(db),
 		sessions:          session.Store{CookieName: sessions.CookieName, Repo: sessions.Repo, Lifetime: cfg.App.SessionLifetime},
 		checkUserPassword: services.CheckPassword,
 		checkAdminPassword: func(password string) bool {
@@ -244,6 +246,13 @@ func (handler LoginHandler) bindUserDevice(r *http.Request, user models.User, de
 }
 
 func (handler LoginHandler) verifyTurnstile(r *http.Request, token string, purpose string) error {
+	required, err := appChallengeRequired(r.Context(), handler.settings)
+	if err != nil {
+		return err
+	}
+	if !required {
+		return nil
+	}
 	deviceFingerprint, _ := requestDeviceFingerprint(r, handler.cfg.App.DeviceCookieName)
 	if strings.HasPrefix(token, "app:") {
 		ok, err := consumeAppChallengeToken(r.Context(), token, purpose, handler.cfg, handler.challenges, deviceFingerprint)

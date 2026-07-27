@@ -49,6 +49,7 @@ type RegisterHandler struct {
 	devices    repositories.DeviceRepository
 	rates      repositories.RateLimitRepository
 	challenges repositories.AppChallengeRepository
+	settings   appChallengeSettingReader
 	sessions   session.Store
 }
 
@@ -61,6 +62,7 @@ func NewRegisterHandler(cfg config.Config, db *sql.DB, sessions session.Reader) 
 		devices:    repositories.NewDeviceRepository(db),
 		rates:      repositories.NewRateLimitRepository(db),
 		challenges: repositories.NewAppChallengeRepository(db),
+		settings:   repositories.NewSettingRepository(db),
 		sessions:   session.Store{CookieName: sessions.CookieName, Repo: sessions.Repo, Lifetime: cfg.App.SessionLifetime},
 	}
 }
@@ -279,6 +281,13 @@ func ensureBoundFamilyGroupExistsTx(ctx context.Context, tx *sql.Tx, groupName s
 }
 
 func (handler RegisterHandler) verifyTurnstile(r *http.Request, token string) error {
+	required, err := appChallengeRequired(r.Context(), handler.settings)
+	if err != nil {
+		return err
+	}
+	if !required {
+		return nil
+	}
 	deviceFingerprint, _ := requestDeviceFingerprint(r, handler.cfg.App.DeviceCookieName)
 	if strings.HasPrefix(token, "app:") {
 		ok, err := consumeAppChallengeToken(r.Context(), token, "register", handler.cfg, handler.challenges, deviceFingerprint)

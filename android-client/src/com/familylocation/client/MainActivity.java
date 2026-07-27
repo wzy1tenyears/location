@@ -151,8 +151,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 153;
-    private static final String APP_VERSION_NAME = "2.3.9";
+    private static final int APP_VERSION_CODE = 154;
+    private static final String APP_VERSION_NAME = "2.3.10";
     private static final JsonApiClient API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 12_000, 12_000);
     private static final JsonApiClient DIAGNOSTIC_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME + " diagnostics", 1_500, 2_500);
     private static final JsonApiClient REPORT_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 700, 1_800);
@@ -1641,12 +1641,38 @@ public class MainActivity extends Activity {
                 JSONObject diagnostics = record.optJSONObject("address_diagnostics");
                 JSONObject mapDiagnostics = new JSONObject();
                 JSONArray gpsSources = new JSONArray();
+                JSONObject firstGpsSource = null;
                 JSONArray sources = diagnostics == null ? null : diagnostics.optJSONArray("sources");
                 if (sources != null) {
                     for (int sourceIndex = 0; sourceIndex < sources.length(); sourceIndex += 1) {
                         JSONObject source = sources.optJSONObject(sourceIndex);
                         if (source != null && "gps".equals(source.optString("type", "").trim().toLowerCase(Locale.ROOT))) {
-                            gpsSources.put(new JSONObject(source.toString()));
+                            JSONObject gpsSource = new JSONObject(source.toString());
+                            gpsSources.put(gpsSource);
+                            if (firstGpsSource == null) {
+                                firstGpsSource = gpsSource;
+                            }
+                        }
+                    }
+                }
+                if (diagnostics != null && "gps".equals(diagnostics.optString("preferred_source", "").trim().toLowerCase(Locale.ROOT))) {
+                    if (firstGpsSource == null) {
+                        firstGpsSource = new JSONObject().put("type", "gps").put("provider", "GPS");
+                        gpsSources.put(firstGpsSource);
+                    }
+                    for (String[] field : new String[][] {
+                        {"preferred_address", "address"},
+                        {"preferred_country", "country"},
+                        {"preferred_region", "region"},
+                        {"preferred_city", "city"},
+                        {"preferred_district", "district"},
+                        {"preferred_street", "street"},
+                        {"preferred_detail", "detail"},
+                        {"preferred_poi", "poi"}
+                    }) {
+                        String value = diagnostics.optString(field[0], "").trim();
+                        if (!value.isEmpty() && firstGpsSource.optString(field[1], "").trim().isEmpty()) {
+                            firstGpsSource.put(field[1], value);
                         }
                     }
                 }

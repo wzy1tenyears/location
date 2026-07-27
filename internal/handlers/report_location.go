@@ -515,7 +515,9 @@ func assessLocationJump(previousLatitude, previousLongitude, previousAccuracy fl
 	distance := haversineMeters(previousLatitude, previousLongitude, latitude, longitude)
 	effectiveDistance := math.Max(0, distance-previousAccuracy-currentAccuracy-cfg.JumpAllowanceMeters)
 	observedSpeed := effectiveDistance / elapsed
-	stationaryJump := effectiveDistance > cfg.MaxStationaryJumpMeters &&
+	stationaryJump := cfg.MaxStationaryJumpSeconds > 0 &&
+		elapsed <= float64(cfg.MaxStationaryJumpSeconds) &&
+		effectiveDistance > cfg.MaxStationaryJumpMeters &&
 		(reportedSpeed == nil || *reportedSpeed <= cfg.MaxStationarySpeedMPS)
 	if observedSpeed <= cfg.MaxReasonableTravelMPS && !stationaryJump {
 		return nil
@@ -532,6 +534,7 @@ func assessLocationJump(previousLatitude, previousLongitude, previousAccuracy fl
 		"reported_speed_mps":        nullableFloat(reportedSpeed),
 		"previous_accuracy":         previousAccuracy,
 		"current_accuracy":          currentAccuracy,
+		"stationary_window_seconds": cfg.MaxStationaryJumpSeconds,
 	}
 }
 

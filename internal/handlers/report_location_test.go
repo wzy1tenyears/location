@@ -239,6 +239,7 @@ func newReportLocationTestHandler(t *testing.T, latestCreatedAt *time.Time) (Rep
 			MaxLocationFutureSeconds: 15,
 			JumpAllowanceMeters:      100,
 			MaxStationaryJumpMeters:  200,
+			MaxStationaryJumpSeconds: 120,
 			MaxStationarySpeedMPS:    2,
 		}},
 		db:        db,

@@ -119,6 +119,9 @@ func TestHistoryMapInfoWindowUsesOnlyGPSAddressSource(t *testing.T) {
 		"city: firstText(gpsSource && gpsSource.city),",
 		"region: firstText(gpsSource && gpsSource.region),",
 		"country: firstText(gpsSource && gpsSource.country),",
+		"const placeName = firstText(item.address, [item.country, item.region, item.city].filter(Boolean).join(' '));",
+		"if (placeName) lines.push(`地名：${placeName}`);",
+		"roleLabel: firstText(record.role_label),",
 	} {
 		if !strings.Contains(historyMapHTML, required) {
 			t.Fatalf("history map GPS-only information priority is missing %q", required)

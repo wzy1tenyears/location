@@ -113,6 +113,7 @@ type LocationConfig struct {
 	MaxLocationFutureSeconds int
 	JumpAllowanceMeters      float64
 	MaxStationaryJumpMeters  float64
+	MaxStationaryJumpSeconds int
 	MaxStationarySpeedMPS    float64
 	DiagnosticsUpdateSeconds int
 	MaxDiagnosticsBytes      int
@@ -137,8 +138,8 @@ func Load() Config {
 		App: AppConfig{
 			Name:              env("LOC_APP_NAME", "位置"),
 			UserAgentToken:    env("LOC_APP_USER_AGENT_TOKEN", "loc-app"),
-			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 153),
-			VersionName:       env("LOC_ANDROID_VERSION_NAME", "2.3.9"),
+			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 154),
+			VersionName:       env("LOC_ANDROID_VERSION_NAME", "2.3.10"),
 			ForceUpdate:       envBool("LOC_ANDROID_FORCE_UPDATE", true),
 			DeviceCookieName:  env("LOC_DEVICE_COOKIE_NAME", "loc_device"),
 			SessionCookieName: env("LOC_SESSION_COOKIE_NAME", "family_location_session"),
@@ -192,6 +193,7 @@ func Load() Config {
 			MaxLocationFutureSeconds: envPositiveInt("LOC_MAX_LOCATION_FUTURE_SECONDS", 15),
 			JumpAllowanceMeters:      envPositiveFloat("LOC_LOCATION_JUMP_ALLOWANCE_METERS", 100),
 			MaxStationaryJumpMeters:  envPositiveFloat("LOC_MAX_STATIONARY_JUMP_METERS", 200),
+			MaxStationaryJumpSeconds: envPositiveInt("LOC_MAX_STATIONARY_JUMP_SECONDS", 120),
 			MaxStationarySpeedMPS:    envPositiveFloat("LOC_MAX_STATIONARY_SPEED_MPS", 2),
 			DiagnosticsUpdateSeconds: envInt("LOC_LOCATION_DIAGNOSTICS_UPDATE_SECONDS", 600),
 			MaxDiagnosticsBytes:      envInt("LOC_MAX_ADDRESS_DIAGNOSTICS_BYTES", 12000),

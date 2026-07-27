@@ -175,9 +175,9 @@
 
     function markerInfo(item) {
       const lines = [];
-      lines.push(`${item.name} · ${sourceLabel(item.type)}`);
-      if (item.address) lines.push(item.address);
-      if (item.city || item.region || item.country) lines.push([item.country, item.region, item.city].filter(Boolean).join(' '));
+      lines.push(`${item.name} · ${item.roleLabel ? `${item.roleLabel}最近定位` : '最近定位'}`);
+      const placeName = firstText(item.address, [item.country, item.region, item.city].filter(Boolean).join(' '));
+      if (placeName) lines.push(`地名：${placeName}`);
       if (item.provider) lines.push(`来源：${item.provider}`);
       const firstReportedAt = firstText(item.firstReportedAt, item.time);
       const lastReportedAt = firstText(item.lastReportedAt, item.time, firstReportedAt);
@@ -236,6 +236,7 @@
       return {
         type: 'gps',
         name,
+        roleLabel: firstText(record.role_label),
         label: initialOf(name),
         lat: mapCoordinate.lat,
         lng: mapCoordinate.lng,
@@ -330,7 +331,7 @@
         const latest = group[group.length - 1] === item;
         const marker = new AMap.Marker({
           position: [item.lng, item.lat],
-          content: makeMarkerContent(item.type, latest, item.label, item.name, item.color, item.historyPointColor),
+          content: makeMarkerContent(item.type, latest, item.label, firstText(item.address ? `${item.name} · ${item.address}` : '', item.name), item.color, item.historyPointColor),
           offset: latest
             ? new AMap.Pixel(-18, -18)
             : new AMap.Pixel(-HISTORY_POINT_DIAMETER / 2, -HISTORY_POINT_DIAMETER / 2),

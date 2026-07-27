@@ -14,6 +14,7 @@ func trustedLocationConfig() config.LocationConfig {
 		MaxLocationFutureSeconds: 15,
 		JumpAllowanceMeters:      100,
 		MaxStationaryJumpMeters:  200,
+		MaxStationaryJumpSeconds: 120,
 		MaxStationarySpeedMPS:    2,
 		MaxReasonableTravelMPS:   120,
 	}
@@ -72,6 +73,19 @@ func TestAssessLocationJumpRejectsStationaryJump(t *testing.T) {
 	}
 	if meta := assessLocationJump(35, -120, 10, now.Add(-time.Second), 36, -120, 10, &drivingSpeed, now, cfg); meta == nil {
 		t.Fatal("physically impossible jump was accepted")
+	}
+}
+
+func TestAssessLocationJumpAllowsPlausibleMovementAfterLongReportGap(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	cfg := trustedLocationConfig()
+	stationarySpeed := 0.5
+	meta := assessLocationJump(
+		35, -120, 10, now.Add(-10*time.Minute),
+		35.018, -120, 10, &stationarySpeed, now, cfg,
+	)
+	if meta != nil {
+		t.Fatalf("plausible long-gap movement was rejected: %#v", meta)
 	}
 }
 

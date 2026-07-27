@@ -140,21 +140,20 @@ func TestHistoryMapInfoWindowUsesOnlyGPSAddressSource(t *testing.T) {
 	}
 }
 
-func TestHistoryMapRawGPSCoordinatesIgnoreAddressOnlyPreferredSystem(t *testing.T) {
-	start := strings.Index(historyMapHTML, "    function coordinateSystemFor(")
-	end := strings.Index(historyMapHTML, "    function firstGpsSource(")
+func TestHistoryMapAlwaysConvertsWGS84ToGCJ02(t *testing.T) {
+	start := strings.Index(historyMapHTML, "    function mapCoordinateFor(")
+	end := strings.Index(historyMapHTML, "    function sourceLabel(")
 	if start < 0 || end <= start {
-		t.Fatal("history map coordinate-system block not found")
+		t.Fatal("history map coordinate conversion block not found")
 	}
 	conversion := historyMapHTML[start:end]
-	if !strings.Contains(conversion, "meta.coordinate_system,\n          source && source.coordinate_system") {
-		t.Fatal("history map does not prioritize raw location metadata and GPS source coordinates")
+	if !strings.Contains(conversion, "return wgs84ToGcj02(lng, lat);") {
+		t.Fatal("history map must always convert Android WGS84 coordinates to GCJ-02")
 	}
-	if strings.Contains(conversion, "preferred_coordinate_system") {
-		t.Fatal("history map treated an address/IP preferred coordinate system as the raw GPS coordinate system")
-	}
-	if strings.Contains(conversion, "mock_provider") || !strings.Contains(conversion, "return 'wgs84';") {
-		t.Fatal("history map must default unknown raw GPS coordinates to WGS84 without inferring a coordinate system from mock-provider state")
+	for _, forbidden := range []string{"coordinateSystemFor", "preferred_coordinate_system", "mock_provider", "bd09", "gcj02"} {
+		if strings.Contains(conversion, forbidden) {
+			t.Fatalf("history map still conditionally selects raw coordinate system through %q", forbidden)
+		}
 	}
 }
 

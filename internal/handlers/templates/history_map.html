@@ -104,38 +104,6 @@
       return { lat: lat + dLat, lng: lng + dLng };
     }
 
-    function bd09ToGcj02(lng, lat) {
-      const x = lng - 0.0065;
-      const y = lat - 0.006;
-      const z = Math.sqrt(x * x + y * y) - 0.00002 * Math.sin(y * Math.PI * 3000.0 / 180.0);
-      const theta = Math.atan2(y, x) - 0.000003 * Math.cos(x * Math.PI * 3000.0 / 180.0);
-      return {
-        lng: z * Math.cos(theta),
-        lat: z * Math.sin(theta),
-      };
-    }
-
-    function normalizedCoordinateSystem(value) {
-      const text = firstText(value).toLowerCase().replace(/[^a-z0-9]/g, '');
-      if (text === 'bd09' || text === 'baidu') return 'bd09';
-      if (text === 'gcj02' || text === 'gcj' || text === 'amap' || text === 'gaode') return 'gcj02';
-      if (text === 'wgs84' || text === 'gps') return 'wgs84';
-      return '';
-    }
-
-    function coordinateSystemFor(record, diagnostics) {
-      const meta = record && record.location_meta && typeof record.location_meta === 'object' ? record.location_meta : {};
-      const source = firstGpsSource(diagnostics);
-      const system = normalizedCoordinateSystem(
-        firstText(
-          meta.coordinate_system,
-          source && source.coordinate_system
-        )
-      );
-      if (system) return system;
-      return 'wgs84';
-    }
-
     function firstGpsSource(diagnostics) {
       const sources = diagnostics && Array.isArray(diagnostics.sources) ? diagnostics.sources : [];
       for (const source of sources) {
@@ -145,9 +113,6 @@
     }
 
     function mapCoordinateFor(record, lng, lat, diagnostics) {
-      const system = coordinateSystemFor(record, diagnostics);
-      if (system === 'bd09') return bd09ToGcj02(lng, lat);
-      if (system === 'gcj02') return { lng, lat };
       return wgs84ToGcj02(lng, lat);
     }
 

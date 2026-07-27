@@ -155,6 +155,11 @@ final class P2PCryptoSupport {
         return new JSONObject()
             .put("group_name", groupName)
             .put("p2p_key_version", current.optInt("key_version", 0))
+            .put("location_provider", plainPayload.optString("location_provider", ""))
+            .put("location_time", plainPayload.optString("location_time", ""))
+            .put("location_coordinate_system", plainPayload.optString("location_coordinate_system", ""))
+            .put("location_mock_provider", plainPayload.optBoolean("location_mock_provider", false))
+            .put("accuracy", plainPayload.opt("accuracy"))
             .put("encrypted_payload", encryptedPayload);
     }
 

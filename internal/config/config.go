@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -108,6 +109,11 @@ type LocationConfig struct {
 	MaxAccuracyMeters        float64
 	MaxSpeedMPS              float64
 	MaxReasonableTravelMPS   float64
+	MaxLocationAgeSeconds    int
+	MaxLocationFutureSeconds int
+	JumpAllowanceMeters      float64
+	MaxStationaryJumpMeters  float64
+	MaxStationarySpeedMPS    float64
 	DiagnosticsUpdateSeconds int
 	MaxDiagnosticsBytes      int
 }
@@ -131,8 +137,8 @@ func Load() Config {
 		App: AppConfig{
 			Name:              env("LOC_APP_NAME", "位置"),
 			UserAgentToken:    env("LOC_APP_USER_AGENT_TOKEN", "loc-app"),
-			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 152),
-			VersionName:       env("LOC_ANDROID_VERSION_NAME", "2.3.8"),
+			VersionCode:       envInt("LOC_ANDROID_VERSION_CODE", 153),
+			VersionName:       env("LOC_ANDROID_VERSION_NAME", "2.3.9"),
 			ForceUpdate:       envBool("LOC_ANDROID_FORCE_UPDATE", true),
 			DeviceCookieName:  env("LOC_DEVICE_COOKIE_NAME", "loc_device"),
 			SessionCookieName: env("LOC_SESSION_COOKIE_NAME", "family_location_session"),
@@ -179,9 +185,14 @@ func Load() Config {
 		Location: LocationConfig{
 			HistoryLimit:             envPositiveInt("LOC_LOCATION_HISTORY_LIMIT", defaultLocationHistoryLimit),
 			MinReportSeconds:         envInt("LOC_MIN_LOCATION_REPORT_SECONDS", 10),
-			MaxAccuracyMeters:        envFloat("LOC_MAX_LOCATION_ACCURACY_METERS", 5000),
+			MaxAccuracyMeters:        envPositiveFloat("LOC_MAX_LOCATION_ACCURACY_METERS", 100),
 			MaxSpeedMPS:              envFloat("LOC_MAX_LOCATION_SPEED_MPS", 120),
 			MaxReasonableTravelMPS:   envFloat("LOC_MAX_REASONABLE_TRAVEL_MPS", 120),
+			MaxLocationAgeSeconds:    envPositiveInt("LOC_MAX_LOCATION_AGE_SECONDS", 60),
+			MaxLocationFutureSeconds: envPositiveInt("LOC_MAX_LOCATION_FUTURE_SECONDS", 15),
+			JumpAllowanceMeters:      envPositiveFloat("LOC_LOCATION_JUMP_ALLOWANCE_METERS", 100),
+			MaxStationaryJumpMeters:  envPositiveFloat("LOC_MAX_STATIONARY_JUMP_METERS", 200),
+			MaxStationarySpeedMPS:    envPositiveFloat("LOC_MAX_STATIONARY_SPEED_MPS", 2),
 			DiagnosticsUpdateSeconds: envInt("LOC_LOCATION_DIAGNOSTICS_UPDATE_SECONDS", 600),
 			MaxDiagnosticsBytes:      envInt("LOC_MAX_ADDRESS_DIAGNOSTICS_BYTES", 12000),
 		},
@@ -314,6 +325,14 @@ func envFloat(key string, fallback float64) float64 {
 	}
 	value, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func envPositiveFloat(key string, fallback float64) float64 {
+	value := envFloat(key, fallback)
+	if value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
 		return fallback
 	}
 	return value

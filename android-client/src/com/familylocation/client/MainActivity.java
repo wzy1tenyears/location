@@ -151,8 +151,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 152;
-    private static final String APP_VERSION_NAME = "2.3.8";
+    private static final int APP_VERSION_CODE = 153;
+    private static final String APP_VERSION_NAME = "2.3.9";
     private static final JsonApiClient API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 12_000, 12_000);
     private static final JsonApiClient DIAGNOSTIC_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME + " diagnostics", 1_500, 2_500);
     private static final JsonApiClient REPORT_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 700, 1_800);
@@ -6040,6 +6040,10 @@ public class MainActivity extends Activity {
                 return;
             }
             String provider = fastestLocationProvider(providers);
+            if (provider == null) {
+                finishReport(attemptToken, "无法读取可信定位：请开启 GPS 和精确位置后重试。");
+                return;
+            }
             android.location.LocationListener listener = new android.location.LocationListener() {
                 @Override
                 public void onLocationChanged(android.location.Location newLocation) {
@@ -6047,6 +6051,10 @@ public class MainActivity extends Activity {
                         return;
                     }
                     clearReportLocationListener(attemptToken);
+                    if (!isAcceptableLocationFix(newLocation)) {
+                        finishReport(attemptToken, "GPS 定位尚未达到可信条件，请到开阔处后重试。");
+                        return;
+                    }
                     Log.i(TAG, "PERF_LOCATION_ACQUIRE_MS=" + Math.max(0L, android.os.SystemClock.elapsedRealtime() - reportStartedAtElapsedMs));
                     submitLocation(attemptToken, newLocation);
                 }
@@ -6124,38 +6132,41 @@ public class MainActivity extends Activity {
             return null;
         }
 
-        android.location.Location best = null;
         try {
-            for (String provider : manager.getProviders(true)) {
-                android.location.Location candidate = manager.getLastKnownLocation(provider);
-                if (candidate == null) {
-                    continue;
-                }
-                if (best == null || candidate.getAccuracy() < best.getAccuracy()) {
-                    best = candidate;
-                }
+            if (!manager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)) {
+                return null;
             }
+            android.location.Location candidate = manager.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER);
+            return isAcceptableLocationFix(candidate) ? candidate : null;
         } catch (SecurityException ignored) {
             return null;
         }
-        return best;
     }
 
     private String fastestLocationProvider(List<String> providers) {
-        if (providers.contains(android.location.LocationManager.NETWORK_PROVIDER)) {
-            return android.location.LocationManager.NETWORK_PROVIDER;
-        }
-        if (providers.contains("fused")) {
-            return "fused";
-        }
         if (providers.contains(android.location.LocationManager.GPS_PROVIDER)) {
             return android.location.LocationManager.GPS_PROVIDER;
         }
-        return providers.get(0);
+        return null;
+    }
+
+    private boolean isAcceptableLocationFix(android.location.Location location) {
+        return location != null && LocationFixPolicy.isAcceptable(
+            location.getProvider(),
+            location.getTime(),
+            System.currentTimeMillis(),
+            location.hasAccuracy(),
+            location.hasAccuracy() ? location.getAccuracy() : 0f,
+            isMockLocation(location)
+        );
     }
 
     private void submitLocation(long attemptToken, android.location.Location location) {
         if (!reportAttemptGate.isActive(attemptToken)) {
+            return;
+        }
+        if (!isAcceptableLocationFix(location)) {
+            finishReport(attemptToken, "已拒绝非 GPS、过期、模拟或低精度定位数据。");
             return;
         }
         setStatus("正在上报位置");

@@ -240,8 +240,8 @@ public class KeepAliveService extends Service {
 
     private void onLocationSampled(Location location) {
         long now = System.currentTimeMillis();
-        if (location == null || !BackgroundReportPolicy.locationIsFresh(location.getTime(), now, reportIntervalMs())) {
-            Log.w(TAG, "本轮没有可用的新位置，稍后重试。");
+        if (!isAcceptableLocationFix(location, now)) {
+            Log.w(TAG, "本轮没有新鲜可信的 GPS 位置，已跳过并稍后重试。");
             scheduleTick(BackgroundReportPolicy.LOCATION_RETRY_DELAY_MS);
             return;
         }
@@ -254,6 +254,20 @@ public class KeepAliveService extends Service {
             ReportResult result = reportLocationNow(snapshot);
             postToHandler(() -> finishReport(result));
         });
+    }
+
+    private boolean isAcceptableLocationFix(Location location, long now) {
+        boolean mockProvider = location != null
+            && Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2
+            && location.isFromMockProvider();
+        return location != null && LocationFixPolicy.isAcceptable(
+            location.getProvider(),
+            location.getTime(),
+            now,
+            location.hasAccuracy(),
+            location.hasAccuracy() ? location.getAccuracy() : 0f,
+            mockProvider
+        );
     }
 
     private void finishReport(ReportResult result) {
@@ -334,6 +348,10 @@ public class KeepAliveService extends Service {
         }
         body.put("location_provider", location.getProvider());
         body.put("location_time", String.valueOf(location.getTime()));
+        body.put("location_coordinate_system", "wgs84");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+            body.put("location_mock_provider", location.isFromMockProvider());
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (location.hasVerticalAccuracy()) {
                 body.put("vertical_accuracy", location.getVerticalAccuracyMeters());

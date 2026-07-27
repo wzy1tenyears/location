@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net"
 	"net/http"
@@ -111,6 +112,10 @@ func (handler ReportLocationHandler) Report(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if p2pEnabled {
+		if err := validateReportedLocationFix(data, time.Now(), handler.cfg.Location); err != nil {
+			httpx.Error(w, err)
+			return
+		}
 		handler.insertEncryptedLocation(w, r, scope, encryptedPayloadJSON, p2pKeyVersion, deviceReport)
 		return
 	}
@@ -249,6 +254,10 @@ ON DUPLICATE KEY UPDATE
 }
 
 func (handler ReportLocationHandler) insertPlainLocation(w http.ResponseWriter, r *http.Request, scope *userScope, data map[string]any, diagnosticsJSON string, addressMismatch bool, deviceReport map[string]any) {
+	if err := validateReportedLocationFix(data, time.Now(), handler.cfg.Location); err != nil {
+		httpx.Error(w, err)
+		return
+	}
 	latitude, okLat := floatFromMap(data, "latitude")
 	longitude, okLng := floatFromMap(data, "longitude")
 	if !okLat || !okLng {
@@ -282,8 +291,10 @@ func (handler ReportLocationHandler) insertPlainLocation(w http.ResponseWriter, 
 		httpx.Error(w, err)
 		return
 	}
-	jumpMeta, err := handler.assertPlausibleTx(r.Context(), tx, scope, latitude, longitude, optionalFloat(hasAccuracy, accuracy))
+	jumpMeta, err := handler.assertPlausibleTx(r.Context(), tx, scope, latitude, longitude, optionalFloat(hasAccuracy, accuracy), optionalFloat(hasSpeed, speed))
 	if err != nil {
+		_ = tx.Rollback()
+		handler.recordLocationJump(r, scope, jumpMeta)
 		httpx.Error(w, err)
 		return
 	}
@@ -380,6 +391,50 @@ func (handler ReportLocationHandler) validateMeasurements(accuracy *float64, hea
 	return nil
 }
 
+func validateReportedLocationFix(data map[string]any, now time.Time, cfg config.LocationConfig) error {
+	provider := strings.ToLower(strings.TrimSpace(fmt.Sprint(data["location_provider"])))
+	if provider != "gps" {
+		return httpx.Unprocessable("仅接受 GPS 定位数据，已拒绝其他定位源。")
+	}
+	if truthyAny(data["location_mock_provider"]) {
+		return httpx.Unprocessable("模拟定位数据已被拒绝。")
+	}
+	if strings.ToLower(strings.TrimSpace(fmt.Sprint(data["location_coordinate_system"]))) != "wgs84" {
+		return httpx.Unprocessable("定位坐标系必须为 WGS84。")
+	}
+	accuracy, hasAccuracy := floatFromMap(data, "accuracy")
+	if !hasAccuracy || math.IsNaN(accuracy) || math.IsInf(accuracy, 0) || accuracy < 0 || accuracy > cfg.MaxAccuracyMeters {
+		return httpx.Unprocessable("定位精度不满足可信上报条件。")
+	}
+	locationTimeMs, ok := reportedLocationTimeMillis(data["location_time"])
+	if !ok {
+		return httpx.Unprocessable("定位时间不完整，已拒绝上报。")
+	}
+	age := now.Sub(time.UnixMilli(locationTimeMs))
+	if age > time.Duration(cfg.MaxLocationAgeSeconds)*time.Second {
+		return httpx.Unprocessable("定位数据已过期，已拒绝上报。")
+	}
+	if age < -time.Duration(cfg.MaxLocationFutureSeconds)*time.Second {
+		return httpx.Unprocessable("定位时间异常，已拒绝上报。")
+	}
+	return nil
+}
+
+func reportedLocationTimeMillis(value any) (int64, bool) {
+	raw := strings.TrimSpace(fmt.Sprint(value))
+	if raw == "" || raw == "<nil>" {
+		return 0, false
+	}
+	if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed > 0 {
+		return parsed, true
+	}
+	numeric, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(numeric) || math.IsInf(numeric, 0) || numeric <= 0 || numeric > float64(1<<63-1) {
+		return 0, false
+	}
+	return int64(numeric), true
+}
+
 func lockReportUserTx(ctx context.Context, tx *sql.Tx, userID int64) error {
 	var lockedUserID int64
 	return tx.QueryRowContext(ctx, `
@@ -414,7 +469,7 @@ LIMIT 1`, scope.User.ID, scope.Membership.GroupName).Scan(&createdAt)
 	return nil
 }
 
-func (handler ReportLocationHandler) assertPlausibleTx(ctx context.Context, tx *sql.Tx, scope *userScope, latitude float64, longitude float64, accuracy *float64) (map[string]any, error) {
+func (handler ReportLocationHandler) assertPlausibleTx(ctx context.Context, tx *sql.Tx, scope *userScope, latitude float64, longitude float64, accuracy *float64, reportedSpeed *float64) (map[string]any, error) {
 	if math.Abs(latitude) < 0.000001 && math.Abs(longitude) < 0.000001 {
 		return nil, httpx.Unprocessable("定位坐标异常，已拒绝上报。")
 	}
@@ -434,11 +489,6 @@ ORDER BY created_at DESC, id DESC
 	if err != nil {
 		return nil, err
 	}
-	elapsed := time.Since(createdAt).Seconds()
-	if elapsed <= 0 {
-		return nil, nil
-	}
-	distance := haversineMeters(previousLatitude, previousLongitude, latitude, longitude)
 	previousAccuracyValue := 0.0
 	if previousAccuracy.Valid && previousAccuracy.Float64 > 0 {
 		previousAccuracyValue = previousAccuracy.Float64
@@ -447,22 +497,49 @@ ORDER BY created_at DESC, id DESC
 	if accuracy != nil && *accuracy > 0 {
 		currentAccuracy = *accuracy
 	}
-	effectiveDistance := math.Max(0, distance-previousAccuracyValue-currentAccuracy-1000)
-	speed := effectiveDistance / elapsed
-	if speed <= handler.cfg.Location.MaxReasonableTravelMPS {
+	meta := assessLocationJump(
+		previousLatitude, previousLongitude, previousAccuracyValue, createdAt,
+		latitude, longitude, currentAccuracy, reportedSpeed, time.Now(), handler.cfg.Location,
+	)
+	if meta == nil {
 		return nil, nil
 	}
+	return meta, httpx.Unprocessable("定位跳点异常，已拒绝上报。")
+}
+
+func assessLocationJump(previousLatitude, previousLongitude, previousAccuracy float64, previousAt time.Time, latitude, longitude, currentAccuracy float64, reportedSpeed *float64, now time.Time, cfg config.LocationConfig) map[string]any {
+	elapsed := now.Sub(previousAt).Seconds()
+	if elapsed <= 0 {
+		return nil
+	}
+	distance := haversineMeters(previousLatitude, previousLongitude, latitude, longitude)
+	effectiveDistance := math.Max(0, distance-previousAccuracy-currentAccuracy-cfg.JumpAllowanceMeters)
+	observedSpeed := effectiveDistance / elapsed
+	stationaryJump := effectiveDistance > cfg.MaxStationaryJumpMeters &&
+		(reportedSpeed == nil || *reportedSpeed <= cfg.MaxStationarySpeedMPS)
+	if observedSpeed <= cfg.MaxReasonableTravelMPS && !stationaryJump {
+		return nil
+	}
 	return map[string]any{
-		"previous_latitude":   previousLatitude,
-		"previous_longitude":  previousLongitude,
-		"latitude":            latitude,
-		"longitude":           longitude,
-		"distance_meters":     math.Round(distance*100) / 100,
-		"elapsed_seconds":     int(elapsed),
-		"effective_speed_mps": math.Round(speed*100) / 100,
-		"previous_accuracy":   previousAccuracyValue,
-		"current_accuracy":    currentAccuracy,
-	}, nil
+		"previous_latitude":         previousLatitude,
+		"previous_longitude":        previousLongitude,
+		"latitude":                  latitude,
+		"longitude":                 longitude,
+		"distance_meters":           math.Round(distance*100) / 100,
+		"elapsed_seconds":           int(elapsed),
+		"effective_distance_meters": math.Round(effectiveDistance*100) / 100,
+		"effective_speed_mps":       math.Round(observedSpeed*100) / 100,
+		"reported_speed_mps":        nullableFloat(reportedSpeed),
+		"previous_accuracy":         previousAccuracy,
+		"current_accuracy":          currentAccuracy,
+	}
+}
+
+func nullableFloat(value *float64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func (handler ReportLocationHandler) recordLocationJump(r *http.Request, scope *userScope, meta map[string]any) {
@@ -470,7 +547,9 @@ func (handler ReportLocationHandler) recordLocationJump(r *http.Request, scope *
 		return
 	}
 	id := scope.User.ID
-	_ = handler.users.RecordLog(r.Context(), &id, scope.Membership.GroupName, "location_jump_anomaly", "位置变化异常", meta, httpx.ClientIP(r), r.UserAgent())
+	if err := handler.users.RecordLog(r.Context(), &id, scope.Membership.GroupName, "location_jump_anomaly", "位置变化异常，已拒绝", meta, httpx.ClientIP(r), r.UserAgent()); err != nil {
+		log.Printf("record rejected location jump: %v", err)
+	}
 }
 
 func (handler ReportLocationHandler) storeDeviceReport(ctx context.Context, userID int64, report map[string]any, locationID int64, groupName string) {
@@ -492,7 +571,9 @@ func (handler ReportLocationHandler) storeDeviceReport(ctx context.Context, user
 func (handler ReportLocationHandler) afterReport(r *http.Request, scope *userScope, locationID int64, accuracy *float64, addressMismatch bool, message string, meta map[string]any) {
 	_ = handler.users.TouchPresence(r.Context(), scope.User.ID, scope.Membership.GroupName, r.UserAgent(), httpx.ClientIP(r))
 	id := scope.User.ID
-	_ = handler.users.RecordLog(r.Context(), &id, scope.Membership.GroupName, "location_report", message, meta, httpx.ClientIP(r), r.UserAgent())
+	if err := handler.users.RecordLog(r.Context(), &id, scope.Membership.GroupName, "location_report", message, meta, httpx.ClientIP(r), r.UserAgent()); err != nil {
+		log.Printf("record location report log: %v", err)
+	}
 }
 
 func encryptedPayload(value any) (string, bool, error) {
@@ -1001,6 +1082,9 @@ func handlerDiagnosticCoordinatesPresent(value map[string]any) bool {
 }
 
 func diagnosticsPlaceMismatch(sources []map[string]any) bool {
+	if diagnosticSourceConflict(sourceByType(sources, "ip"), sourceByType(sources, "webrtc")) {
+		return true
+	}
 	trusted := filterSources(sources, "gps")
 	if len(trusted) < 2 {
 		return false
@@ -1012,6 +1096,20 @@ func diagnosticsPlaceMismatch(sources []map[string]any) bool {
 	}
 	if distinctCompareValues(trusted, "city") > 1 && !diagnosticsIPWebRTCSameCitySameRegion(sources) {
 		return true
+	}
+	return false
+}
+
+func diagnosticSourceConflict(left map[string]any, right map[string]any) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	for _, field := range []string{"country", "region"} {
+		leftValue := compareValue(left[field])
+		rightValue := compareValue(right[field])
+		if leftValue != "" && rightValue != "" && leftValue != rightValue {
+			return true
+		}
 	}
 	return false
 }

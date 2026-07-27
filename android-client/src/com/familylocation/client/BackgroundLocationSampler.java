@@ -16,7 +16,7 @@ final class BackgroundLocationSampler {
     }
 
     private static final String TAG = "BackgroundLocation";
-    private static final float GOOD_ACCURACY_METERS = 40f;
+    private static final float SETTLED_ACCURACY_METERS = 40f;
     private static final long ACCURATE_FIX_SETTLE_MS = 1500L;
 
     private final LocationManager locationManager;
@@ -102,7 +102,7 @@ final class BackgroundLocationSampler {
     }
 
     private void accept(Location location) {
-        if (!active || location == null) {
+        if (!active || !isAcceptableFix(location)) {
             return;
         }
         if (isBetter(location, bestLocation)) {
@@ -131,12 +131,6 @@ final class BackgroundLocationSampler {
         if (fineLocation && enabled(LocationManager.GPS_PROVIDER)) {
             providers.add(LocationManager.GPS_PROVIDER);
         }
-        if (enabled(LocationManager.NETWORK_PROVIDER)) {
-            providers.add(LocationManager.NETWORK_PROVIDER);
-        }
-        if (enabled(LocationManager.PASSIVE_PROVIDER)) {
-            providers.add(LocationManager.PASSIVE_PROVIDER);
-        }
         return providers;
     }
 
@@ -145,7 +139,7 @@ final class BackgroundLocationSampler {
         for (String provider : enabledProviders(fineLocation)) {
             try {
                 Location candidate = locationManager.getLastKnownLocation(provider);
-                if (isBetter(candidate, best)) {
+                if (isAcceptableFix(candidate) && isBetter(candidate, best)) {
                     best = candidate;
                 }
             } catch (Exception ignored) {
@@ -164,7 +158,18 @@ final class BackgroundLocationSampler {
     }
 
     private boolean isGoodFix(Location location) {
-        return location != null && location.hasAccuracy() && location.getAccuracy() <= GOOD_ACCURACY_METERS;
+        return isAcceptableFix(location) && location.getAccuracy() <= SETTLED_ACCURACY_METERS;
+    }
+
+    private boolean isAcceptableFix(Location location) {
+        return location != null && LocationFixPolicy.isAcceptable(
+            location.getProvider(),
+            location.getTime(),
+            System.currentTimeMillis(),
+            location.hasAccuracy(),
+            location.hasAccuracy() ? location.getAccuracy() : 0f,
+            location.isFromMockProvider()
+        );
     }
 
     private boolean isBetter(Location candidate, Location current) {

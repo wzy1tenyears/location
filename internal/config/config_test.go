@@ -62,6 +62,28 @@ func TestLoadPreservesPositiveLocationHistoryLimit(t *testing.T) {
 	}
 }
 
+func TestLoadUsesTrustedLocationDefaults(t *testing.T) {
+	loaded := Load().Location
+	if loaded.MaxAccuracyMeters != 100 || loaded.MaxLocationAgeSeconds != 60 || loaded.MaxLocationFutureSeconds != 15 {
+		t.Fatalf("trusted fix defaults = %#v", loaded)
+	}
+	if loaded.JumpAllowanceMeters != 100 || loaded.MaxStationaryJumpMeters != 200 || loaded.MaxStationarySpeedMPS != 2 {
+		t.Fatalf("jump defaults = %#v", loaded)
+	}
+}
+
+func TestLoadReadsTrustedLocationOverrides(t *testing.T) {
+	t.Setenv("LOC_MAX_LOCATION_AGE_SECONDS", "45")
+	t.Setenv("LOC_MAX_LOCATION_FUTURE_SECONDS", "10")
+	t.Setenv("LOC_LOCATION_JUMP_ALLOWANCE_METERS", "80")
+	t.Setenv("LOC_MAX_STATIONARY_JUMP_METERS", "150")
+	t.Setenv("LOC_MAX_STATIONARY_SPEED_MPS", "1.5")
+	loaded := Load().Location
+	if loaded.MaxLocationAgeSeconds != 45 || loaded.MaxLocationFutureSeconds != 10 || loaded.JumpAllowanceMeters != 80 || loaded.MaxStationaryJumpMeters != 150 || loaded.MaxStationarySpeedMPS != 1.5 {
+		t.Fatalf("trusted location overrides = %#v", loaded)
+	}
+}
+
 func TestLoadReadsWriteFreezeFile(t *testing.T) {
 	t.Setenv("LOC_WRITE_FREEZE_FILE", "/srv/family-location/state/runtime/write-freeze")
 	if got := Load().Server.WriteFreezeFile; got != "/srv/family-location/state/runtime/write-freeze" {

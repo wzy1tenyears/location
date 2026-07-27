@@ -3,6 +3,8 @@ package repositories
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 
 	"familylocation/location-v3/internal/models"
 )
@@ -146,18 +148,40 @@ func (repo UserRepository) ClearFailedLogin(ctx context.Context, userID int64) e
 }
 
 func (repo UserRepository) RecordLog(ctx context.Context, userID *int64, groupName string, eventType string, message string, metaJSON any, ip string, userAgent string) error {
-	_, err := repo.db.ExecContext(ctx, `
+	serializedMeta, err := serializeLogMeta(metaJSON)
+	if err != nil {
+		return err
+	}
+	_, err = repo.db.ExecContext(ctx, `
 INSERT INTO user_logs (user_id, group_name, event_type, message, meta_json, ip, user_agent)
 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		userID,
 		textLimit(groupName, 100),
 		textLimit(eventType, 40),
 		textLimit(message, 255),
-		metaJSON,
+		serializedMeta,
 		textLimit(ip, 45),
 		textLimit(userAgent, 255),
 	)
 	return err
+}
+
+func serializeLogMeta(value any) (any, error) {
+	switch typed := value.(type) {
+	case nil, string, []byte:
+		return typed, nil
+	case json.RawMessage:
+		if !json.Valid(typed) {
+			return nil, errors.New("log meta JSON is invalid")
+		}
+		return string(typed), nil
+	default:
+		payload, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		return string(payload), nil
+	}
 }
 
 func (repo UserRepository) TouchPresence(ctx context.Context, userID int64, groupName string, userAgent string, ip string) error {

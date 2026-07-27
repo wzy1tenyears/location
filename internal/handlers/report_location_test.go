@@ -28,10 +28,7 @@ func TestPlainLocationRetentionIsScopedToUserAndGroup(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/report-location", nil)
-	handler.insertPlainLocation(recorder, request, reportLocationTestScope(), map[string]any{
-		"latitude":  31.2304,
-		"longitude": 121.4737,
-	}, "", false, map[string]any{"platform": "android"})
+	handler.insertPlainLocation(recorder, request, reportLocationTestScope(), validPlainLocationData(), "", false, map[string]any{"platform": "android"})
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("insertPlainLocation() status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
@@ -81,10 +78,7 @@ func TestPlainLocationHonorsMinimumReportInterval(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/report-location", nil)
-	handler.insertPlainLocation(recorder, request, reportLocationTestScope(), map[string]any{
-		"latitude":  31.2304,
-		"longitude": 121.4737,
-	}, "", false, nil)
+	handler.insertPlainLocation(recorder, request, reportLocationTestScope(), validPlainLocationData(), "", false, nil)
 
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("insertPlainLocation() status = %d, want %d; body=%s", recorder.Code, http.StatusTooManyRequests, recorder.Body.String())
@@ -213,6 +207,18 @@ func reportLocationTestScope() *userScope {
 	}
 }
 
+func validPlainLocationData() map[string]any {
+	return map[string]any{
+		"latitude":                   31.2304,
+		"longitude":                  121.4737,
+		"accuracy":                   10.0,
+		"location_provider":          "gps",
+		"location_time":              time.Now().UnixMilli(),
+		"location_mock_provider":     false,
+		"location_coordinate_system": "wgs84",
+	}
+}
+
 func newReportLocationTestHandler(t *testing.T, latestCreatedAt *time.Time) (ReportLocationHandler, *reportLocationDBState, func()) {
 	t.Helper()
 	state := &reportLocationDBState{latestCreatedAt: latestCreatedAt}
@@ -224,11 +230,16 @@ func newReportLocationTestHandler(t *testing.T, latestCreatedAt *time.Time) (Rep
 	}
 	handler := ReportLocationHandler{
 		cfg: config.Config{Location: config.LocationConfig{
-			HistoryLimit:           2,
-			MinReportSeconds:       10,
-			MaxAccuracyMeters:      5000,
-			MaxSpeedMPS:            120,
-			MaxReasonableTravelMPS: 120,
+			HistoryLimit:             2,
+			MinReportSeconds:         10,
+			MaxAccuracyMeters:        100,
+			MaxSpeedMPS:              120,
+			MaxReasonableTravelMPS:   120,
+			MaxLocationAgeSeconds:    60,
+			MaxLocationFutureSeconds: 15,
+			JumpAllowanceMeters:      100,
+			MaxStationaryJumpMeters:  200,
+			MaxStationarySpeedMPS:    2,
 		}},
 		db:        db,
 		users:     repositories.NewUserRepository(db),

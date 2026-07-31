@@ -105,6 +105,7 @@ import java.util.TimeZone;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletionService;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
@@ -163,8 +164,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 156;
-    private static final String APP_VERSION_NAME = "2.3.12";
+    private static final int APP_VERSION_CODE = 157;
+    private static final String APP_VERSION_NAME = "2.3.13";
     private static final JsonApiClient API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 12_000, 12_000);
     private static final JsonApiClient DIAGNOSTIC_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME + " diagnostics", 1_500, 2_500);
     private static final JsonApiClient REPORT_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 700, 1_800);
@@ -290,6 +291,7 @@ public class MainActivity extends Activity {
     private long locationRefreshGeneration;
     private long screenGeneration;
     private long lastNavigationActionAtElapsedMs;
+    private final Map<WebView, String> mapRenderRecordsByWebView = new ConcurrentHashMap<>();
     private JSONArray homeMapBaseRecords = new JSONArray();
     private JSONArray homeMapHistoryRecords = new JSONArray();
     private JSONArray shareableLocationRecords = new JSONArray();
@@ -1613,6 +1615,7 @@ public class MainActivity extends Activity {
             cookieManager.flush();
         }
         String recordsJson = mapDisplayRecords(records).toString();
+        mapRenderRecordsByWebView.put(map, recordsJson);
         if (onMapReady != null) {
             map.addJavascriptInterface(new Object() {
                 @JavascriptInterface
@@ -1632,7 +1635,8 @@ public class MainActivity extends Activity {
         map.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
-                renderMapRecords(view, recordsJson);
+                String latestRecordsJson = mapRenderRecordsByWebView.get(view);
+                renderMapRecords(view, latestRecordsJson == null ? recordsJson : latestRecordsJson);
             }
 
             @Override
@@ -1671,6 +1675,7 @@ public class MainActivity extends Activity {
         if (view == null || recordsJson == null) {
             return;
         }
+        mapRenderRecordsByWebView.put(view, recordsJson);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
             view.evaluateJavascript("window.renderLocHistoryMap(" + recordsJson + ")", null);
         } else {
@@ -9205,11 +9210,15 @@ public class MainActivity extends Activity {
         if (webView != null && webView == homeMapWebView) {
             homeMapWebView = null;
         }
+        if (webView != null) {
+            mapRenderRecordsByWebView.remove(webView);
+        }
         frontendRuntime.destroyManagedWebView(webView);
     }
 
     private void destroyManagedWebViews() {
         frontendRuntime.destroyManagedWebViews();
+        mapRenderRecordsByWebView.clear();
         homeMapWebView = null;
         eventStreamWebView = null;
     }

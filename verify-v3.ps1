@@ -233,6 +233,12 @@ if ($HistoryMapText -match 'networkMarker|normalizeDiagnosticSource|diagnostics\
 if ($HistoryMapText -notmatch 'const gpsSource = firstGpsSource\(diagnostics\)') {
     throw 'history map labels must resolve from GPS diagnostics only.'
 }
+$UserMainText = Get-Content -LiteralPath (Join-Path $Root 'android-client\src\com\familylocation\client\MainActivity.java') -Raw -Encoding UTF8
+if ($UserMainText -notmatch 'mapRenderRecordsByWebView\.put\(map, recordsJson\)' -or
+    $UserMainText -notmatch 'renderMapRecords\(view, latestRecordsJson == null \? recordsJson : latestRecordsJson\)' -or
+    $UserMainText -notmatch 'mapRenderRecordsByWebView\.remove\(webView\)') {
+    throw 'recreated map WebViews must replay their latest trajectory payload and release it during teardown.'
+}
 
 $UpdateText = Get-Content -LiteralPath (Join-Path $Root 'internal/handlers/updates.go') -Raw -Encoding UTF8
 if ($UpdateText -notmatch 'sessions\.IsAdmin') {

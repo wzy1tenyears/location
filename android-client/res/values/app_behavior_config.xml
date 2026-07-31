@@ -5,6 +5,15 @@
     <integer name="display_address_cache_entries">128</integer>
     <integer name="display_address_workers">3</integer>
     <integer name="display_address_queue_size">128</integer>
+    <integer name="map_capture_tile_settle_ms">1000</integer>
+    <integer name="map_capture_retry_delay_ms">700</integer>
+    <integer name="map_capture_timeout_ms">20000</integer>
+    <integer name="map_capture_retry_limit">4</integer>
+    <integer name="map_capture_samples_per_axis">24</integer>
+    <integer name="map_capture_min_opaque_percent">50</integer>
+    <integer name="map_capture_max_blank_canvas_percent">85</integer>
+    <integer name="map_capture_blank_min_channel">235</integer>
+    <integer name="map_capture_blank_max_channel_spread">12</integer>
     <integer-array name="history_count_options">
         <item>5</item>
         <item>10</item>

@@ -163,8 +163,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 155;
-    private static final String APP_VERSION_NAME = "2.3.11";
+    private static final int APP_VERSION_CODE = 156;
+    private static final String APP_VERSION_NAME = "2.3.12";
     private static final JsonApiClient API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 12_000, 12_000);
     private static final JsonApiClient DIAGNOSTIC_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME + " diagnostics", 1_500, 2_500);
     private static final JsonApiClient REPORT_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 700, 1_800);
@@ -1519,6 +1519,15 @@ public class MainActivity extends Activity {
     }
 
     private void showChoiceDialog(Dialog dialog, LinearLayout body, Button primaryAction) {
+        showChoiceDialog(dialog, body, primaryAction, null);
+    }
+
+    private interface DialogCloseGuard {
+        boolean canClose();
+        void onCloseBlocked();
+    }
+
+    private void showChoiceDialog(Dialog dialog, LinearLayout body, Button primaryAction, DialogCloseGuard closeGuard) {
         ScrollView scroll = new ScrollView(this);
         ViewGroup parent = body.getParent() instanceof ViewGroup ? (ViewGroup) body.getParent() : null;
         if (parent != null) {
@@ -1526,12 +1535,30 @@ public class MainActivity extends Activity {
             scroll.addView(body, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             parent.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Math.min(dp(420), (int) (getResources().getDisplayMetrics().heightPixels * 0.56f))));
             Button close = secondaryButton("关闭");
-            close.setOnClickListener(view -> dialog.dismiss());
+            close.setOnClickListener(view -> {
+                if (closeGuard == null || closeGuard.canClose()) {
+                    dialog.dismiss();
+                } else {
+                    closeGuard.onCloseBlocked();
+                }
+            });
             if (primaryAction == null) {
                 parent.addView(close, blockParams(0));
             } else {
                 parent.addView(buttonRow(primaryAction, close), blockParams(0));
             }
+        }
+        if (closeGuard != null) {
+            dialog.setCanceledOnTouchOutside(false);
+            dialog.setOnKeyListener((dialogInterface, keyCode, event) -> {
+                if (keyCode == android.view.KeyEvent.KEYCODE_BACK && !closeGuard.canClose()) {
+                    if (event.getAction() == android.view.KeyEvent.ACTION_UP) {
+                        closeGuard.onCloseBlocked();
+                    }
+                    return true;
+                }
+                return false;
+            });
         }
         dialog.show();
         Window shownWindow = dialog.getWindow();
@@ -5670,20 +5697,33 @@ public class MainActivity extends Activity {
         }
         Dialog dialog = choiceDialog("生成地图图片");
         LinearLayout body = choiceDialogBody(dialog);
-        TextView status = body("正在加载地图…");
+        TextView status = body("正在加载地图，请保持页面打开…");
         status.setTextColor(colorMuted());
         final WebView[] mapReference = new WebView[1];
         final Runnable[] captureTask = new Runnable[1];
         AtomicBoolean captureStarted = new AtomicBoolean(false);
+        AtomicBoolean captureInProgress = new AtomicBoolean(false);
         AtomicBoolean finished = new AtomicBoolean(false);
+        DialogCloseGuard captureCloseGuard = new DialogCloseGuard() {
+            @Override
+            public boolean canClose() {
+                return !captureInProgress.get();
+            }
+
+            @Override
+            public void onCloseBlocked() {
+                status.setText("正在截屏，请勿关闭页面…");
+            }
+        };
         Runnable onMapReady = () -> {
             WebView map = mapReference[0];
             if (map == null || !dialog.isShowing() || !captureStarted.compareAndSet(false, true)) {
                 return;
             }
-            status.setText("地图已就绪，正在截取…");
-            captureTask[0] = () -> captureAndShareMap(dialog, map, status, finished, 0);
-            map.postDelayed(captureTask[0], 250L);
+            captureInProgress.set(true);
+            status.setText("地图瓦片已就绪，正在截屏，请勿关闭页面…");
+            captureTask[0] = () -> captureAndShareMap(dialog, map, status, finished, captureInProgress, 0);
+            map.postDelayed(captureTask[0], getResources().getInteger(R.integer.map_capture_tile_settle_ms));
         };
         WebView map = locationMapWebView(selected, onMapReady);
         mapReference[0] = map;
@@ -5695,24 +5735,27 @@ public class MainActivity extends Activity {
         body.addView(status, blockParams(0));
         Runnable timeout = () -> {
             if (finished.compareAndSet(false, true)) {
+                captureInProgress.set(false);
                 status.setText("地图等待超时，请检查网络后重试。");
             }
         };
         dialog.setOnDismissListener(dialogInterface -> {
             finished.set(true);
+            captureInProgress.set(false);
             mainHandler.removeCallbacks(timeout);
             if (captureTask[0] != null) {
                 map.removeCallbacks(captureTask[0]);
             }
             destroyManagedWebView(map);
         });
-        showChoiceDialog(dialog, body);
-        mainHandler.postDelayed(timeout, 12_000L);
+        showChoiceDialog(dialog, body, null, captureCloseGuard);
+        mainHandler.postDelayed(timeout, getResources().getInteger(R.integer.map_capture_timeout_ms));
     }
 
-    private void captureAndShareMap(Dialog dialog, WebView map, TextView status, AtomicBoolean finished, int attempt) {
+    private void captureAndShareMap(Dialog dialog, WebView map, TextView status, AtomicBoolean finished, AtomicBoolean captureInProgress, int attempt) {
         try {
             if (finished.get() || !dialog.isShowing() || !canLoadForegroundWebView()) {
+                captureInProgress.set(false);
                 return;
             }
             if (map.getWidth() <= 0 || map.getHeight() <= 0) {
@@ -5734,24 +5777,28 @@ public class MainActivity extends Activity {
             PixelCopy.request(sourceWindow, sourceArea, bitmap, result -> {
                 if (finished.get() || !dialog.isShowing()) {
                     bitmap.recycle();
+                    captureInProgress.set(false);
                     return;
                 }
                 if (result != PixelCopy.SUCCESS || isLikelyBlankMap(bitmap)) {
                     bitmap.recycle();
-                    if (attempt == 0) {
-                        status.setText("地图画面未完成，正在重试…");
-                        map.postDelayed(() -> captureAndShareMap(dialog, map, status, finished, 1), 450L);
+                    if (attempt < getResources().getInteger(R.integer.map_capture_retry_limit)) {
+                        status.setText("地图瓦片未完整加载，正在重新截屏，请勿关闭页面…");
+                        map.postDelayed(() -> captureAndShareMap(dialog, map, status, finished, captureInProgress, attempt + 1), getResources().getInteger(R.integer.map_capture_retry_delay_ms));
                     } else if (finished.compareAndSet(false, true)) {
+                        captureInProgress.set(false);
                         status.setText(result == PixelCopy.SUCCESS
                             ? "地图画面仍为空白，请检查网络后重试。"
                             : "生成地图图片失败：无法读取地图画面（" + result + "）。");
                     }
                     return;
                 }
-                writeAndShareMapImage(dialog, bitmap, status, finished);
+                status.setText("正在保存地图图片，请勿关闭页面…");
+                writeAndShareMapImage(dialog, bitmap, status, finished, captureInProgress);
             }, mainHandler);
         } catch (Exception exception) {
             if (finished.compareAndSet(false, true)) {
+                captureInProgress.set(false);
                 status.setText("生成地图图片失败：" + exception.getMessage());
             }
         }
@@ -5768,8 +5815,12 @@ public class MainActivity extends Activity {
         int maxGreen = 0;
         int maxBlue = 0;
         int opaqueSamples = 0;
-        int xSamples = Math.min(12, bitmap.getWidth());
-        int ySamples = Math.min(12, bitmap.getHeight());
+        int samplesPerAxis = Math.max(1, getResources().getInteger(R.integer.map_capture_samples_per_axis));
+        int xSamples = Math.min(samplesPerAxis, bitmap.getWidth());
+        int ySamples = Math.min(samplesPerAxis, bitmap.getHeight());
+        int blankCanvasSamples = 0;
+        int blankMinChannel = getResources().getInteger(R.integer.map_capture_blank_min_channel);
+        int blankMaxChannelSpread = getResources().getInteger(R.integer.map_capture_blank_max_channel_spread);
         for (int y = 0; y < ySamples; y += 1) {
             int pixelY = Math.min(bitmap.getHeight() - 1, (y * bitmap.getHeight()) / ySamples + bitmap.getHeight() / (ySamples * 2));
             for (int x = 0; x < xSamples; x += 1) {
@@ -5785,20 +5836,28 @@ public class MainActivity extends Activity {
                 maxRed = Math.max(maxRed, Color.red(color));
                 maxGreen = Math.max(maxGreen, Color.green(color));
                 maxBlue = Math.max(maxBlue, Color.blue(color));
+                int lowestChannel = Math.min(Color.red(color), Math.min(Color.green(color), Color.blue(color)));
+                int highestChannel = Math.max(Color.red(color), Math.max(Color.green(color), Color.blue(color)));
+                if (lowestChannel >= blankMinChannel && highestChannel - lowestChannel <= blankMaxChannelSpread) {
+                    blankCanvasSamples += 1;
+                }
             }
         }
         int totalSamples = xSamples * ySamples;
-        return opaqueSamples < totalSamples / 2
-            || (maxRed - minRed < 8 && maxGreen - minGreen < 8 && maxBlue - minBlue < 8);
+        return opaqueSamples * 100 < totalSamples * getResources().getInteger(R.integer.map_capture_min_opaque_percent)
+            || (opaqueSamples > 0 && blankCanvasSamples * 100 >= opaqueSamples * getResources().getInteger(R.integer.map_capture_max_blank_canvas_percent))
+            || (maxRed - minRed < blankMaxChannelSpread && maxGreen - minGreen < blankMaxChannelSpread && maxBlue - minBlue < blankMaxChannelSpread);
     }
 
-    private void writeAndShareMapImage(Dialog dialog, Bitmap bitmap, TextView status, AtomicBoolean finished) {
+    private void writeAndShareMapImage(Dialog dialog, Bitmap bitmap, TextView status, AtomicBoolean finished, AtomicBoolean captureInProgress) {
         try {
             Uri imageUri = LocationShareSupport.writeMapImageToGallery(this, bitmap);
             bitmap.recycle();
             if (!finished.compareAndSet(false, true)) {
+                captureInProgress.set(false);
                 return;
             }
+            captureInProgress.set(false);
             dialog.dismiss();
             setStatus("地图图片已保存到相册");
             Intent chooser = Intent.createChooser(LocationShareSupport.imageIntent(imageUri), "分享地图图片");
@@ -5808,6 +5867,7 @@ public class MainActivity extends Activity {
             if (!bitmap.isRecycled()) {
                 bitmap.recycle();
             }
+            captureInProgress.set(false);
             if (dialog.isShowing()) {
                 finished.set(true);
                 status.setText("生成地图图片失败：" + exception.getMessage());

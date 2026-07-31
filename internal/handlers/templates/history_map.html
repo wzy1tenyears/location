@@ -28,6 +28,8 @@
     let currentPolylines = [];
     let infoWindow = null;
     let fallbackScriptStarted = false;
+    let mapBaseTilesReady = false;
+    let mapRenderGeneration = 0;
     const TRACK_STROKE_WIDTH = 5;
     const HISTORY_POINT_DIAMETER = TRACK_STROKE_WIDTH * 2;
 
@@ -258,9 +260,31 @@
       }
     }
 
+    function mapImagesLoaded() {
+      const images = Array.from(document.querySelectorAll('#map img[src]'));
+      return images.every((image) => image.complete && image.naturalWidth > 0);
+    }
+
+    function notifyMapCaptureWhenTilesReady(renderGeneration) {
+      function waitForTiles() {
+        if (renderGeneration !== mapRenderGeneration) return;
+        if (!mapImagesLoaded()) {
+          window.requestAnimationFrame(waitForTiles);
+          return;
+        }
+        window.requestAnimationFrame(() => {
+          if (renderGeneration === mapRenderGeneration && mapImagesLoaded() && window.LocMapCapture && typeof window.LocMapCapture.ready === 'function') {
+            window.LocMapCapture.ready();
+          }
+        });
+      }
+      window.requestAnimationFrame(waitForTiles);
+    }
+
     function renderRecords(records) {
       pendingRecords = records;
-      if (!map || !window.AMap) return;
+      if (!map || !window.AMap || !mapBaseTilesReady) return;
+      const renderGeneration = ++mapRenderGeneration;
       clearMap();
       const items = expandRecords(records);
       if (!items.length) {
@@ -317,11 +341,7 @@
       } else {
         map.setFitView(currentMarkers, false, [34, 28, 34, 28], 17);
       }
-      window.setTimeout(() => {
-        if (window.LocMapCapture && typeof window.LocMapCapture.ready === 'function') {
-          window.LocMapCapture.ready();
-        }
-      }, 900);
+      notifyMapCaptureWhenTilesReady(renderGeneration);
     }
 
     function initMap() {
@@ -338,10 +358,10 @@
         zoomEnable: true,
         doubleClickZoom: true,
       });
-      map.on('complete', () => renderRecords(pendingRecords || []));
-      if (pendingRecords) {
-        renderRecords(pendingRecords);
-      }
+      map.on('complete', () => {
+        mapBaseTilesReady = true;
+        renderRecords(pendingRecords || []);
+      });
     }
 
     function loadMapScript(version, allowFallback) {

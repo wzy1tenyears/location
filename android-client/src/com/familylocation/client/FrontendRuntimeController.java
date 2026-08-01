@@ -50,6 +50,7 @@ final class FrontendRuntimeController {
             webView.stopLoading();
             webView.loadUrl("about:blank");
             webView.clearHistory();
+            webView.clearCache(false);
             webView.removeAllViews();
             webView.destroy();
         } catch (Exception ignored) {

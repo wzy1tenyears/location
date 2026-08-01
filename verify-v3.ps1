@@ -64,6 +64,8 @@ $RequiredFiles = @(
 	'internal/handlers/shares.go',
     'internal/handlers/admin_manage.go',
     'internal/handlers/admin_summary.go',
+    'internal/handlers/admin_heartbeat.go',
+    'internal/handlers/admin_heartbeat_test.go',
     'internal/handlers/templates/history_map.html',
     'internal/handlers/templates/amap_reverse.html',
     'internal/handlers/templates/webrtc_probe.html',
@@ -185,6 +187,7 @@ $ExpectedRoutes = @(
     '/api/heartbeat',
     '/api/environment-report',
     '/api/device-report',
+    '/api/admin/heartbeat',
     '/api/admin/apk',
     '/api/geo-aliases',
     '/api/ip-probe',
@@ -243,6 +246,12 @@ if ($UserMainText -notmatch 'mapRenderRecordsByWebView\.put\(map, recordsJson\)'
 $UpdateText = Get-Content -LiteralPath (Join-Path $Root 'internal/handlers/updates.go') -Raw -Encoding UTF8
 if ($UpdateText -notmatch 'sessions\.IsAdmin') {
     throw 'admin_app_update handler must keep admin session protection'
+}
+
+$AdminHeartbeatText = Get-Content -LiteralPath (Join-Path $Root 'internal/handlers/admin_heartbeat.go') -Raw -Encoding UTF8
+if ($AdminHeartbeatText -notmatch 'handler\.sessions\.IsAdmin' -or
+    $RouterText -notmatch 'POST /api/admin/heartbeat') {
+    throw 'admin heartbeat must require an administrator session and remain routed.'
 }
 
 $ConfigText = Get-Content -LiteralPath (Join-Path $Root 'internal/config/config.go') -Raw -Encoding UTF8

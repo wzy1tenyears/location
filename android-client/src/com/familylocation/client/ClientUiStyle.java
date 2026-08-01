@@ -230,7 +230,10 @@ final class ClientUiStyle {
     }
 
     int mapPreviewHeight(boolean dense) {
-        return dp(dense ? 220 : 300);
+        int height = context.getResources().getInteger(
+            dense ? R.integer.map_preview_height_dense_dp : R.integer.map_preview_height_regular_dp
+        );
+        return dp(height);
     }
 
     void styleHomePrimaryButton(Button button) {

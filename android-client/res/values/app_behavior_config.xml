@@ -2,6 +2,12 @@
     <integer name="report_watchdog_ms">10000</integer>
     <integer name="history_page_default_size">20</integer>
     <integer name="history_trail_default_points">20</integer>
+    <integer name="map_preview_height_dense_dp">176</integer>
+    <integer name="map_preview_height_regular_dp">216</integer>
+    <integer name="worker_idle_timeout_seconds">5</integer>
+    <integer name="ui_process_background_release_delay_ms">1500</integer>
+    <integer name="map_renderer_recovery_delay_ms">1200</integer>
+    <integer name="map_renderer_recovery_max_attempts">2</integer>
     <integer name="display_address_cache_entries">128</integer>
     <integer name="display_address_workers">3</integer>
     <integer name="display_address_queue_size">128</integer>

@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="157"
-    android:versionName="2.3.13">
+    android:versionCode="159"
+    android:versionName="2.3.15">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -47,13 +47,15 @@
         <service
             android:name=".KeepAliveService"
             android:exported="false"
-            android:foregroundServiceType="dataSync|location" />
+            android:foregroundServiceType="dataSync|location"
+            android:process=":keepalive" />
 
         <service
             android:name=".KeepAliveAccessibilityService"
             android:exported="true"
             android:label="@string/accessibility_keep_alive_service_label"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:process=":keepalive">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
@@ -65,7 +67,8 @@
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"
-            android:exported="false">
+            android:exported="false"
+            android:process=":keepalive">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
@@ -76,7 +79,8 @@
         <receiver
             android:name=".KeepAliveRestartReceiver"
             android:enabled="true"
-            android:exported="false" />
+            android:exported="false"
+            android:process=":keepalive" />
 
 
         <provider

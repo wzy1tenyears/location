@@ -7,7 +7,6 @@ final class ApiPaths {
     static final String REGISTER = "api/register";
     static final String LEGAL_DOCUMENTS = "api/legal-documents";
     static final String ANNOUNCEMENT = "api/announcement";
-    static final String EVENTS = "api/events";
     static final String TICKETS = "api/tickets";
     static final String GROUPS = "api/groups";
     static final String SETTINGS = "api/settings";

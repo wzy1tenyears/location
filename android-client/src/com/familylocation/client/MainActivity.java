@@ -110,6 +110,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -164,8 +165,8 @@ public class MainActivity extends Activity {
     private static final int REQUEST_LOCATION = 1001;
     private static final int REQUEST_NOTIFICATION = 1002;
     private static final int REQUEST_BACKGROUND_LOCATION = 1003;
-    private static final int APP_VERSION_CODE = 157;
-    private static final String APP_VERSION_NAME = "2.3.13";
+    private static final int APP_VERSION_CODE = 159;
+    private static final String APP_VERSION_NAME = "2.3.15";
     private static final JsonApiClient API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 12_000, 12_000);
     private static final JsonApiClient DIAGNOSTIC_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME + " diagnostics", 1_500, 2_500);
     private static final JsonApiClient REPORT_API_CLIENT = new JsonApiClient("loc-app/" + APP_VERSION_NAME, 700, 1_800);
@@ -197,6 +198,7 @@ public class MainActivity extends Activity {
     private static final long ADDRESS_ENRICHMENT_BUDGET_MS = 5_000L;
     private static final long LOGIN_PROBE_STARTUP_DEFER_MS = 300L;
     private static final long STARTUP_CONTENT_DEFER_MS = 32L;
+    private static final long WEBVIEW_PROBE_WAIT_MS = 3_500L;
     private static final String VIEW_TAG_DYNAMIC = "dynamic";
     private static final String VIEW_TAG_HOME_HISTORY = "home_history";
     private static final int TAB_POSITION = 0;
@@ -206,18 +208,18 @@ public class MainActivity extends Activity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final AtomicInteger backgroundThreadIndex = new AtomicInteger();
     private final ExecutorService backgroundExecutor = new ThreadPoolExecutor(
-        4,
-        6,
+        2,
+        3,
         30L,
         TimeUnit.SECONDS,
-        new ArrayBlockingQueue<>(32),
+        new ArrayBlockingQueue<>(16),
         runnable -> new Thread(runnable, "loc-native-" + backgroundThreadIndex.incrementAndGet()),
         new ThreadPoolExecutor.AbortPolicy()
     );
     private final AtomicInteger addressProbeThreadIndex = new AtomicInteger();
     private final ExecutorService addressProbeExecutor = new ThreadPoolExecutor(
-        5,
-        5,
+        3,
+        3,
         30L,
         TimeUnit.SECONDS,
         new ArrayBlockingQueue<>(10),
@@ -226,8 +228,8 @@ public class MainActivity extends Activity {
     );
     private final AtomicInteger ipProviderThreadIndex = new AtomicInteger();
     private final ExecutorService ipProviderExecutor = new ThreadPoolExecutor(
-        10,
-        10,
+        4,
+        4,
         30L,
         TimeUnit.SECONDS,
         new ArrayBlockingQueue<>(20),
@@ -246,6 +248,7 @@ public class MainActivity extends Activity {
     );
     private final Object ipGeocodeCacheLock = new Object();
     private final LinkedHashMap<String, JSONObject> ipGeocodeCache = new LinkedHashMap<>();
+    private final ConcurrentHashMap<String, FutureTask<JSONObject>> ipGeocodeInFlight = new ConcurrentHashMap<>();
     private final Object displayAddressLock = new Object();
     private final LinkedHashMap<String, JSONObject> displayAddressCache = new LinkedHashMap<>();
     private final LinkedHashMap<String, List<AddressDisplayTarget>> displayAddressWaiters = new LinkedHashMap<>();
@@ -263,7 +266,6 @@ public class MainActivity extends Activity {
     private final AtomicBoolean groupWriteInFlight = new AtomicBoolean();
     private LinearLayout content;
     private View activeChallengeCard;
-    private WebView eventStreamWebView;
     private TextView statusView;
     private Button reportButton;
     private Button refreshButton;
@@ -288,6 +290,11 @@ public class MainActivity extends Activity {
     private BroadcastReceiver updateReceiver;
     private WebView homeMapWebView;
     private boolean restoreHomeMapOnResume;
+    private boolean restoreForegroundScreenOnResume;
+    private Runnable backgroundUiProcessRelease;
+    private Runnable mapRendererRecovery;
+    private int mapRendererRecoveryAttempt;
+    private boolean activityVisible;
     private long locationRefreshGeneration;
     private long screenGeneration;
     private long lastNavigationActionAtElapsedMs;
@@ -310,7 +317,6 @@ public class MainActivity extends Activity {
     private volatile int challengeGeneration;
     private volatile boolean challengeCancelled;
     private volatile boolean environmentReportUploading;
-    private final AtomicBoolean announcementEventFetchInFlight = new AtomicBoolean(false);
     private volatile boolean manualAuthenticationStarted;
     private boolean loginScreenSessionProbeStarted;
     private String loginDraftUsername = "";
@@ -1055,6 +1061,9 @@ public class MainActivity extends Activity {
         WebSettings settings = challengeView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            settings.setOffscreenPreRaster(false);
+        }
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
         settings.setUserAgentString(settings.getUserAgentString() + " loc-app/" + APP_VERSION_NAME);
@@ -1191,7 +1200,6 @@ public class MainActivity extends Activity {
         requestStartupPermissions();
         syncKeepAliveService();
         maybeAutoShowAnnouncement();
-        startEventStreamIfNeeded();
     }
 
     private boolean showHistoryTrail() {
@@ -1657,7 +1665,7 @@ public class MainActivity extends Activity {
 
             @Override
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
-                return handleWebViewRendererGone(view, "地图 WebView 已释放，请刷新后重试。");
+                return handleHomeMapRendererGone(view, detail);
             }
         });
         map.loadUrl(baseUrl + ApiPaths.HISTORY_MAP);
@@ -1676,10 +1684,17 @@ public class MainActivity extends Activity {
             return;
         }
         mapRenderRecordsByWebView.put(view, recordsJson);
+        evaluateWebViewScript(view, "window.renderLocHistoryMap(" + recordsJson + ")");
+    }
+
+    private void evaluateWebViewScript(WebView view, String script) {
+        if (view == null || script == null || script.isEmpty()) {
+            return;
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-            view.evaluateJavascript("window.renderLocHistoryMap(" + recordsJson + ")", null);
+            view.evaluateJavascript(script, null);
         } else {
-            view.loadUrl("javascript:window.renderLocHistoryMap(" + Uri.encode(recordsJson) + ")");
+            view.loadUrl("javascript:" + Uri.encode(script));
         }
     }
 
@@ -1708,16 +1723,26 @@ public class MainActivity extends Activity {
                 continue;
             }
             try {
-                JSONObject mapRecord = new JSONObject(record.toString());
                 String memberKey = memberStableKey(record);
-                mapRecord.put("member_color", MemberColorPolicy.trackColorHex(memberKey));
-                mapRecord.put("history_point_color", MemberColorPolicy.historyPointColorHex(memberKey));
-                mapRecord.put("history_selection_key", historyRecordKey(record));
-                mapRecord.remove("address");
-                mapRecord.remove("location_address");
-                mapRecord.remove("city");
-                mapRecord.remove("region");
-                mapRecord.remove("country");
+                JSONObject mapRecord = new JSONObject()
+                    .put("id", record.optLong("id", 0L))
+                    .put("user_id", record.optInt("user_id", 0))
+                    .put("username", record.optString("username", ""))
+                    .put("display_name", record.optString("display_name", ""))
+                    .put("role_label", record.optString("role_label", ""))
+                    .put("latitude", record.optDouble("latitude", 0d))
+                    .put("longitude", record.optDouble("longitude", 0d))
+                    .put("accuracy", record.optDouble("accuracy", 0d))
+                    .put("created_at", record.optString("created_at", ""))
+                    .put("updated_at", record.optString("updated_at", ""))
+                    .put("first_reported_at", record.optString("first_reported_at", ""))
+                    .put("last_reported_at", record.optString("last_reported_at", ""))
+                    .put("stay_duration_seconds", record.optLong("stay_duration_seconds", 0L))
+                    .put("report_count", record.optInt("report_count", 1))
+                    .put("member_color", MemberColorPolicy.trackColorHex(memberKey))
+                    .put("history_point_color", MemberColorPolicy.historyPointColorHex(memberKey))
+                    .put("history_selection_key", historyRecordKey(record))
+                    .put("history_page", record.optInt("history_page", 0));
                 JSONObject diagnostics = record.optJSONObject("address_diagnostics");
                 JSONObject mapDiagnostics = new JSONObject();
                 JSONArray gpsSources = new JSONArray();
@@ -1727,11 +1752,23 @@ public class MainActivity extends Activity {
                     for (int sourceIndex = 0; sourceIndex < sources.length(); sourceIndex += 1) {
                         JSONObject source = sources.optJSONObject(sourceIndex);
                         if (source != null && "gps".equals(source.optString("type", "").trim().toLowerCase(Locale.ROOT))) {
-                            JSONObject gpsSource = new JSONObject(source.toString());
+                            JSONObject gpsSource = new JSONObject()
+                                .put("type", "gps")
+                                .put("provider", source.optString("provider", ""))
+                                .put("source", source.optString("source", ""))
+                                .put("address", source.optString("address", ""))
+                                .put("country", source.optString("country", ""))
+                                .put("region", source.optString("region", ""))
+                                .put("city", source.optString("city", ""))
+                                .put("district", source.optString("district", ""))
+                                .put("street", source.optString("street", ""))
+                                .put("detail", source.optString("detail", ""))
+                                .put("poi", source.optString("poi", ""));
                             gpsSources.put(gpsSource);
                             if (firstGpsSource == null) {
                                 firstGpsSource = gpsSource;
                             }
+                            break;
                         }
                     }
                 }
@@ -1764,6 +1801,42 @@ public class MainActivity extends Activity {
             }
         }
         return result;
+    }
+
+    private boolean handleHomeMapRendererGone(WebView view, RenderProcessGoneDetail detail) {
+        boolean wasHomeMap = view != null && view == homeMapWebView;
+        destroyManagedWebView(view);
+        if (!wasHomeMap || currentUser == null || currentTab != TAB_POSITION || !canLoadForegroundWebView()) {
+            return true;
+        }
+        scheduleHomeMapRendererRecovery();
+        return true;
+    }
+
+    private void scheduleHomeMapRendererRecovery() {
+        cancelHomeMapRendererRecovery();
+        int maximumAttempts = getResources().getInteger(R.integer.map_renderer_recovery_max_attempts);
+        if (mapRendererRecoveryAttempt >= maximumAttempts) {
+            setStatus("系统 WebView 已多次崩溃，请更新系统 WebView 后刷新位置。");
+            return;
+        }
+        int attempt = ++mapRendererRecoveryAttempt;
+        long delayMs = getResources().getInteger(R.integer.map_renderer_recovery_delay_ms) * attempt;
+        setStatus("系统 WebView 正在恢复地图…");
+        mapRendererRecovery = () -> {
+            mapRendererRecovery = null;
+            if (currentUser != null && currentTab == TAB_POSITION && canLoadForegroundWebView()) {
+                refreshLocations();
+            }
+        };
+        mainHandler.postDelayed(mapRendererRecovery, delayMs);
+    }
+
+    private void cancelHomeMapRendererRecovery() {
+        if (mapRendererRecovery != null) {
+            mainHandler.removeCallbacks(mapRendererRecovery);
+            mapRendererRecovery = null;
+        }
     }
 
     private JSONArray displayableLocations(JSONArray locations) {
@@ -2410,77 +2483,6 @@ public class MainActivity extends Activity {
                 }
             } finally {
                 activeTicketListRequest.compareAndSet(requestHandle, null);
-            }
-        });
-    }
-
-    private void startEventStreamIfNeeded() {
-        if (currentUser == null || eventStreamWebView != null || !canLoadForegroundWebView()) {
-            return;
-        }
-        syncCookiesToWebView(serverUrl());
-        WebView stream = managedWebView();
-        eventStreamWebView = stream;
-        attachEventStreamToContent();
-        WebSettings settings = stream.getSettings();
-        settings.setJavaScriptEnabled(true);
-        settings.setDomStorageEnabled(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " loc-app/" + APP_VERSION_NAME);
-        stream.addJavascriptInterface(new Object() {
-            @JavascriptInterface
-            public void onEvent(String json) {
-                try {
-                    JSONObject event = new JSONObject(json == null ? "{}" : json);
-                    if ("announcement".equals(event.optString("type", ""))) {
-                        fetchAnnouncementForEvent();
-                    }
-                } catch (Exception exception) {
-                    Log.w(TAG, "Invalid WSS event payload.");
-                }
-            }
-
-            @JavascriptInterface
-            public void onState(String state) {
-                Log.i(TAG, "WSS_EVENT_STATE=" + (state == null ? "unknown" : state));
-            }
-        }, "LocEvents");
-        stream.setWebViewClient(new WebViewClient() {
-            @Override
-            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
-                if (view == eventStreamWebView) {
-                    eventStreamWebView = null;
-                }
-                return handleWebViewRendererGone(view, "");
-            }
-        });
-        String html = "<!doctype html><meta charset=\"utf-8\"><script>" +
-            "(()=>{let ws=null,retry=0,timer=0;" +
-            "const tell=s=>{try{LocEvents.onState(s)}catch(e){}};" +
-            "const next=()=>{clearTimeout(timer);const base=Math.min(30000,1000*Math.pow(2,Math.min(retry++,5)));timer=setTimeout(connect,base+Math.floor(Math.random()*700));};" +
-            "const connect=()=>{try{const scheme=location.protocol==='https:'?'wss:':'ws:';ws=new WebSocket(scheme+'//'+location.host+'/" + ApiPaths.EVENTS + "');" +
-            "ws.onopen=()=>{retry=0;tell('open')};ws.onmessage=e=>{try{LocEvents.onEvent(String(e.data))}catch(x){}};" +
-            "ws.onerror=()=>tell('error');ws.onclose=()=>{tell('closed');next()};}catch(e){tell('failed');next()}};" +
-            "setInterval(()=>{try{if(ws&&ws.readyState===1)ws.send('heartbeat')}catch(e){}},25000);connect();})();</script>";
-        stream.loadDataWithBaseURL(serverUrl(), html, "text/html", "UTF-8", null);
-    }
-
-    private void fetchAnnouncementForEvent() {
-        if (!announcementEventFetchInFlight.compareAndSet(false, true)) {
-            return;
-        }
-        runBackground(() -> {
-            try {
-                JSONObject response = getJson(ApiPaths.ANNOUNCEMENT);
-                JSONObject announcement = response.optJSONObject("announcement");
-                runUi(() -> {
-                    if (currentUser != null && announcement != null && shouldAutoShowAnnouncement(announcement)) {
-                        showAnnouncementPopup(announcement, true);
-                    }
-                });
-            } catch (Exception exception) {
-                Log.w(TAG, "WSS announcement refresh failed: " + exception.getMessage());
-            } finally {
-                announcementEventFetchInFlight.set(false);
             }
         });
     }
@@ -6792,7 +6794,7 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject reverseAddressByAmapWebView(double latitude, double longitude, long attemptToken) {
-        return reverseAddressByAmapWebView(latitude, longitude, attemptToken, 12_000L);
+        return reverseAddressByAmapWebView(latitude, longitude, attemptToken, WEBVIEW_PROBE_WAIT_MS);
     }
 
     private JSONObject reverseAddressByAmapWebView(double latitude, double longitude, long attemptToken, long waitMs) {
@@ -6823,7 +6825,11 @@ public class MainActivity extends Activity {
             webViewRef.set(webView);
             WebSettings settings = webView.getSettings();
             settings.setJavaScriptEnabled(true);
-            settings.setDomStorageEnabled(true);
+            settings.setDomStorageEnabled(false);
+            settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                settings.setOffscreenPreRaster(false);
+            }
             settings.setUserAgentString(settings.getUserAgentString() + " loc-app/" + APP_VERSION_NAME);
             webView.addJavascriptInterface(new Object() {
                 @JavascriptInterface
@@ -6948,7 +6954,7 @@ public class MainActivity extends Activity {
                 return null;
             }
 
-            JSONObject geo = attemptToken > 0L ? null : geocodeIpAddress(attemptToken, ip);
+            JSONObject geo = attemptToken > 0L ? null : geocodeIpAddressShared(attemptToken, ip);
             String address = geo == null ? ip : firstText(geo.optString("address", ""), ip);
             String city = geo == null ? "" : normalizeCityPart(geo.optString("city", ""));
             String region = geo == null ? "" : geo.optString("region", "");
@@ -7012,7 +7018,11 @@ public class MainActivity extends Activity {
             webViewRef.set(webView);
             WebSettings settings = webView.getSettings();
             settings.setJavaScriptEnabled(true);
-            settings.setDomStorageEnabled(true);
+            settings.setDomStorageEnabled(false);
+            settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                settings.setOffscreenPreRaster(false);
+            }
             settings.setUserAgentString(settings.getUserAgentString() + " loc-app/" + APP_VERSION_NAME);
             webView.addJavascriptInterface(new Object() {
                 @JavascriptInterface
@@ -7047,7 +7057,7 @@ public class MainActivity extends Activity {
         });
 
         try {
-            latch.await(3500L, TimeUnit.MILLISECONDS);
+            latch.await(WEBVIEW_PROBE_WAIT_MS, TimeUnit.MILLISECONDS);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
         } finally {
@@ -7076,10 +7086,10 @@ public class MainActivity extends Activity {
             if (!reportProbeActive(attemptToken)) {
                 return webRtcFailureSource("cancelled", payload.optJSONArray("candidates"));
             }
-            // The IP probe runs in parallel and caches its geocoding result. WebRTC must
-            // never start the same slow provider chain again: retaining the STUN/IP
-            // evidence is more important than missing the enrichment deadline entirely.
             JSONObject geo = cachedIpGeocode(ip);
+            if (geo == null && attemptToken <= 0L) {
+                geo = geocodeIpAddressShared(attemptToken, ip);
+            }
             String address = geo == null ? ip : firstText(geo.optString("address", ""), ip);
             String city = geo == null ? "" : normalizeCityPart(geo.optString("city", ""));
             String region = geo == null ? "" : geo.optString("region", "");
@@ -7687,6 +7697,35 @@ public class MainActivity extends Activity {
                 return cached == null ? null : new JSONObject(cached.toString());
             } catch (Exception ignored) {
                 return null;
+            }
+        }
+    }
+
+    private JSONObject geocodeIpAddressShared(long attemptToken, String ip) {
+        String key = ip == null ? "" : ip.trim().toLowerCase(Locale.ROOT);
+        if (key.isEmpty()) {
+            return null;
+        }
+        JSONObject cached = cachedIpGeocode(key);
+        if (cached != null) {
+            return cached;
+        }
+        FutureTask<JSONObject> created = new FutureTask<>(() -> geocodeIpAddress(attemptToken, key));
+        FutureTask<JSONObject> task = ipGeocodeInFlight.putIfAbsent(key, created);
+        boolean owner = task == null;
+        if (owner) {
+            task = created;
+            task.run();
+        }
+        try {
+            JSONObject result = task.get();
+            return result == null ? null : new JSONObject(result.toString());
+        } catch (Throwable exception) {
+            Log.w(TAG, "Shared IP geocode failed: " + safeThrowableMessage(exception));
+            return null;
+        } finally {
+            if (owner) {
+                ipGeocodeInFlight.remove(key, created);
             }
         }
     }
@@ -8381,7 +8420,6 @@ public class MainActivity extends Activity {
     }
 
     private void clearStoredSessionState() {
-        stopEventStream();
         prefs().edit()
             .remove(KEY_SESSION_COOKIE)
             .remove(KEY_USER_ROLE)
@@ -9043,8 +9081,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        activityVisible = true;
+        cancelBackgroundUiProcessRelease();
+        mapRendererRecoveryAttempt = 0;
         frontendRuntime.onResume();
-        startEventStreamIfNeeded();
         syncReportButtonState();
         if (accessibilitySettingsLaunched) {
             accessibilitySettingsLaunched = false;
@@ -9054,6 +9094,10 @@ public class MainActivity extends Activity {
             if (currentUser != null && currentTab == TAB_MINE) {
                 showSettings();
             }
+        }
+        if (restoreForegroundScreenOnResume) {
+            restoreForegroundScreenOnResume = false;
+            restoreForegroundScreen();
         }
         if (restoreHomeMapOnResume && currentUser != null && currentTab == TAB_POSITION && content != null) {
             restoreHomeMapOnResume = false;
@@ -9079,6 +9123,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onStop() {
+        activityVisible = false;
+        cancelHomeMapRendererRecovery();
         cancelActiveReportForBackground();
         restoreHomeMapOnResume = restoreHomeMapOnResume
             || (currentUser != null && currentTab == TAB_POSITION && homeMapWebView != null);
@@ -9087,13 +9133,72 @@ public class MainActivity extends Activity {
                 + Integer.toHexString(System.identityHashCode(homeMapWebView)));
         }
         frontendRuntime.onStop();
+        mapRenderRecordsByWebView.clear();
         homeMapWebView = null;
-        eventStreamWebView = null;
+        restoreForegroundScreenOnResume = true;
+        clearForegroundUiMemory();
+        View releasedContent = new View(this);
+        releasedContent.setBackgroundColor(colorSurface());
+        setContentView(releasedContent, new ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        scheduleBackgroundUiProcessRelease();
         super.onStop();
+    }
+
+    private void scheduleBackgroundUiProcessRelease() {
+        if (isChangingConfigurations() || isFinishing()) {
+            return;
+        }
+        cancelBackgroundUiProcessRelease();
+        backgroundUiProcessRelease = () -> {
+            if (activityVisible || canLoadForegroundWebView() || isChangingConfigurations()) {
+                return;
+            }
+            Log.i(TAG, "UI_PROCESS_RELEASED_FOR_BACKGROUND=1");
+            android.os.Process.killProcess(android.os.Process.myPid());
+        };
+        mainHandler.postDelayed(
+            backgroundUiProcessRelease,
+            getResources().getInteger(R.integer.ui_process_background_release_delay_ms)
+        );
+    }
+
+    private void cancelBackgroundUiProcessRelease() {
+        if (backgroundUiProcessRelease != null) {
+            mainHandler.removeCallbacks(backgroundUiProcessRelease);
+            backgroundUiProcessRelease = null;
+        }
+    }
+
+    private void restoreForegroundScreen() {
+        if (currentUser == null) {
+            showLogin();
+            return;
+        }
+        switch (currentTab) {
+            case TAB_GROUPS:
+                showGroups();
+                return;
+            case TAB_HELP:
+                showTickets();
+                return;
+            case TAB_MINE:
+                showSettings();
+                return;
+            case TAB_POSITION:
+            default:
+                restoreHomeMapOnResume = false;
+                showHome();
+                refreshLocations();
+        }
     }
 
     @Override
     protected void onDestroy() {
+        cancelBackgroundUiProcessRelease();
+        cancelHomeMapRendererRecovery();
         cancelActiveReportForBackground();
         invalidateScreenRequests();
         backgroundExecutor.shutdownNow();
@@ -9220,28 +9325,58 @@ public class MainActivity extends Activity {
         frontendRuntime.destroyManagedWebViews();
         mapRenderRecordsByWebView.clear();
         homeMapWebView = null;
-        eventStreamWebView = null;
     }
 
-    private void stopEventStream() {
-        WebView stream = eventStreamWebView;
-        eventStreamWebView = null;
-        if (stream != null) {
-            destroyManagedWebView(stream);
+    private void clearForegroundUiMemory() {
+        cancelActiveRequest(activeLocationRequest);
+        cancelActiveRequest(activeHistoryRequest);
+        historyRequestGate.invalidate();
+        if (activeScrollView != null) {
+            activeScrollView.removeAllViews();
         }
+        activeScrollView = null;
+        content = null;
+        statusView = null;
+        reportButton = null;
+        refreshButton = null;
+        activeChallengeCard = null;
+        homeMapBaseRecords = new JSONArray();
+        homeMapHistoryRecords = new JSONArray();
+        shareableLocationRecords = new JSONArray();
+        pendingHistorySelectionKey = "";
+        synchronized (displayAddressLock) {
+            if (displayAddressExecutor != null) {
+                displayAddressExecutor.shutdownNow();
+                displayAddressExecutor = null;
+            }
+            displayAddressWaiters.clear();
+            displayAddressCache.clear();
+        }
+        synchronized (ipGeocodeCacheLock) {
+            for (FutureTask<JSONObject> task : ipGeocodeInFlight.values()) {
+                task.cancel(true);
+            }
+            ipGeocodeInFlight.clear();
+            ipGeocodeCache.clear();
+        }
+        reclaimIdleWorkerMemory();
     }
 
-    private void attachEventStreamToContent() {
-        WebView stream = eventStreamWebView;
-        if (stream == null || content == null) {
-            return;
+    private void reclaimIdleWorkerMemory() {
+        int idleSeconds = getResources().getInteger(R.integer.worker_idle_timeout_seconds);
+        for (ExecutorService executor : new ExecutorService[] {
+            backgroundExecutor,
+            addressProbeExecutor,
+            ipProviderExecutor,
+            locationEnrichmentExecutor
+        }) {
+            if (executor instanceof ThreadPoolExecutor) {
+                ThreadPoolExecutor workerPool = (ThreadPoolExecutor) executor;
+                workerPool.setKeepAliveTime(idleSeconds, TimeUnit.SECONDS);
+                workerPool.allowCoreThreadTimeOut(true);
+                workerPool.purge();
+            }
         }
-        if (stream.getParent() instanceof ViewGroup) {
-            ((ViewGroup) stream.getParent()).removeView(stream);
-        }
-        stream.setAlpha(0f);
-        stream.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-        content.addView(stream, new LinearLayout.LayoutParams(dp(1), dp(1)));
     }
 
     private boolean handleWebViewRendererGone(WebView webView, String message) {
@@ -9444,7 +9579,6 @@ public class MainActivity extends Activity {
         invalidateScreenRequests();
         screenGeneration += 1L;
         content = card;
-        attachEventStreamToContent();
         if (center) {
             ScrollView scroll = new ScrollView(this);
             scroll.setFillViewport(true);

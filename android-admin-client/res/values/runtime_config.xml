@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <integer name="admin_heartbeat_interval_ms">60000</integer>
+    <integer name="admin_heartbeat_retry_ms">15000</integer>
+    <integer name="admin_invite_manager_max_items">20</integer>
+</resources>

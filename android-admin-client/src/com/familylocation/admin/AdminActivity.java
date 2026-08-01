@@ -14,10 +14,7 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
@@ -100,15 +97,14 @@ public class AdminActivity extends Activity {
     private static final String KEY_ACTIVE_UPDATE_DOWNLOAD_ID = "active_update_download_id";
     private static final String DEVICE_COOKIE_NAME = "loc_device";
     private static final String DEFAULT_SERVER_URL = "https://example.com/";
-    private static final int APP_VERSION_CODE = 102;
-    private static final String APP_VERSION_NAME = "2.3.7";
+    private static final int APP_VERSION_CODE = 103;
+    private static final String APP_VERSION_NAME = "2.3.8";
     private static final String ADMIN_APK_NAME = "location-admin-release.apk";
     private static final String ADMIN_UPDATE_PATH = "";
     private static final String USER_AGENT = "loc-admin-app/" + APP_VERSION_NAME + " loc-app/" + APP_VERSION_NAME;
     private static final JsonApiClient API_CLIENT = new JsonApiClient(USER_AGENT, 12_000, 12_000);
     private static final String TAG = "FamilyLocationAdmin";
     private static final long MAX_CACHE_BYTES = 50L * 1024L * 1024L;
-    private static final long STARTUP_MIN_VISIBLE_MS = 720L;
     private static final int ADMIN_TAB_OVERVIEW = 0;
     private static final int ADMIN_TAB_USERS = 1;
     private static final int ADMIN_TAB_GROUPS = 2;
@@ -126,6 +122,8 @@ public class AdminActivity extends Activity {
         new ThreadPoolExecutor.AbortPolicy()
     );
     private final AtomicBoolean adminWriteInFlight = new AtomicBoolean();
+    private final AtomicBoolean adminHeartbeatInFlight = new AtomicBoolean();
+    private final Runnable adminHeartbeatRunnable = this::sendAdminHeartbeat;
     private LinearLayout content;
     private TextView statusView;
     private JSONObject lastAdminSummary;
@@ -156,8 +154,6 @@ public class AdminActivity extends Activity {
     private volatile boolean challengeCancelled;
     private String loginDraftUsername = "";
     private String loginDraftPassword = "";
-    private long startupShownAtMs;
-    private TextView startupStatusText;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -184,7 +180,6 @@ public class AdminActivity extends Activity {
             prefs().edit().putString(KEY_SERVER_URL, normalizedServerUrl).apply();
         }
         if (!prefs().getString(KEY_SESSION_COOKIE, "").trim().isEmpty()) {
-            showStartupLoading();
             getWindow().getDecorView().post(this::checkStoredSessionThenUpdate);
             return;
         }
@@ -223,65 +218,20 @@ public class AdminActivity extends Activity {
     }
 
 
-    private void showStartupLoading() {
-        startupShownAtMs = System.currentTimeMillis();
-        statusView = null;
-
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(18), dp(18), dp(18), dp(16));
-        card.setBackground(cardBackground());
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            card.setElevation(dp(4));
-        }
-
-        card.addView(startupBadge("位置后台"), blockParams(14));
-
-        LinearLayout hero = new LinearLayout(this);
-        hero.setOrientation(LinearLayout.VERTICAL);
-        hero.setGravity(Gravity.CENTER_HORIZONTAL);
-        hero.addView(new StartupSignalView(this), new LinearLayout.LayoutParams(dp(164), dp(64)));
-
-        TextView title = startupTitle("正在进入后台");
-        title.setPadding(0, dp(16), 0, 0);
-        hero.addView(title, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        TextView indicator = body("恢复登录状态、检查后台更新，完成后会自动进入后台首页。");
-        indicator.setGravity(Gravity.CENTER_HORIZONTAL);
-        indicator.setTextColor(colorMuted());
-        indicator.setLineSpacing(dp(2), 1.15f);
-        indicator.setPadding(0, dp(8), 0, 0);
-        hero.addView(indicator, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        card.addView(hero, blockParams(18));
-
-        card.addView(startupChecklist(), blockParams(14));
-        card.addView(detailDivider(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
-
-        TextView progressLabel = sectionTitle("当前进度");
-        progressLabel.setPadding(0, dp(12), 0, 0);
-        card.addView(progressLabel, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        startupStatusText = body("正在恢复后台会话…");
-        startupStatusText.setTextColor(colorText());
-        startupStatusText.setPadding(0, dp(8), 0, 0);
-        card.addView(startupStatusText, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        setCenteredScreen(card);
-    }
     private void checkStoredSessionThenUpdate() {
         runBackground(() -> {
             try {
-                runUi(() -> updateStartupStatus("正在检查后台更新…"));
                 checkAdminUpdateThenShowHome(ADMIN_UPDATE_PATH);
             } catch (Exception exception) {
                 prefs().edit().remove(KEY_SESSION_COOKIE).apply();
-                runUi(() -> finishStartupTransition(() -> showLogin("登录已失效，请重新登录。")));
+                runUi(() -> showLogin("登录已失效，请重新登录。"));
             }
         });
     }
 
     private void showLogin(String message) {
         adminLoggedIn = false;
+        stopAdminHeartbeat();
         lastAdminSummary = null;
         LinearLayout card = screen("后台登录");
         card.addView(compactInfoPanel("当前主题：" + themeModeLabel(themeMode())), blockParams(10));
@@ -409,16 +359,10 @@ public class AdminActivity extends Activity {
             if (apkUrl.isEmpty()) {
                 throw new IllegalStateException("后台更新包地址为空。");
             }
-            runUi(() -> {
-                updateStartupStatus("检测到后台新版本，正在准备更新…");
-                finishStartupTransition(() -> showAdminUpdate(update, redirectPath));
-            });
+            runUi(() -> showAdminUpdate(update, redirectPath));
             return;
         }
-        runUi(() -> {
-            updateStartupStatus("检查完成，正在进入后台首页…");
-            finishStartupTransition(() -> showAdminHome(redirectPath));
-        });
+        runUi(() -> showAdminHome(redirectPath));
     }
 
     private void checkAdminUpdateManually(String redirectPath) {
@@ -779,6 +723,7 @@ public class AdminActivity extends Activity {
     protected void onResume() {
         super.onResume();
         activityForeground = true;
+        startAdminHeartbeat();
         long savedActiveDownload = prefs().getLong(KEY_ACTIVE_UPDATE_DOWNLOAD_ID, -1L);
         if (updateDownloadId <= 0 && savedActiveDownload > 0) {
             updateDownloadId = savedActiveDownload;
@@ -800,12 +745,14 @@ public class AdminActivity extends Activity {
     @Override
     protected void onStop() {
         activityForeground = false;
+        stopAdminHeartbeat();
         destroyManagedWebViews();
         super.onStop();
     }
 
     @Override
     protected void onDestroy() {
+        stopAdminHeartbeat();
         backgroundExecutor.shutdownNow();
         destroyManagedWebViews();
         if (updateReceiver != null) {
@@ -1087,11 +1034,8 @@ public class AdminActivity extends Activity {
 
     private void showAdminHome(String redirectPath) {
         adminLoggedIn = true;
+        startAdminHeartbeat();
         currentRedirectPath = redirectPath == null ? ADMIN_UPDATE_PATH : redirectPath;
-        LinearLayout card = screen("后台");
-        card.addView(infoPanel("后台登录已验证，正在加载原生管理概览。\n\n服务端返回入口：" + redirectPath), blockParams(14));
-        setScreen(card, true);
-        setStatus("正在加载后台数据。");
         loadAdminSummary(redirectPath);
     }
 
@@ -1181,6 +1125,65 @@ public class AdminActivity extends Activity {
             default:
                 showAdminDashboard(response, redirectPath);
         }
+    }
+
+    private void startAdminHeartbeat() {
+        if (!activityForeground || !adminLoggedIn || cookieHeader().trim().isEmpty()) {
+            return;
+        }
+        mainHandler.removeCallbacks(adminHeartbeatRunnable);
+        mainHandler.post(adminHeartbeatRunnable);
+    }
+
+    private void stopAdminHeartbeat() {
+        mainHandler.removeCallbacks(adminHeartbeatRunnable);
+    }
+
+    private void scheduleAdminHeartbeat(long delayMs) {
+        if (!activityForeground || !adminLoggedIn || cookieHeader().trim().isEmpty()) {
+            return;
+        }
+        mainHandler.removeCallbacks(adminHeartbeatRunnable);
+        mainHandler.postDelayed(adminHeartbeatRunnable, Math.max(0L, delayMs));
+    }
+
+    private void sendAdminHeartbeat() {
+        if (!activityForeground || !adminLoggedIn || cookieHeader().trim().isEmpty()) {
+            return;
+        }
+        if (!adminHeartbeatInFlight.compareAndSet(false, true)) {
+            scheduleAdminHeartbeat(adminHeartbeatRetryMs());
+            return;
+        }
+        boolean scheduled = runBackground(() -> {
+            long nextDelay = adminHeartbeatIntervalMs();
+            try {
+                postJson(AdminApiPaths.ADMIN_HEARTBEAT, new JSONObject());
+            } catch (Exception exception) {
+                nextDelay = adminHeartbeatRetryMs();
+                if (isAdminLoginExpired(exception)) {
+                    runUi(this::handleAdminLoginExpired);
+                    return;
+                }
+                Log.w(TAG, "Admin heartbeat failed: " + exceptionMessage(exception));
+            } finally {
+                adminHeartbeatInFlight.set(false);
+                long delay = nextDelay;
+                runUi(() -> scheduleAdminHeartbeat(delay));
+            }
+        });
+        if (!scheduled) {
+            adminHeartbeatInFlight.set(false);
+            scheduleAdminHeartbeat(adminHeartbeatRetryMs());
+        }
+    }
+
+    private long adminHeartbeatIntervalMs() {
+        return getResources().getInteger(R.integer.admin_heartbeat_interval_ms);
+    }
+
+    private long adminHeartbeatRetryMs() {
+        return getResources().getInteger(R.integer.admin_heartbeat_retry_ms);
     }
 
     private void switchAdminTab(int tab) {
@@ -1529,7 +1532,6 @@ public class AdminActivity extends Activity {
                 return;
             }
             if (!prefs().getString(KEY_SESSION_COOKIE, "").trim().isEmpty()) {
-                showStartupLoading();
                 getWindow().getDecorView().post(this::checkStoredSessionThenUpdate);
                 return;
             }
@@ -4362,103 +4364,6 @@ public class AdminActivity extends Activity {
         return row;
     }
 
-    private final class StartupSignalView extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final RectF frame = new RectF();
-        private final RectF beam = new RectF();
-        private float phase;
-        private final Runnable tick = new Runnable() {
-            @Override
-            public void run() {
-                phase = (phase + 0.032f) % 1f;
-                invalidate();
-                postDelayed(this, 16L);
-            }
-        };
-
-        StartupSignalView(Context context) {
-            super(context);
-            paint.setStrokeCap(Paint.Cap.ROUND);
-        }
-
-        @Override
-        protected void onAttachedToWindow() {
-            super.onAttachedToWindow();
-            post(tick);
-        }
-
-        @Override
-        protected void onDetachedFromWindow() {
-            removeCallbacks(tick);
-            super.onDetachedFromWindow();
-        }
-
-        @Override
-        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-            setMeasuredDimension(resolveSize(dp(164), widthMeasureSpec), dp(64));
-        }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            float width = getWidth();
-            float height = getHeight();
-            float radius = dp(18);
-            float centerY = height * 0.58f;
-            float trackLeft = dp(24);
-            float trackRight = width - dp(24);
-
-            frame.set(dp(1), dp(1), width - dp(1), height - dp(1));
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(isDarkMode() ? Color.rgb(19, 29, 27) : Color.rgb(246, 250, 249));
-            canvas.drawRoundRect(frame, radius, radius, paint);
-
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(1));
-            paint.setColor(colorOutline());
-            canvas.drawRoundRect(frame, radius, radius, paint);
-
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(withAlpha(colorPrimary(), isDarkMode() ? 46 : 34));
-            beam.set(trackLeft, centerY - dp(4), trackRight, centerY + dp(4));
-            canvas.drawRoundRect(beam, dp(999), dp(999), paint);
-
-            float scanWidth = dp(48);
-            float scanLeft = trackLeft + (trackRight - trackLeft - scanWidth) * phase;
-            beam.set(scanLeft, centerY - dp(5), scanLeft + scanWidth, centerY + dp(5));
-            paint.setColor(withAlpha(colorPrimary(), isDarkMode() ? 128 : 110));
-            canvas.drawRoundRect(beam, dp(999), dp(999), paint);
-
-            float[] stations = new float[] {0.16f, 0.5f, 0.84f};
-            for (int index = 0; index < stations.length; index += 1) {
-                float x = trackLeft + (trackRight - trackLeft) * stations[index];
-                float pulse = 0.45f + (((float) Math.sin((phase * Math.PI * 2f) + (index * 0.95f)) + 1f) * 0.275f);
-                paint.setStyle(Paint.Style.FILL);
-                paint.setColor(withAlpha(colorPrimary(), Math.round(255f * pulse)));
-                canvas.drawCircle(x, centerY, dp(4), paint);
-
-                paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(dp(2));
-                paint.setColor(withAlpha(colorPrimary(), Math.round(150f * pulse)));
-                canvas.drawCircle(x, centerY, dp(8), paint);
-            }
-
-            float labelTop = dp(14);
-            float barWidth = dp(10);
-            float barGap = dp(6);
-            float startX = (width - ((barWidth * 4) + (barGap * 3))) / 2f;
-            paint.setStyle(Paint.Style.FILL);
-            for (int index = 0; index < 4; index += 1) {
-                float progress = ((phase + (index * 0.12f)) % 1f);
-                float barHeight = dp(6) + (dp(10) * (0.35f + progress * 0.65f));
-                float left = startX + index * (barWidth + barGap);
-                frame.set(left, labelTop, left + barWidth, labelTop + barHeight);
-                paint.setColor(withAlpha(colorPrimary(), 170 + (index * 14)));
-                canvas.drawRoundRect(frame, dp(3), dp(3), paint);
-            }
-        }
-    }
-
     private TextView infoPanel(String text) {
         TextView view = body(text);
         view.setTextColor(colorText());
@@ -4740,37 +4645,6 @@ public class AdminActivity extends Activity {
         loginDraftPassword = "";
         setStatus("");
         showLogin("后台登录已失效，请重新登录。");
-    }
-
-    private void updateStartupStatus(String message) {
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            mainHandler.post(() -> updateStartupStatus(message));
-            return;
-        }
-        if (startupStatusText != null) {
-            startupStatusText.setText(message == null ? "" : message);
-        }
-    }
-
-    private void finishStartupTransition(Runnable action) {
-        Runnable complete = () -> {
-            startupStatusText = null;
-            startupShownAtMs = 0L;
-            if (action != null) {
-                action.run();
-            }
-        };
-        if (startupShownAtMs <= 0L) {
-            complete.run();
-            return;
-        }
-        long elapsed = System.currentTimeMillis() - startupShownAtMs;
-        long remaining = Math.max(0L, STARTUP_MIN_VISIBLE_MS - elapsed);
-        if (remaining == 0L) {
-            complete.run();
-            return;
-        }
-        mainHandler.postDelayed(complete, remaining);
     }
 
     private boolean runBackground(Runnable runnable) {
